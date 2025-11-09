@@ -12,8 +12,46 @@ import (
 var exportCmd = &cobra.Command{
 	Use:   "export",
 	Short: "Export environment variables",
-	Long:  `Export the active profile's environment variables as shell export statements.`,
-	RunE:  runExport,
+	Long: `Export the active profile's environment variables as shell export statements.
+
+WHY "eval"?
+  Shell commands cannot modify their parent process's environment variables.
+  The 'eval' command executes the output in your current shell, making the
+  variables available in your session.
+
+USAGE
+  eval $(claudecm export)
+
+SHORTCUTS
+  Add to your shell config for convenience:
+
+  # Option 1: Alias for quick loading
+  alias cmload='eval $(claudecm export)'
+
+  # Option 2: Auto-load active profile on shell start
+  if command -v claudecm &> /dev/null; then
+    eval $(claudecm export 2>/dev/null)
+  fi
+
+  # Option 3: Combined switch and load function
+  cmswitch() {
+    claudecm switch "$@" && eval $(claudecm export)
+  }
+
+EXAMPLES
+  # Load active profile
+  eval $(claudecm export)
+
+  # Switch and load in one command
+  claudecm switch prod && eval $(claudecm export)
+
+  # Using alias (after setup)
+  cmload
+
+SEE ALSO
+  claudecm switch --shell    Start new shell with profile loaded
+  claudecm switch --init     Activation mode (like Python venv)`,
+	RunE: runExport,
 }
 
 func init() {
