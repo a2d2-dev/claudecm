@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/imneov/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

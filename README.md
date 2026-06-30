@@ -15,7 +15,7 @@
 ### From Source
 
 ```bash
-git clone https://github.com/imneov/claudecm
+git clone https://github.com/a2d2-dev/claudecm
 cd claudecm
 make install
 ```
@@ -23,7 +23,7 @@ make install
 ### Using Go
 
 ```bash
-go install github.com/imneov/claudecm@latest
+go install github.com/a2d2-dev/claudecm@latest
 ```
 
 ## Quick Start
