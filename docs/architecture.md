@@ -26,7 +26,7 @@ This is a brand-new Go CLI project. We'll use:
 
 ### Technical Summary
 
-Claudecm is a **standalone CLI application** built with Go, following a **layered architecture** pattern. The system consists of three main layers: CLI interface (Cobra commands), business logic (config management, encryption), and storage (local filesystem). It uses **local YAML files** for configuration storage with **file-based state management**, eliminating external dependencies. The architecture prioritizes **simplicity, performance, and security**, aligning with the PRD goals of millisecond-level switching and developer-friendly UX.
+Claudecm is a **standalone CLI application** built with Go, following a **layered architecture** pattern. The system consists of three main layers: CLI interface (Cobra commands), business logic (config management), and storage (local filesystem). It uses **local YAML files** for configuration storage with **file-based state management**, eliminating external dependencies. The architecture prioritizes **simplicity, performance, and safe file handling**, aligning with the PRD goals of millisecond-level switching and developer-friendly UX. Storage is plaintext YAML with file mode `0600`; encryption is deferred post-v1 (see ADR-0001).
 
 ### High Level Overview
 
@@ -107,7 +107,6 @@ Post-MVP cloud features (sync, team sharing) will use:
 | **CI/CD** | GitHub Actions | N/A | Automated testing and release | Free for public repos, Go preinstalled, goreleaser integration |
 | **Linter** | golangci-lint | 1.55.2 | Code quality | Meta-linter, fast, configurable |
 | **Package Manager** | Homebrew | N/A | macOS/Linux distribution | De facto standard for CLI tools |
-| **Encryption** | crypto/aes | stdlib (Post-MVP) | Config encryption | Built-in, FIPS-compliant, no external deps |
 
 ---
 
@@ -405,7 +404,7 @@ sequenceDiagram
 ```yaml
 name: anthropic-us
 base_url: https://api.anthropic.com
-auth_token: sk-ant-api03-xxxxx  # Encrypted in Post-MVP
+auth_token: sk-ant-api03-xxxxx  # Plaintext in v1 (encryption deferred post-v1)
 model: claude-sonnet-4
 description: "Anthropic US Production API"
 custom_env:
@@ -847,10 +846,8 @@ func NewTestProfile(name string) Profile {
 
 ### Secrets Management
 
-- **Development:** Plaintext YAML in MVP (acceptable for local tool)
-- **Production (Post-MVP):** AES-256 encryption for auth_token field
-  - Use OS keyring (macOS Keychain, Windows Credential Manager, Linux Secret Service)
-  - Encryption key derived from machine-specific data + user password
+- **v1:** Plaintext YAML, file mode `0600`, directory mode `0700`. No encryption ships in v1.
+- **Post-v1:** Encryption-at-rest is deferred and will be re-evaluated in a follow-up ADR; no specific scheme is promised here.
 - **Code Requirements:**
   - NEVER log auth tokens (replace with `***` in logs)
   - Clear token strings from memory after use (best-effort, Go GC limitation)
