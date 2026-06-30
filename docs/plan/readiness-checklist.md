@@ -33,3 +33,7 @@
 - Writes to a tool-owned file without routing through `internal/writepath.Apply`.
 - Reduces test coverage below the gate set by NFR-T1 (≥ 80% on `writepath` / `commit` / `resolver`).
 - Re-introduces AES / "secure storage" language or a crypto dependency.
+
+---
+
+Patched 2026-07-01 per readiness audit GO-WITH-FIXES (PR #6 follow-up).

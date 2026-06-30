@@ -30,15 +30,15 @@
 15. **E3-S3** — `claudecode`: `Import` (read `~/.claude/settings.json`, project into Core + Overlay)
 16. **E3-S4** — `claudecode`: `Plan` + render via `sjson`/`gjson` (preserve order + non-owned bytes)
 17. **E3-S5** — `claudecode`: `Apply` (calls `writepath.Apply`)
-18. **E3-S7** — `claudecode` fixture matrix (lands with E3-S5 per rule 5: happy + edge: BOM, CRLF, comments, symlink, missing, unknown-keys-mixed)
-19. **E3-S6** — `claudecode`: `Project` → `EffectiveView`
+18. **E3-S6** — `claudecode`: `Project` → `EffectiveView` (moved ahead of E3-S7 2026-07-01 per readiness audit: `Project` must exist before the fixture matrix can verify effective-view rendering against it)
+19. **E3-S7** — `claudecode` fixture matrix (lands with E3-S5 per rule 5: happy + edge: BOM, CRLF, comments, symlink, missing, unknown-keys-mixed)
 20. **E4-S1** — `codex`: `Detect` + `Files` (both `config.toml` + `auth.json`) + per-file owned-key allowlist `var`s
 21. **E4-S2** — TOML parser plumbing via `pelletier/go-toml/v2` doc model (comment + order preservation)
 22. **E4-S3** — `codex`: `Import` (read `config.toml` + `auth.json`)
 23. **E4-S4** — `codex`: `Plan` + render for both files
 24. **E4-S5** — `codex`: `Apply` (per-file; cross-file ordering deferred to E7)
-25. **E4-S7** — `codex` fixture matrix (lands with E4-S5 per rule 5)
-26. **E4-S6** — `codex`: `Project` → `EffectiveView`
+25. **E4-S6** — `codex`: `Project` → `EffectiveView` (moved ahead of E4-S7 2026-07-01 per readiness audit, mirrors the E3-S6/S7 fix)
+26. **E4-S7** — `codex` fixture matrix (lands with E4-S5 per rule 5)
 27. **E5-S1** — Resolver types: `EffectiveView`, `EffectiveField`, `ShadowEntry`, `Layer`
 28. **E5-S2** — `resolver.Resolve` layered chain implementation
 29. **E5-S3** — EnvOverride per-tool allowlist (NFR-E1) + `envextract` wiring
@@ -50,6 +50,7 @@
 35. **E7-S4** — Rollback path: rename FR-5 step-6 backups over already-committed targets
 36. **E7-S5** — `PartialFailure` structured error + per-file `committed | rolled-back | untouched` enumeration
 37. **E6-S1** — `cmd/current` (active profile + per-tool effective summary + drift warning)
+37a. **E6-S10** — `cmd/list` (all profiles + active marker + default redaction + `--reveal` + `--output json`; refuses on corrupt store) (inserted 2026-07-01 per readiness audit — slots alongside `current` because both are read-only inventory commands; depends only on E1-S1 + E1-S7)
 38. **E6-S2** — `cmd/switch` refactor: pre-apply diff via `Plan`, `--dry-run`, `--yes`, routed through `commit.Commit` **← needs E5-S5 + E7 complete**
 39. **E6-S3** — `cmd/add` refactor to unified schema + `--dry-run`
 40. **E6-S4** — `cmd/import {claude-code|codex}` with `--name`, `--yes`, `--overwrite`, `--dry-run`
