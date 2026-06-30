@@ -95,12 +95,12 @@ func outputCompact(profiles []*config.Profile, activeName string) error {
 		}
 
 		// Extract hostname from URL for compact display
-		baseURL := profile.BaseURL
+		baseURL := profile.Core.BaseURL
 		baseURL = strings.TrimPrefix(baseURL, "https://")
 		baseURL = strings.TrimPrefix(baseURL, "http://")
 
 		// Model
-		model := profile.Model
+		model := profile.Core.Model
 		if model == "" {
 			model = "-"
 		}
@@ -139,22 +139,22 @@ func outputDetailed(profiles []*config.Profile, activeName string) error {
 		fmt.Println("┐")
 
 		// Content
-		fmt.Printf("│ %-11s %-46s │\n", "Base URL", profile.BaseURL)
+		fmt.Printf("│ %-11s %-46s │\n", "Base URL", profile.Core.BaseURL)
 
-		model := profile.Model
+		model := profile.Core.Model
 		if model == "" {
 			model = "(not set)"
 		}
 		fmt.Printf("│ %-11s %-46s │\n", "Model", model)
 
-		// Small fast model from custom env
-		if smallModel, ok := profile.CustomEnv["ANTHROPIC_SMALL_FAST_MODEL"]; ok && smallModel != "" {
-			fmt.Printf("│ %-11s %-46s │\n", "Small Model", smallModel)
+		// Small fast model from typed core field
+		if profile.Core.SmallFastModel != "" {
+			fmt.Printf("│ %-11s %-46s │\n", "Small Model", profile.Core.SmallFastModel)
 		}
 
-		// Auth token (masked)
-		authToken := maskToken(profile.AuthToken)
-		fmt.Printf("│ %-11s %-46s │\n", "Auth Token", authToken)
+		// API key (masked)
+		apiKey := maskToken(profile.Core.APIKey)
+		fmt.Printf("│ %-11s %-46s │\n", "API Key", apiKey)
 
 		// Description
 		if profile.Description != "" {
@@ -172,23 +172,25 @@ func outputDetailed(profiles []*config.Profile, activeName string) error {
 // outputJSON outputs profiles in JSON format
 func outputJSON(profiles []*config.Profile, activeName string) error {
 	type profileJSON struct {
-		Name        string            `json:"name"`
-		BaseURL     string            `json:"base_url"`
-		Model       string            `json:"model,omitempty"`
-		Description string            `json:"description,omitempty"`
-		CustomEnv   map[string]string `json:"custom_env,omitempty"`
-		Active      bool              `json:"active"`
+		Name           string            `json:"name"`
+		BaseURL        string            `json:"base_url"`
+		Model          string            `json:"model,omitempty"`
+		SmallFastModel string            `json:"small_fast_model,omitempty"`
+		Description    string            `json:"description,omitempty"`
+		ExtraEnv       map[string]string `json:"extra_env,omitempty"`
+		Active         bool              `json:"active"`
 	}
 
 	result := make([]profileJSON, len(profiles))
 	for i, p := range profiles {
 		result[i] = profileJSON{
-			Name:        p.Name,
-			BaseURL:     p.BaseURL,
-			Model:       p.Model,
-			Description: p.Description,
-			CustomEnv:   p.CustomEnv,
-			Active:      p.Name == activeName,
+			Name:           p.Name,
+			BaseURL:        p.Core.BaseURL,
+			Model:          p.Core.Model,
+			SmallFastModel: p.Core.SmallFastModel,
+			Description:    p.Description,
+			ExtraEnv:       p.Core.ExtraEnv,
+			Active:         p.Name == activeName,
 		}
 	}
 

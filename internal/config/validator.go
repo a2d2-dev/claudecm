@@ -38,20 +38,29 @@ func (v *DefaultValidator) ValidateProfile(profile *Profile) error {
 		return err
 	}
 
-	// Validate base URL
-	if err := v.ValidateURL(profile.BaseURL); err != nil {
-		return fmt.Errorf("invalid base_url: %w", err)
+	// Validate base URL on the core block.
+	if err := v.ValidateURL(profile.Core.BaseURL); err != nil {
+		return fmt.Errorf("invalid core.base_url: %w", err)
 	}
 
-	// Validate auth token
-	if err := v.ValidateToken(profile.AuthToken); err != nil {
-		return fmt.Errorf("invalid auth_token: %w", err)
+	// Validate API key on the core block.
+	if err := v.ValidateToken(profile.Core.APIKey); err != nil {
+		return fmt.Errorf("invalid core.api_key: %w", err)
 	}
 
-	// Validate custom environment variable keys
-	for key := range profile.CustomEnv {
+	// Validate core extra_env keys.
+	for key := range profile.Core.ExtraEnv {
 		if err := v.ValidateEnvKey(key); err != nil {
-			return fmt.Errorf("invalid custom_env key %q: %w", key, err)
+			return fmt.Errorf("invalid core.extra_env key %q: %w", key, err)
+		}
+	}
+
+	// Validate any tool overlay extra_env keys too.
+	for tool, overlay := range profile.Tools {
+		for key := range overlay.ExtraEnv {
+			if err := v.ValidateEnvKey(key); err != nil {
+				return fmt.Errorf("invalid tools.%s.extra_env key %q: %w", tool, key, err)
+			}
 		}
 	}
 
