@@ -21,7 +21,7 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - Lock wrapper uses `gofrs/flock`, 5s default timeout, `--lock-timeout` override.
 - `~/.claudecm/` dir mode `0700`, all files `0600`, mode re-asserted on every write.
 
-**Stories.** E1-S1, E1-S2, E1-S3, E1-S4, E1-S5, E1-S6, E1-S7.
+**Stories.** E1-S1 (L — promoted from M to cover legacy-field migration: `auth_token` / `custom_env` callers ported to the new shape), E1-S2, E1-S3, E1-S4, E1-S5, E1-S6, E1-S7.
 
 ---
 
@@ -104,7 +104,7 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - `export` is the **secondary** activation path; does NOT redact by default; supports `--format yaml` and `--redact`.
 - Default redaction is on for `list`, `current`, `explain`; `--reveal` flips it and emits a stderr notice.
 
-**Stories.** E6-S1, E6-S2, E6-S3, E6-S4, E6-S5, E6-S6, E6-S7, E6-S8, E6-S9.
+**Stories.** E6-S1, E6-S2, E6-S3, E6-S4, E6-S5, E6-S6, E6-S7, E6-S8, E6-S9, E6-S10 (`cmd/list` — added 2026-07-01 per readiness audit, fills the FR-3 listing gap).
 
 ---
 
@@ -161,8 +161,8 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - E3: 7 stories
 - E4: 7 stories
 - E5: 5 stories
-- E6: 9 stories
+- E6: 10 stories
 - E7: 5 stories
 - E8: 6 stories
 - E9: 4 stories
-- **Total: 9 epics, 55 stories.**
+- **Total: 9 epics, 56 stories.**
