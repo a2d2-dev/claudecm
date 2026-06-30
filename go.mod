@@ -1,4 +1,4 @@
-module github.com/imneov/claudecm
+module github.com/a2d2-dev/claudecm
 
 go 1.21
 

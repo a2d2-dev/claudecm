@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/imneov/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/config"
 )
 
 // ToMap exports profile environment variables as a map

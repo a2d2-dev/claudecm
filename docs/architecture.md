@@ -936,7 +936,7 @@ func SafeWriteFile(path string, data []byte) error {
 
 1. **Initialize Go Module:**
    ```bash
-   go mod init github.com/imneov/claudecm
+   go mod init github.com/a2d2-dev/claudecm
    go get github.com/spf13/cobra@v1.8.0
    go get github.com/AlecAivazis/survey/v2@v2.3.7
    go get gopkg.in/yaml.v3

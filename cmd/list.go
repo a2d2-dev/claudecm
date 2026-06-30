@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/imneov/claudecm/internal/config"
-	"github.com/imneov/claudecm/internal/storage"
+	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/storage"
 	"github.com/spf13/cobra"
 )
 

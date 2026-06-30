@@ -3,7 +3,7 @@ package envextract
 import (
 	"os"
 
-	"github.com/imneov/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/config"
 )
 
 // ClaudeEnvVars defines the environment variables used by Claude Code
