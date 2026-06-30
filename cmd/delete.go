@@ -10,11 +10,12 @@ import (
 )
 
 var deleteCmd = &cobra.Command{
-	Use:   "delete [profile-name]",
-	Short: "Delete a profile",
-	Long:  `Delete a Claude Code environment profile.`,
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runDelete,
+	Use:               "delete [profile-name]",
+	Short:             "Delete a profile",
+	Long:              `Delete a Claude Code environment profile.`,
+	Args:              cobra.MaximumNArgs(1),
+	ValidArgsFunction: profileNamesCompletion,
+	RunE:              runDelete,
 }
 
 func init() {
