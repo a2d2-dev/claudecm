@@ -45,6 +45,24 @@ func ParseProfile(data []byte) (*Profile, error) {
 
 	switch {
 	case version == CurrentProfileSchemaVersion:
+		// Strict no-silent-drop check for v1: refuse unknown top-level keys
+		// with the same treatment as the legacy/migration path. The probe map
+		// is already populated, so we reuse it for consistent error
+		// formatting (NFR-M1, CLAUDE.md no-fallback-writes rule).
+		for k := range probe {
+			switch k {
+			case "schema_version", "name", "description",
+				"created_at", "updated_at", "core", "tools":
+				// known v1 key
+			default:
+				return nil, fmt.Errorf(
+					"profile has schema_version %d and contains unknown top-level key %q; "+
+						"refusing to load — fix the file or remove the stray key",
+					version, k,
+				)
+			}
+		}
+
 		var p Profile
 		if err := yaml.Unmarshal(data, &p); err != nil {
 			return nil, fmt.Errorf("malformed v1 profile YAML: %w", err)

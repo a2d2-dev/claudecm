@@ -30,7 +30,10 @@ func TestProfile_String(t *testing.T) {
 		wantToken string
 	}{
 		{
-			name: "short token",
+			// A short non-empty token (<= 10 chars) must be redacted whole —
+			// printing it raw would defeat the purpose of redaction since a
+			// 5-char secret has no useful prefix/suffix to preserve.
+			name: "short token redacted to stars",
 			profile: &Profile{
 				Name: "test",
 				Core: CoreConfig{
@@ -38,7 +41,7 @@ func TestProfile_String(t *testing.T) {
 					APIKey:  "short",
 				},
 			},
-			wantToken: "short",
+			wantToken: "APIKey: ***",
 		},
 		{
 			name: "long token redacted",
@@ -53,6 +56,21 @@ func TestProfile_String(t *testing.T) {
 			// in between, so the trailing 5-x suffix yields exactly "xxxx".
 			wantToken: "sk-a...xxxx",
 		},
+		{
+			// An empty api_key has nothing to redact; existing convention is
+			// an empty inline value rather than a literal "***" or an omitted
+			// line. We assert the existing shape stays exactly "APIKey: ,"
+			// (i.e. no stars, no missing field).
+			name: "empty token renders empty inline",
+			profile: &Profile{
+				Name: "test",
+				Core: CoreConfig{
+					BaseURL: "https://api.test.com",
+					APIKey:  "",
+				},
+			},
+			wantToken: "APIKey: , ",
+		},
 	}
 
 	for _, tt := range tests {
@@ -60,6 +78,12 @@ func TestProfile_String(t *testing.T) {
 			result := tt.profile.String()
 			assert.Contains(t, result, tt.profile.Name)
 			assert.Contains(t, result, tt.wantToken)
+			// Defence in depth: a raw short secret must never appear in the
+			// redacted form, regardless of what we asserted above.
+			if tt.profile.Core.APIKey != "" && len(tt.profile.Core.APIKey) <= 10 {
+				assert.NotContains(t, result, tt.profile.Core.APIKey,
+					"raw short token leaked into Profile.String() output")
+			}
 		})
 	}
 }

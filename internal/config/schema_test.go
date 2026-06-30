@@ -179,6 +179,35 @@ mystery_field: something
 	assert.Contains(t, err.Error(), "unknown key")
 }
 
+// TestParseProfile_V1WithUnknownKeysRefused is the v1 analogue of
+// TestParseProfile_MissingSchemaVersionWithUnknownKeysRefused: a file that
+// declares schema_version: 1 but contains stray top-level keys must be
+// refused, not silently dropped. This guards against typo'd renames (e.g.
+// `tols:` instead of `tools:`) and pre-E1-S1 leftover keys (e.g.
+// `auth_token:`) that would otherwise be invisible at load time.
+func TestParseProfile_V1WithUnknownKeysRefused(t *testing.T) {
+	yamlData := `schema_version: 1
+name: typo-victim
+auth_token: leftover
+tols: typo
+core:
+  base_url: https://api.example.test
+  api_key: real-key-aaaaaaaaaaaa
+`
+	got, err := ParseProfile([]byte(yamlData))
+	require.Error(t, err)
+	assert.Nil(t, got, "must not return a partially populated profile on unknown-key refusal")
+	// The error must name at least one of the offending keys so the operator
+	// can find the typo without re-reading the whole file. The probe map
+	// iteration order is non-deterministic, so accept either name.
+	msg := err.Error()
+	assert.True(t,
+		strings.Contains(msg, `"auth_token"`) || strings.Contains(msg, `"tols"`),
+		"error must name an offending key, got: %s", msg,
+	)
+	assert.Contains(t, msg, "unknown top-level key")
+}
+
 // TestParseProfile_MalformedYAMLErrors covers AC: malformed YAML → error,
 // never a partial Profile. No rewrite is attempted (no-fallback-writes).
 func TestParseProfile_MalformedYAMLErrors(t *testing.T) {

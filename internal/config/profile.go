@@ -101,14 +101,28 @@ func NewProfile(name, baseURL, apiKey string) *Profile {
 	}
 }
 
-// String returns a string representation with the API key redacted.
+// String returns a string representation with the API key unconditionally
+// redacted. An empty key renders empty (no token to hide); any non-empty key
+// short enough to be guessable in full (<= 10 chars) renders as "***"; longer
+// keys keep first/last 4 chars with "..." in between so an operator can still
+// disambiguate which credential is loaded without exposing it whole.
 func (p *Profile) String() string {
-	token := p.Core.APIKey
-	if len(token) > 10 {
-		token = token[:4] + "..." + token[len(token)-4:]
-	}
+	token := redactAPIKey(p.Core.APIKey)
 	return fmt.Sprintf("Profile{Name: %s, BaseURL: %s, APIKey: %s, Model: %s}",
 		p.Name, p.Core.BaseURL, token, p.Core.Model)
+}
+
+// redactAPIKey is the canonical redaction for api_key values rendered out of a
+// Profile. Centralising it here ensures every Profile-side renderer applies
+// the same rule (empty → empty; short → ***; long → first4...last4).
+func redactAPIKey(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) <= 10 {
+		return "***"
+	}
+	return token[:4] + "..." + token[len(token)-4:]
 }
 
 // Touch updates the UpdatedAt timestamp.
