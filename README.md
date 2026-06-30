@@ -5,10 +5,11 @@
 ## Features
 
 - 🚀 **Fast switching** - Change environments in milliseconds
-- 🔒 **Secure storage** - Config files stored with restrictive permissions (600)
 - 📝 **Human-readable** - YAML configuration format
 - 🎨 **Interactive UI** - Beautiful terminal prompts and selection
 - 💻 **Cross-platform** - Works on macOS, Linux, and Windows
+
+> **Storage:** Profiles stored as plaintext YAML in `~/.claudecm/` with file mode `0600`. Encryption is deferred post-v1.
 
 ## Installation
 
