@@ -1,967 +1,424 @@
-# Claude Code Environment Manager (claudecm) Architecture Document
+# claudecm Architecture (v1)
 
-## Introduction
+> **Authority.** This document is subordinate to:
+> 1. `docs/decisions/0001-direction-lock.md` (ADR-0001).
+> 2. `docs/prd/prd-v1.md` (canonical PRD mirror).
+>
+> Where this file disagrees with either, those win and this file is the bug. The architect's job is to make those documents mechanical: concrete packages, concrete interfaces, concrete invariants — no hand-waving.
 
-This document outlines the overall project architecture for **claudecm**, a CLI tool for managing Claude Code environment configurations. The system uses Go's native capabilities to provide a fast, cross-platform environment management solution with minimal dependencies.
-
-### Starter Template or Existing Project
-
-**N/A - Greenfield project**
-
-This is a brand-new Go CLI project. We'll use:
-- Go 1.21+ with standard library
-- Cobra for CLI framework (industry standard, used by kubectl, gh, etc.)
-- Survey/Bubbletea for interactive TUI
-- No starter template - following Go CLI best practices
-
-### Change Log
+## Change Log
 
 | Date | Version | Description | Author |
 |------|---------|-------------|--------|
-| 2025-10-31 | 1.0 | Initial architecture document | Winston (Architect Agent) |
+| 2025-10-31 | 0.1 | Initial pre-ADR draft | Winston |
+| 2026-07-01 | 1.0 | Rewrite aligned to ADR-0001 + PRD v1 (FR-1..FR-16, NFR-S/C/R/E/M/T) | Architect |
 
----
+## 0. Scope Boundary (mirror of ADR-0001 §Locked Decisions)
 
-## High Level Architecture
+In v1, claudecm is:
+- A local-first Go CLI under module path `github.com/a2d2-dev/claudecm`.
+- A profile manager for **exactly two** AI coding tools: **Claude Code** and **Codex CLI**.
+- Plaintext YAML profile storage at `~/.claudecm/` (`0700` dir, `0600` files). **No** encryption. **No** cryptographic claims anywhere in code, docs, or marketing.
+- Primary activation = direct write to the tool's on-disk config file, routed through the locked write-path invariant (PRD FR-5). Secondary activation = `export` emits shell `export VAR=...` lines.
 
-### Technical Summary
+Out for v1 (architecture must not host code for any of these): Gemini CLI / Cursor / Windsurf / IDE plugins, MCP server management, Skills management, cloud sync, team sharing, RBAC, SSO, audit/cost dashboards, GUI/TUI, proxy/failover/load balancing, project-scope `.claude/settings*.json`, built-in encryption.
 
-Claudecm is a **standalone CLI application** built with Go, following a **layered architecture** pattern. The system consists of three main layers: CLI interface (Cobra commands), business logic (config management), and storage (local filesystem). It uses **local YAML files** for configuration storage with **file-based state management**, eliminating external dependencies. The architecture prioritizes **simplicity, performance, and safe file handling**, aligning with the PRD goals of millisecond-level switching and developer-friendly UX. Storage is plaintext YAML with file mode `0600`; encryption is deferred post-v1 (see ADR-0001).
-
-### High Level Overview
-
-**Architecture Style:** Monolithic CLI Application
-**Repository Structure:** Monorepo (single Go module)
-**Service Architecture:** Local-first, no server components
-**Primary Flow:**
-1. User invokes command → Cobra parses and routes
-2. Command layer validates input → calls business logic
-3. Business logic reads/writes config files → returns result
-4. Result formatted and displayed to user
-
-**Key Decisions:**
-- **Local-first:** No cloud dependencies in MVP (faster, simpler, privacy-first)
-- **YAML storage:** Human-readable, git-friendly, easy to backup
-- **Cobra framework:** Industry standard, excellent docs, proven in production
-- **Survey for TUI:** Simple API, good UX, actively maintained
-
-### High Level Project Diagram
+## 1. High-Level Shape
 
 ```mermaid
 graph TD
-    User[User Terminal] --> CLI[Cobra CLI Layer]
-    CLI --> Add[Add Command]
-    CLI --> List[List Command]
-    CLI --> Switch[Switch Command]
-    CLI --> Export[Export Command]
-    CLI --> Delete[Delete Command]
-
-    Add --> ConfigMgr[Config Manager]
-    List --> ConfigMgr
-    Switch --> ConfigMgr
-    Export --> ConfigMgr
-    Delete --> ConfigMgr
-
-    ConfigMgr --> Storage[Storage Layer]
-    ConfigMgr --> Validator[Config Validator]
-
-    Storage --> FS[~/.claudecm/<br/>YAML Files]
-
-    Switch --> UI[Interactive UI<br/>Survey/Bubbletea]
+    User[User Terminal] --> CLI[cmd/* Cobra commands]
+    CLI --> Resolver[internal/resolver<br/>layered EffectiveView]
+    CLI --> Commit[internal/commit<br/>2-phase cross-file commit]
+    Commit --> WP[internal/writepath<br/>Apply invariant FR-5]
+    Commit --> A1[internal/adapter/claudecode]
+    Commit --> A2[internal/adapter/codex]
+    A1 --> WP
+    A2 --> WP
+    Resolver --> A1
+    Resolver --> A2
+    Resolver --> EE[internal/envextract<br/>EnvOverride detection]
+    Resolver --> Cfg[internal/config<br/>Profile + schema_version]
+    WP --> Storage[internal/storage<br/>lock + atomic + backup + retention]
+    Cfg --> Storage
+    UI[internal/ui<br/>prompts + redaction] --> CLI
+    Export[internal/export<br/>secondary activation] --> CLI
 ```
 
-### Architectural and Design Patterns
+The flow that matters: a write command (`switch`, `import`, `edit`, `restore`, sometimes `add`) calls the adapter to produce a `WritePlan` per owned file, the commit package orders those plans into a two-phase commit, and every individual file write goes through `writepath.Apply`. There is no other path to disk for tool-config files. The CLI shell is thin — Cobra glue, prompts, formatting.
 
-- **Command Pattern:** Each CLI command is a separate handler with clear responsibility - _Rationale:_ Cobra's idiomatic pattern, enables easy testing and command composition
-- **Repository Pattern:** Abstract config storage/retrieval operations - _Rationale:_ Allows future storage backends (cloud sync) without changing business logic
-- **Singleton Pattern:** Single config manager instance per execution - _Rationale:_ Ensures consistent state and prevents concurrent file access issues
-- **Builder Pattern:** Config creation with validation - _Rationale:_ Fluent API for complex config objects, ensures validity before persistence
-- **Strategy Pattern:** Different export formats (shell, JSON, env file) - _Rationale:_ Enables flexible output formats based on user needs
+## 2. Data Model
 
----
+### 2.1 Profile
 
-## Tech Stack
+The Profile is the canonical user-facing unit. Stored as YAML, one file per profile under `~/.claudecm/profiles/<name>.yaml`. Schema (Go, illustrative; field names match the YAML form via `yaml:""` tags):
 
-### Cloud Infrastructure
+```go
+type Profile struct {
+    SchemaVersion int                  // required, must be 1; rejected on read if missing/unknown
+    Name          string
+    Description   string
+    CreatedAt     time.Time
+    UpdatedAt     time.Time
+    Core          CoreConfig
+    Tools         map[ToolID]ToolOverlay // sparse: only the tools the user actually overrides
+}
 
-**N/A** - This is a local CLI tool with no cloud dependencies in MVP.
+type CoreConfig struct {
+    Provider       string
+    BaseURL        string
+    APIKey         string   // plaintext in v1, redacted on display unless --reveal
+    Model          string
+    SmallFastModel string
+    ExtraEnv       map[string]string // extra pass-through env, scoped per resolver allowlist
+}
 
-Post-MVP cloud features (sync, team sharing) will use:
-- **Provider:** User-choice (GitHub Gist, AWS S3, self-hosted)
-- **Key Services:** Object storage for config backup
-- **Deployment Regions:** Global (client-side tool)
+type ToolOverlay struct {
+    BaseURL        string
+    APIKey         string
+    Model          string
+    SmallFastModel string
+    ExtraEnv       map[string]string
+    Raw            map[string]any // tool-private overlay knobs, opaque to core
+}
 
-### Technology Stack Table
-
-| Category | Technology | Version | Purpose | Rationale |
-|----------|------------|---------|---------|-----------|
-| **Language** | Go | 1.21+ | Primary development language | Fast compilation, single binary, excellent stdlib, cross-platform |
-| **CLI Framework** | Cobra | 1.8.0 | Command-line interface structure | Industry standard (kubectl, gh), excellent docs, auto-help generation |
-| **Interactive UI** | Survey v2 | 2.3.7 | TUI prompts and selection | Simple API, beautiful output, actively maintained |
-| **Config Format** | YAML | gopkg.in/yaml.v3 | Configuration file format | Human-readable, git-friendly, Go native support |
-| **File Permissions** | Unix permissions | stdlib | Secure file access (600) | Native OS integration, no external deps |
-| **Testing** | Go testing | stdlib | Unit and integration tests | Built-in, fast, table-driven tests |
-| **Mocking** | testify/mock | 1.9.0 | Test doubles | Simple assertions, readable mocks |
-| **Build Tool** | Go build | stdlib | Compilation | Native, cross-compilation support |
-| **Release Tool** | goreleaser | 1.24.0 | Multi-platform binaries | Automates builds, Homebrew formulas, checksums |
-| **CI/CD** | GitHub Actions | N/A | Automated testing and release | Free for public repos, Go preinstalled, goreleaser integration |
-| **Linter** | golangci-lint | 1.55.2 | Code quality | Meta-linter, fast, configurable |
-| **Package Manager** | Homebrew | N/A | macOS/Linux distribution | De facto standard for CLI tools |
-
----
-
-## Data Models
-
-### Config Profile
-
-**Purpose:** Represents a single Claude Code environment configuration with all necessary environment variables.
-
-**Key Attributes:**
-- `name`: string - Unique identifier for the profile (e.g., "anthropic-us", "moonshot-dev")
-- `base_url`: string - API base URL (e.g., "https://api.anthropic.com")
-- `auth_token`: string - API authentication token (sensitive)
-- `model`: string - Default model name (e.g., "claude-sonnet-4")
-- `custom_env`: map[string]string - Additional custom environment variables
-- `created_at`: time.Time - Profile creation timestamp
-- `updated_at`: time.Time - Last modification timestamp
-- `description`: string - Optional human-readable description
-
-**Relationships:**
-- One profile is "active" at a time (stored in state file)
-- Profiles are independent (no inheritance or composition in MVP)
-
-### State File
-
-**Purpose:** Tracks the currently active configuration profile.
-
-**Key Attributes:**
-- `current_profile`: string - Name of the active profile
-- `last_switched`: time.Time - When the active profile was set
-- `version`: string - State file format version (for future compatibility)
-
-**Relationships:**
-- References one Config Profile by name
-- Single state file per installation
-
----
-
-## Components
-
-### CLI Command Layer
-
-**Responsibility:** Parse user input, validate arguments, coordinate command execution, format output
-
-**Key Interfaces:**
-- `Execute()` - Cobra's entry point for each command
-- `RunE(cmd *cobra.Command, args []string) error` - Command execution logic
-
-**Dependencies:**
-- Config Manager (business logic)
-- Interactive UI (for interactive commands)
-
-**Technology Stack:**
-- Cobra for command parsing
-- Standard error handling with exit codes
-- Color output using Cobra's built-in support
-
-### Config Manager
-
-**Responsibility:** Core business logic for config CRUD operations, validation, and state management
-
-**Key Interfaces:**
-- `AddProfile(profile Profile) error` - Create new profile
-- `ListProfiles() ([]Profile, error)` - Retrieve all profiles
-- `GetProfile(name string) (Profile, error)` - Get specific profile
-- `UpdateProfile(name string, profile Profile) error` - Modify existing profile
-- `DeleteProfile(name string) error` - Remove profile
-- `SetActive(name string) error` - Mark profile as active
-- `GetActive() (Profile, error)` - Get currently active profile
-- `ExportEnv(format string) (string, error)` - Generate env export statements
-
-**Dependencies:**
-- Storage Layer (persistence)
-- Validator (config validation)
-
-**Technology Stack:**
-- Pure Go with standard library
-- Thread-safe operations (mutex for concurrent access)
-
-### Storage Layer
-
-**Responsibility:** Abstract filesystem operations, handle file I/O, manage config directory structure
-
-**Key Interfaces:**
-- `SaveProfile(profile Profile) error` - Write profile to disk
-- `LoadProfile(name string) (Profile, error)` - Read profile from disk
-- `LoadAllProfiles() ([]Profile, error)` - Read all profiles
-- `DeleteProfile(name string) error` - Remove profile file
-- `SaveState(state State) error` - Write state file
-- `LoadState() (State, error)` - Read state file
-- `EnsureConfigDir() error` - Create ~/.claudecm if not exists
-
-**Dependencies:**
-- Filesystem (stdlib `os`, `path/filepath`)
-- YAML encoder/decoder
-
-**Technology Stack:**
-- `gopkg.in/yaml.v3` for serialization
-- `os.OpenFile` with 0600 permissions
-- Atomic writes (write to temp file, then rename)
-
-### Config Validator
-
-**Responsibility:** Validate profile data before saving, ensure API URLs are well-formed, check for required fields
-
-**Key Interfaces:**
-- `ValidateProfile(profile Profile) error` - Full profile validation
-- `ValidateURL(url string) error` - Check URL format
-- `ValidateToken(token string) error` - Basic token format check
-
-**Dependencies:** None (pure validation logic)
-
-**Technology Stack:**
-- `net/url` for URL parsing
-- Custom validation rules
-- Composable validation functions
-
-### Interactive UI
-
-**Responsibility:** Provide rich TUI experience for profile selection, confirmation prompts, progress indicators
-
-**Key Interfaces:**
-- `SelectProfile(profiles []Profile) (string, error)` - Interactive profile picker
-- `ConfirmDelete(profileName string) (bool, error)` - Deletion confirmation
-- `PromptForProfile() (Profile, error)` - Guided profile creation
-
-**Dependencies:**
-- Survey library
-
-**Technology Stack:**
-- `github.com/AlecAivazis/survey/v2`
-- Color and icon support
-- Keyboard navigation
-
-### Component Diagrams
-
-```mermaid
-graph TB
-    subgraph "CLI Layer"
-        AddCmd[add Command]
-        ListCmd[list Command]
-        SwitchCmd[switch Command]
-        ExportCmd[export Command]
-        DeleteCmd[delete Command]
-    end
-
-    subgraph "Business Logic Layer"
-        ConfigMgr[Config Manager]
-        Validator[Config Validator]
-        UI[Interactive UI]
-    end
-
-    subgraph "Storage Layer"
-        Storage[Storage Service]
-    end
-
-    subgraph "External"
-        FS[Filesystem<br/>~/.claudecm/]
-    end
-
-    AddCmd --> UI
-    AddCmd --> ConfigMgr
-    SwitchCmd --> UI
-    SwitchCmd --> ConfigMgr
-    ListCmd --> ConfigMgr
-    ExportCmd --> ConfigMgr
-    DeleteCmd --> UI
-    DeleteCmd --> ConfigMgr
-
-    ConfigMgr --> Validator
-    ConfigMgr --> Storage
-    Storage --> FS
+type ToolID string // "claude_code" | "codex"
 ```
 
----
+Rules:
+- `SchemaVersion == 1` is required. Missing → reject (NFR-S4). `>= 2` → refuse with "newer claudecm wrote this" (NFR-M1).
+- Overlays are sparse: an absent field means "fall through to Core". An explicitly empty string is treated as "reset to default" under overlay-as-truth (NFR-S6).
+- `Raw` is the escape hatch for tool-specific keys not yet promoted into the typed overlay. The adapter decides which `Raw` keys it consumes; everything else is preserved verbatim in the on-disk file via merge-preserve.
 
-## External APIs
+### 2.2 State
 
-**N/A** - This CLI tool does not integrate with external APIs in the MVP phase.
+`~/.claudecm/state.yaml`:
 
-Future versions may include:
-- **Claude API validation** - Test connectivity when adding profiles
-- **GitHub Gist API** - For cloud config sync
-- **Update check API** - Notify users of new releases
+```go
+type State struct {
+    SchemaVersion    int                              // 1
+    ActiveProfile    string                            // may be "" after a delete of the previously active profile (FR-2)
+    LastSwitched     time.Time
+    LastAppliedPerTool map[ToolID]AppliedFingerprint // populated only for tools the active profile actually wrote to
+}
 
----
-
-## Core Workflows
-
-### Workflow 1: Add New Profile
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant CLI as add Command
-    participant UI as Interactive UI
-    participant CM as Config Manager
-    participant V as Validator
-    participant S as Storage
-
-    U->>CLI: claudecm add
-    CLI->>UI: PromptForProfile()
-    UI->>U: Ask for name
-    U->>UI: "anthropic-us"
-    UI->>U: Ask for base_url
-    U->>UI: "https://api.anthropic.com"
-    UI->>U: Ask for auth_token
-    U->>UI: "sk-ant-..."
-    UI->>CLI: Return Profile
-    CLI->>CM: AddProfile(profile)
-    CM->>V: ValidateProfile(profile)
-    V->>V: Check URL format
-    V->>V: Check token not empty
-    V-->>CM: Valid
-    CM->>S: SaveProfile(profile)
-    S->>S: Write YAML to ~/.claudecm/profiles/anthropic-us.yaml
-    S->>S: Set file permissions to 600
-    S-->>CM: Success
-    CM-->>CLI: Profile added
-    CLI->>U: ✓ Profile 'anthropic-us' created successfully
+type AppliedFingerprint struct {
+    File      string    // owned-file path that was written (e.g., ~/.claude/settings.json)
+    SHA256    string    // hash of the bytes claudecm wrote after rename
+    AppliedAt time.Time
+}
 ```
 
-### Workflow 2: Switch Profile
+Use cases:
+- `current` and `explain` re-hash each owned file at read time; mismatch with `LastAppliedPerTool[tool].SHA256` is reported as **external drift** ("file changed since last switch by something other than claudecm"). This is informational, never an automatic action.
+- After `delete` of the active profile, `ActiveProfile` is cleared (FR-2 consequence).
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant CLI as switch Command
-    participant UI as Interactive UI
-    participant CM as Config Manager
-    participant S as Storage
+## 3. Adapter Abstraction (`internal/adapter/`)
 
-    U->>CLI: claudecm switch
-    CLI->>CM: ListProfiles()
-    CM->>S: LoadAllProfiles()
-    S->>S: Read all YAML files
-    S-->>CM: []Profile
-    CM-->>CLI: Profiles list
-    CLI->>UI: SelectProfile(profiles)
-    UI->>U: Display interactive list
-    U->>UI: Select "moonshot-dev"
-    UI-->>CLI: Selected name
-    CLI->>CM: SetActive("moonshot-dev")
-    CM->>CM: Load profile to verify exists
-    CM->>S: SaveState(state{current: "moonshot-dev"})
-    S->>S: Write state.yaml
-    S-->>CM: Success
-    CM-->>CLI: Active profile set
-    CLI->>U: ✓ Switched to 'moonshot-dev'
+Adapters are the only modules that know a specific tool's file format. They are pure (read input bytes, return output structures) up to the point of handing a `WritePlan` to `internal/writepath`. The adapter never touches disk directly for owned files.
+
+```go
+type Adapter interface {
+    ID() ToolID
+    Detect() (Presence, error)
+
+    // Files lists every on-disk file claudecm owns for this tool, with format and
+    // the frozen owned-key allowlist for each file. This drives merge-preserve.
+    Files() []OwnedFile
+
+    // Import reads the current on-disk owned files and produces (a) the core
+    // intent the user appears to be running and (b) a candidate overlay capturing
+    // tool-specific deviations.
+    Import(Files) (CoreFromTool, OverlayFromTool, error)
+
+    // Plan is pure: read current bytes, parse, diff against the rendered profile,
+    // and produce a per-file WritePlan. NO writes happen here. Plan is what
+    // powers --dry-run and the FR-4 pre-apply diff.
+    Plan(Profile) (WritePlan, error)
+
+    // Apply hands each per-file plan to internal/writepath.Apply through the
+    // two-phase commit (internal/commit). The adapter never opens a file for
+    // writing itself.
+    Apply(WritePlan) (ApplyReport, error)
+
+    // Project renders what the tool will effectively see, layered through the
+    // resolver. Used by `current` and `explain`.
+    Project(Profile) (EffectiveView, error)
+}
+
+type OwnedFile struct {
+    Path        string       // e.g. "~/.claude/settings.json" (~/ expanded via storage/paths)
+    Format      FileFormat   // JSON | JSONC | TOML
+    OwnedKeys   []KeyPath    // frozen allowlist (e.g. ["env.ANTHROPIC_API_KEY", ...])
+}
 ```
 
-### Workflow 3: Export Environment
+### 3.1 Adapter packages in v1
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant CLI as export Command
-    participant CM as Config Manager
-    participant S as Storage
+- `internal/adapter/claudecode`
+  - Owned file: `~/.claude/settings.json` (user scope only — project-scope `.claude/settings.json` and `.claude/settings.local.json` are explicitly out of scope for v1 per PRD §4.7 / §5).
+  - Owned-key allowlist (frozen, declared as a Go `var`, mirrors PRD §4.7):
+    - `env.ANTHROPIC_API_KEY`
+    - `env.ANTHROPIC_BASE_URL`
+    - `env.ANTHROPIC_AUTH_TOKEN`
+    - `env.ANTHROPIC_MODEL`
+    - `env.ANTHROPIC_SMALL_FAST_MODEL`
+    - `env.CLAUDE_CODE_USE_BEDROCK`
+    - `env.CLAUDE_CODE_USE_VERTEX`
+  - All other keys (`permissions`, `hooks`, `mcpServers`, `model`, `theme`, …) are preserved verbatim via merge-preserve. Touching them is a bug.
 
-    U->>CLI: claudecm export
-    CLI->>CM: GetActive()
-    CM->>S: LoadState()
-    S-->>CM: State{current: "moonshot-dev"}
-    CM->>S: LoadProfile("moonshot-dev")
-    S-->>CM: Profile
-    CM-->>CLI: Active profile
-    CLI->>CM: ExportEnv("shell")
-    CM->>CM: Format as shell exports
-    CM-->>CLI: "export ANTHROPIC_BASE_URL=..."
-    CLI->>U: Print export statements
-    Note over U: User runs: eval $(claudecm export)
+- `internal/adapter/codex`
+  - Owned files: `~/.codex/config.toml` and `~/.codex/auth.json`.
+  - Owned-key allowlist for `config.toml`:
+    - `model`
+    - `model_provider`
+    - `model_providers.<name>.base_url`
+    - `model_providers.<name>.wire_api`
+    - `model_providers.<name>.env_key`
+    - `model_providers.<name>.name`
+  - Owned-key allowlist for `auth.json`:
+    - `OPENAI_API_KEY`
+    - The exact top-level fields Codex CLI uses for current-user auth state (frozen in code; expanded in the adapter's `var ownedAuthKeys`).
+
+### 3.2 What ships in this PR
+
+This PR ships the **adapter interface contract and package skeletons only**. No business logic, no Go files added — those land in subsequent dev stories under the contract enforced here. The interface above and the owned-key allowlists above are the contract those stories must implement.
+
+## 4. Write-Path Invariant (`internal/writepath/`)
+
+A single function — `writepath.Apply(plan WritePlan) (ApplyReport, error)` — is the only path to disk for any tool-owned file. PRD FR-5 is encoded mechanically here. Bypassing this function is a coding-standards violation (see `architecture/coding-standards.md`).
+
+Pipeline (must execute in order):
+
+1. **Lock.** Acquire `flock(LOCK_EX)` on the target file path. Timeout = 5s (`--lock-timeout` overrides). Timeout → return `ErrLockBusy` with the path. (NFR-C1)
+2. **Read.** Read current bytes. Record `size`, `mtime`, `sha256(content)` as the concurrency fingerprint.
+3. **Parse.** Use the file's format-aware parser (TOML doc-model for `.toml`, JSON-preserve for `.json`/JSONC). Unparseable → abort, no backup, no write (NFR-S1). No fallback rewriting, ever.
+4. **Resolve symlink.** Follow symlinks on the target; the resolved path is the actual write/backup target. If the resolved target is outside `$HOME` (or `--home`), refuse with the resolved path in the error (NFR-S2).
+5. **Diff.** Compute diff vs. the rendered profile, restricted to the file's owned-key allowlist. This diff is what `--dry-run` prints and what `switch`'s FR-4 pre-apply confirmation shows.
+6. **Backup.** Copy the original bytes to `~/.claudecm/backups/<tool>/<file-basename>.bak.<ISO8601>.<short-uuid>`, mode `0600`. Verify backup size matches before continuing. The backup contains the pre-write bytes, untransformed.
+7. **Atomic write.** Marshal merged content (owned keys overwritten, non-owned keys preserved). Write to `<file>.tmp.<pid>.<rand>` in the same directory as the resolved target (so `rename(2)` stays on one filesystem), `fsync`, then `rename` over the target. First write against a missing target uses `O_CREAT|O_EXCL` on the temp file; if the target appears between read and rename, abort as concurrent-edit (NFR-C3).
+8. **Post-write reparse.** Read the file back, parse it, and check every owned key has the intended value. If parse fails or any owned key drifted from intent → **AUTO-ROLLBACK**: `rename` the FR-5 step-6 backup over the target, mark the backup as primary, return an error that names the failed key.
+9. **Concurrency check.** Before the step-7 rename, re-stat the target and re-hash it. If `size`/`mtime`/`sha256` differ from the step-2 fingerprint → abort, keep the backup, return `ErrConcurrentEdit` pointing at the backup path (NFR-C2). Exit code 2.
+10. **Release lock.** Always release, including on error.
+
+Retention (NFR-R1/R2/R3): after a successful post-write reparse, prune oldest-first down to N=10 per `(tool, file)`. `--retention <int>` overrides. Every prune writes an entry to `~/.claudecm/audit.log` (mode `0600`). Pruning only matches `<owned-file-basename>.bak.*`; it never touches the just-written file or unknown files.
+
+Crash safety: at every step, either the original file is intact or a recoverable backup exists at a known path. No partial/truncated file is ever observable. Backups are always created **before** the atomic rename.
+
+## 5. Two-Phase Cross-File Commit (`internal/commit/`)
+
+A `switch` touching multiple files (Codex `auth.json` + Codex `config.toml` + Claude Code `settings.json`) is coordinated through a two-phase commit. PRD FR-16.
+
+```go
+type Commit interface {
+    Stage(plans []WritePlan) (StagedTxn, error)        // phase 1: steps 1..7 of writepath, defer rename
+    Commit(StagedTxn) (CommitReport, error)            // phase 2: rename in order; auto-rollback on failure
+}
 ```
 
----
+Commit order — **auth first**, so any downstream failure leaves credentials self-consistent:
 
-## Database Schema
+1. `~/.codex/auth.json`
+2. `~/.codex/config.toml`
+3. `~/.claude/settings.json`
 
-**N/A** - This application uses file-based storage, not a database.
+Lock acquisition follows the same order; lock release is in reverse (avoids lock-order inversion, NFR-C1).
 
-### File Structure
+On phase-2 failure (rename failure OR post-write reparse failure on any file): restore every already-committed target from its FR-5 step-6 backup using `rename`-over-target. Then return a structured `PartialFailure` enumerating per-file status — `committed`, `rolled-back`, `untouched` — with each backup path. Never leave a half-switched state.
+
+## 6. Resolver (`internal/resolver/`)
+
+The resolver answers two questions:
+- "What value will the tool actually see for field X?" (`current`)
+- "Why?" (`explain`)
+
+Layer order, lowest to highest precedence (PRD FR-7):
+
+1. Built-in default (hard-coded per adapter).
+2. Profile core.
+3. Profile overlay (per tool).
+4. On-disk tool config (the merged file the adapter just rendered + preserved).
+5. **EnvOverride** — enumerated environment variables, per-tool allowlist below.
+
+```go
+type EffectiveView struct {
+    Tool   ToolID
+    Fields []EffectiveField
+}
+
+type EffectiveField struct {
+    Key            string        // e.g. "model", "base_url"
+    Value          string        // redacted by default for `secret: true` fields (NFR-S8)
+    WinningLayer   Layer         // EnvOverride | OnDiskToolConfig | ProfileOverlay | ProfileCore | BuiltInDefault
+    Source         string        // file path or env var name backing the winning layer
+    ShadowedLayers []ShadowEntry // every lower layer that also had a value, in precedence order
+}
+```
+
+### 6.1 EnvOverride allowlist (NFR-E1)
+
+The EnvOverride layer considers **only** these variables. Anything else is ignored by `explain` (it may surface under `explain --all-env` as diagnostic-only, never shadowing). Allowlists are exported as a single Go `var` per adapter and exercised by the CI fixture matrix.
+
+- **Claude Code:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`.
+- **Codex CLI:** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_MODEL`, `CODEX_MODEL_PROVIDER`.
+
+`internal/envextract` is the package the resolver calls into to read these variables. It already exists and is kept; the resolver uses it as a sub-component rather than re-implementing the lookup.
+
+### 6.2 External drift
+
+`Project` cross-checks the on-disk SHA256 of each owned file against `State.LastAppliedPerTool[tool].SHA256`. Mismatch is reported in `EffectiveView` as `ExternalDriftDetected = true` plus the offending file path. `explain` surfaces this prominently; `current` shows it as a one-line warning.
+
+## 7. CLI Surface (`cmd/`)
+
+Locked at PRD §4.6. Every file in `cmd/` corresponds to one command; `root.go` wires global flags.
+
+| Command | Mutates | Notes |
+|---------|---------|-------|
+| `add` | profile store; tool files if it activates | `--dry-run`; activation path goes through commit + writepath |
+| `list` | no | Default redaction of `api_key`; `--output json`; `--reveal` |
+| `current` | no | Shows active profile + per-tool effective summary; reports external drift |
+| `switch <name>` | tool files | `--dry-run`; `--yes`; pre-apply diff via Plan; routed through `commit.Commit` |
+| `explain` | no | Full resolution chain incl. shadowed layers |
+| `import claude-code` / `import codex` | profile store; sometimes tool files | `--name`, `--yes`, `--overwrite`, `--dry-run` |
+| `export` | no | Emits `export VAR=...`; `--format yaml`; `--redact` (off by default) |
+| `edit` | profile store; tool files if active | Default UX = `$EDITOR` on temp copy with re-parse-on-save; also `--set key=value` (repeatable); `--dry-run` |
+| `rename` | profile store | Validated against profile-name regex |
+| `delete` | profile store | Confirmation required; `--yes`; clears active pointer if needed |
+| `restore --tool <id>` | tool files | `--list`, `--latest`, `--id`, `--dry-run`, `--yes`; routed through writepath (each restore creates its own backup of the file it overwrites) |
+| `completion [bash\|zsh\|fish\|powershell]` | no | Profile names tab-complete via the storage layer |
+| `version` | no | semver + commit + build date from `pkg/version` |
+
+Global flags on `root.go`:
+- `--home <path>` — overrides `$HOME` derivation; storage layer validates the override is an existing absolute path owned by the current user (NFR-S3).
+- `--lock-timeout <duration>` — overrides the 5s flock timeout.
+- `--retention <int>` — overrides the per-invocation backup retention.
+- `--reveal` — opts out of secret redaction in `list`, `current`, `explain`.
+
+Confirmation rules:
+- `switch` requires `--yes` (or interactive `y/N`) when the pre-apply diff touches keys claudecm does not own, OR when `--strict` is passed. In non-interactive contexts without `--yes`, `switch` aborts.
+- Every write command supports `--dry-run` (FR-15). Read-only commands accept `--dry-run` as a no-op for uniform scripting.
+
+## 8. Storage (`internal/storage/` and `~/.claudecm/`)
+
+Layout on disk:
 
 ```
 ~/.claudecm/
-├── profiles/
-│   ├── anthropic-us.yaml      # Individual profile files
-│   ├── anthropic-cn.yaml
-│   └── moonshot-dev.yaml
-├── state.yaml                  # Current active profile
-└── config.yaml                 # (Future) Global settings
+├── profiles/<name>.yaml         # one profile per file
+├── state.yaml                    # active profile + LastAppliedPerTool fingerprints
+├── backups/
+│   ├── claude_code/
+│   │   └── settings.json.bak.<ISO8601>.<uuid>
+│   └── codex/
+│       ├── config.toml.bak.<ISO8601>.<uuid>
+│       └── auth.json.bak.<ISO8601>.<uuid>
+└── audit.log                     # retention pruning audit (mode 0600)
 ```
 
-### Profile File Format (YAML)
+- Directory mode `0700`. Every file mode `0600`. Enforced at creation, re-asserted on every write.
+- Profile YAML carries `schema_version: 1` (required). Missing → reject. `>= 2` → refuse-on-unknown-future-version (NFR-M1).
+- Profile name regex (NFR-S5): `^[a-z0-9][a-z0-9._-]{0,63}$`. Profile name never participates in any tool-config target path construction; tool-config paths are constructed only from adapter-declared `OwnedFile.Path`. This eliminates profile-name → tool-file path traversal.
+- The lock used by writepath is implemented here (`internal/storage/lock.go`) on top of `github.com/gofrs/flock`.
+- Atomic rename, fsync, and the `O_CREAT|O_EXCL` first-write path all live here (`internal/storage/atomic.go`).
+- Retention pruning + audit-log emission lives here (`internal/storage/retention.go`).
+- Path resolution (`~` expansion, symlink resolve, HOME sanity check) lives in `internal/storage/paths.go` and is the only legal way to construct an absolute path inside the project.
 
-```yaml
-name: anthropic-us
-base_url: https://api.anthropic.com
-auth_token: sk-ant-api03-xxxxx  # Plaintext in v1 (encryption deferred post-v1)
-model: claude-sonnet-4
-description: "Anthropic US Production API"
-custom_env:
-  ANTHROPIC_TIMEOUT: "60"
-  ANTHROPIC_MAX_RETRIES: "3"
-created_at: 2025-10-31T10:30:00Z
-updated_at: 2025-10-31T10:30:00Z
+## 9. Source Tree (planned)
+
 ```
-
-### State File Format (YAML)
-
-```yaml
-version: "1.0"
-current_profile: anthropic-us
-last_switched: 2025-10-31T10:30:00Z
-```
-
----
-
-## Source Tree
-
-```plaintext
 claudecm/
-├── cmd/                        # Cobra command definitions
-│   ├── root.go                 # Root command and global flags
-│   ├── add.go                  # Add profile command
-│   ├── list.go                 # List profiles command
-│   ├── switch.go               # Switch active profile
-│   ├── export.go               # Export environment vars
-│   ├── delete.go               # Delete profile command
-│   └── edit.go                 # Edit profile command
-├── internal/                   # Internal packages (not importable)
-│   ├── config/                 # Config management business logic
-│   │   ├── manager.go          # Config manager implementation
-│   │   ├── profile.go          # Profile model and methods
-│   │   ├── state.go            # State model and methods
-│   │   └── validator.go        # Validation logic
-│   ├── storage/                # Storage layer
-│   │   ├── filesystem.go       # File I/O operations
-│   │   ├── yaml.go             # YAML serialization
-│   │   └── paths.go            # Path construction helpers
-│   ├── ui/                     # Interactive UI components
-│   │   ├── prompt.go           # Survey-based prompts
-│   │   ├── selector.go         # Profile selection UI
-│   │   └── confirm.go          # Confirmation dialogs
-│   └── export/                 # Export format handlers
-│       ├── shell.go            # Shell export format
-│       ├── json.go             # JSON export format
-│       └── envfile.go          # .env file format
-├── pkg/                        # Public packages (importable)
-│   └── version/                # Version information
-│       └── version.go
-├── scripts/                    # Build and development scripts
-│   ├── build.sh                # Local build script
-│   ├── install.sh              # Local installation
-│   └── test.sh                 # Run all tests
-├── docs/                       # Documentation
-│   ├── project-brief.md
-│   ├── architecture.md         # This file
-│   ├── prd.md                  # (To be created)
-│   └── user-guide.md           # (To be created)
-├── .github/                    # GitHub configuration
-│   └── workflows/
-│       ├── ci.yaml             # CI pipeline
-│       └── release.yaml        # Release automation
-├── .goreleaser.yaml            # GoReleaser configuration
-├── .golangci.yaml              # Linter configuration
-├── go.mod                      # Go module definition
-├── go.sum                      # Dependency checksums
-├── main.go                     # Application entry point
-├── Makefile                    # Build commands
-├── README.md                   # Project README
-└── LICENSE                     # License file
+├── cmd/
+│   ├── root.go
+│   ├── add.go
+│   ├── list.go
+│   ├── current.go
+│   ├── switch.go
+│   ├── explain.go
+│   ├── import.go              # subcommands: claude-code, codex
+│   ├── export.go
+│   ├── edit.go
+│   ├── rename.go
+│   ├── delete.go
+│   ├── restore.go
+│   ├── completion.go
+│   └── version.go
+├── internal/
+│   ├── adapter/
+│   │   ├── claudecode/        # ~/.claude/settings.json (user scope)
+│   │   └── codex/             # ~/.codex/config.toml + ~/.codex/auth.json
+│   ├── config/                # Profile, CoreConfig, ToolOverlay, schema_version handling
+│   ├── storage/               # atomic.go, backup.go, retention.go, lock.go, paths.go
+│   ├── writepath/             # Apply: the single FR-5 write contract
+│   ├── commit/                # Two-phase cross-file commit + rollback (FR-16)
+│   ├── resolver/              # Layer chain, EffectiveView, drift detection
+│   ├── envextract/            # Existing; powers EnvOverride lookups for resolver
+│   ├── export/                # Shell export emitter (secondary activation)
+│   └── ui/                    # Interactive prompts, redaction helpers
+├── pkg/
+│   └── version/
+├── testdata/
+│   ├── claudecode/
+│   │   ├── happy/
+│   │   └── edge/              # missing-file, partial, BOM, CRLF, comments, symlink, etc.
+│   └── codex/
+│       ├── happy/
+│       └── edge/
+├── docs/
+│   ├── architecture.md
+│   ├── architecture/
+│   │   ├── coding-standards.md
+│   │   ├── source-tree.md
+│   │   └── tech-stack.md
+│   ├── decisions/0001-direction-lock.md
+│   └── prd/prd-v1.md
+├── go.mod
+├── go.sum
+├── main.go
+├── Makefile
+├── README.md
+└── LICENSE
 ```
 
----
+This source tree is **planned**. No `.go` files are added in this architecture PR; subsequent dev stories materialize the packages under this contract.
 
-## Infrastructure and Deployment
+## 10. Tech Stack (canonical)
 
-### Infrastructure as Code
+See `architecture/tech-stack.md` for the full table. Highlights and explicit picks:
 
-- **Tool:** N/A (no cloud infrastructure in MVP)
-- **Location:** N/A
-- **Approach:** Local binary distribution
+- **Go** at the version pinned in `go.mod` (currently `1.21`).
+- **CLI:** `github.com/spf13/cobra`.
+- **Interactive prompts:** `github.com/AlecAivazis/survey/v2`.
+- **YAML:** `gopkg.in/yaml.v3` (profile + state files).
+- **TOML (Codex config.toml):** `github.com/pelletier/go-toml/v2` document-model APIs — chosen for comment + key-order preservation per NFR-S7. Decision recorded by the architect; no ADR conflict.
+- **JSON (Claude Code settings.json):** `github.com/tidwall/sjson` + `github.com/tidwall/gjson` for surgical, order-preserving edits to owned keys without disturbing surrounding structure. Stdlib `encoding/json` is explicitly **not** sufficient because it does not preserve key order or formatting.
+- **File locks:** `github.com/gofrs/flock`.
+- **Test framework:** `testing` stdlib + `github.com/stretchr/testify` (already in `go.sum`).
+- **Removed:** `crypto/aes`, any encryption library, `spf13/afero`, `log/slog`-specific dependencies. We do not add what we do not actually use; AES is forbidden by ADR-0001.
 
-### Deployment Strategy
+## 11. Test Strategy (gated by NFR-T1)
 
-- **Strategy:** Pre-compiled binary distribution via package managers
-- **CI/CD Platform:** GitHub Actions
-- **Pipeline Configuration:** `.github/workflows/release.yaml`
+A pinned `testdata/` corpus is the v1 release gate. Per tool, the corpus covers:
 
-**Release Process:**
-1. Tag version in Git (e.g., `v1.0.0`)
-2. GitHub Actions triggers goreleaser
-3. Goreleaser builds for multiple platforms:
-   - macOS (amd64, arm64)
-   - Linux (amd64, arm64, 386)
-   - Windows (amd64, 386)
-4. Creates GitHub Release with binaries and checksums
-5. Updates Homebrew formula automatically
-6. Notifies package managers (Scoop, AUR, etc.)
+- Happy paths: canonical minimal config, canonical maximal config.
+- Edge cases: missing file, partial file, unknown keys mixed with owned keys, UTF-8 BOM, CRLF line endings, mixed indentation, comments in TOML/JSONC, symlinked target, target on a separate filesystem.
+- Round-trip: `import → switch → export → explain` byte-identical on owned-key scope.
+- Concurrent-edit: simulated mtime/size mutation between FR-5 step 2 and step 7 → NFR-C2 abort + backup retained.
+- Two-phase failure: simulated Claude Code post-write reparse failure after Codex commit → FR-16 rollback of Codex commits + structured `PartialFailure`.
 
-### Environments
+Coverage requirement before v1 cut:
+- `internal/writepath`, `internal/commit`, `internal/resolver`: **≥ 80%** line coverage, exercised by the fixture matrix.
+- Every adapter `Import` / `Plan` / `Apply` / `Project` has a golden-file test under `testdata/<tool>/{happy,edge}/`.
 
-- **Development:** Developer's local machine - `go run main.go`
-- **CI:** GitHub Actions runners - Automated testing on push
-- **Production:** End user's machine - Installed binary via package manager
+## 12. Open Items Tracked Here, Not Yet Resolved
 
-### Environment Promotion Flow
+- Migration policy for `schema_version: 2+` lands post-v1 as a separate ADR. v1 policy is refuse-on-unknown-future-version (NFR-M1).
+- Post-v1 third-tool ordering (Gemini vs. Cursor vs. Windsurf) is a product decision, not an architecture one; no architecture hooks are added for it in v1. The adapter interface is designed so that adding a third tool is a new package + commit-order registration, with no changes to writepath/commit/resolver.
 
-```
-Developer Laptop
-    ↓ (git push)
-GitHub Repository
-    ↓ (GitHub Actions)
-Automated Build & Test
-    ↓ (git tag)
-Release Pipeline
-    ↓ (goreleaser)
-Binary Artifacts → GitHub Releases
-    ↓
-Package Managers (Homebrew, Scoop, etc.)
-    ↓
-End User Installation
-```
+## 13. What This Document Is Not
 
-### Rollback Strategy
+- It is not a marketing pitch.
+- It is not a place to debate scope already locked by ADR-0001.
+- It is not a place for code samples beyond the minimum needed to make a contract unambiguous.
+- It is not a place to re-litigate v1 / post-v1 boundaries.
 
-- **Primary Method:** Version pinning in package managers
-- **Trigger Conditions:** Critical bugs, security issues, data corruption
-- **Recovery Time Objective:** < 1 hour (release hotfix, update package managers)
-
-**Rollback Procedure:**
-1. User can reinstall previous version via package manager version pinning
-2. Config files are forward-compatible (can be read by older versions)
-3. For critical issues: Pull broken release, push hotfix tag
-
----
-
-## Error Handling Strategy
-
-### General Approach
-
-- **Error Model:** Go idiomatic error handling (`error` interface, sentinel errors, wrapped errors)
-- **Exception Hierarchy:** N/A (Go doesn't use exceptions)
-- **Error Propagation:** Return errors up the stack, wrap with context using `fmt.Errorf("context: %w", err)`
-
-**Error Categories:**
-- **User Errors:** Invalid input, missing config → Print friendly message, exit code 1
-- **System Errors:** File I/O failures, permission denied → Log error, suggest fix, exit code 2
-- **Internal Errors:** Unexpected conditions, bugs → Log full details, exit code 3
-
-### Logging Standards
-
-- **Library:** `log/slog` (Go 1.21+ structured logging)
-- **Format:** JSON for machine parsing, Text for human readability
-- **Levels:**
-  - `DEBUG` - Detailed internal state (file operations, validation steps)
-  - `INFO` - User actions (profile added, switched)
-  - `WARN` - Recoverable issues (deprecated config format)
-  - `ERROR` - Operation failures (file write failed)
-
-**Required Context:**
-- **Operation:** Command being executed (e.g., "add", "switch")
-- **Profile Name:** Affected profile (if applicable)
-- **File Path:** Affected file (for I/O errors)
-- **User Context:** Environment info (OS, Go version) for bug reports
-
-**Example:**
-```go
-slog.Error("failed to save profile",
-    "operation", "add",
-    "profile", profileName,
-    "path", filePath,
-    "error", err)
-```
-
-### Error Handling Patterns
-
-#### File I/O Errors
-
-- **Retry Policy:** No automatic retry (user action required)
-- **Permission Issues:** Check file permissions, suggest `chmod` command
-- **Directory Missing:** Auto-create `~/.claudecm` on first run
-- **Disk Full:** Detect and report clearly, suggest cleanup
-
-```go
-if err := os.MkdirAll(configDir, 0700); err != nil {
-    return fmt.Errorf("failed to create config directory %s: %w", configDir, err)
-}
-```
-
-#### User Input Errors
-
-- **Invalid Profile Name:** Check against naming rules, suggest valid format
-- **Duplicate Name:** Detect and prompt user to overwrite or choose new name
-- **Empty Required Fields:** Show which fields are missing
-
-```go
-if profile.Name == "" {
-    return errors.New("profile name cannot be empty")
-}
-if !profileNameRegex.MatchString(profile.Name) {
-    return errors.New("profile name must contain only letters, numbers, hyphens, and underscores")
-}
-```
-
-#### Configuration Consistency
-
-- **Missing State File:** Create default state with no active profile
-- **Orphaned State Reference:** Detect and prompt user to select valid profile
-- **Concurrent Modifications:** Use file locking (flock) to prevent race conditions
-
----
-
-## Coding Standards
-
-### Core Standards
-
-- **Language & Runtime:** Go 1.21+
-- **Style & Linting:**
-  - `gofmt` for code formatting (enforced in CI)
-  - `golangci-lint` with default rules + `gocyclo`, `goconst`, `misspell`
-- **Test Organization:**
-  - Test files alongside source: `manager_test.go` next to `manager.go`
-  - Table-driven tests for multiple inputs
-  - Integration tests in `_test` packages
-
-### Naming Conventions
-
-| Element | Convention | Example |
-|---------|------------|---------|
-| Packages | lowercase, no underscores | `config`, `storage` |
-| Types | PascalCase | `Profile`, `ConfigManager` |
-| Interfaces | PascalCase, often ends in -er | `Validator`, `Storage` |
-| Functions | camelCase (public), camelCase (private) | `AddProfile()`, `validateURL()` |
-| Constants | PascalCase or SCREAMING_SNAKE | `DefaultTimeout`, `MAX_RETRIES` |
-| Files | snake_case | `config_manager.go` |
-
-### Critical Rules
-
-- **Error Handling:** Every function that can fail MUST return `error` - never panic in library code, only in `main()`
-- **File Permissions:** All config files MUST be created with `0600` (owner read/write only)
-- **Config Validation:** ALWAYS validate profiles before saving - use `validator.ValidateProfile()`, never skip
-- **State Consistency:** State file MUST be updated atomically - write to temp file, then rename
-- **No Global State:** Avoid package-level variables - pass dependencies explicitly (except logger)
-- **Context Propagation:** Long-running operations (future network calls) MUST accept `context.Context`
-
-**Example - Atomic File Write:**
-```go
-// DON'T:
-func SaveProfile(profile Profile) error {
-    return os.WriteFile(path, data, 0600)  // ❌ Not atomic
-}
-
-// DO:
-func SaveProfile(profile Profile) error {
-    tmpFile := path + ".tmp"
-    if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-        return err
-    }
-    return os.Rename(tmpFile, path)  // ✅ Atomic
-}
-```
-
----
-
-## Test Strategy and Standards
-
-### Testing Philosophy
-
-- **Approach:** Test-after development for MVP (speed priority), TDD for complex logic (e.g., validation, export formats)
-- **Coverage Goals:**
-  - Unit tests: 80%+ for business logic (`internal/config`, `internal/export`)
-  - Integration tests: Happy path + error cases for CLI commands
-  - E2E tests: Not in MVP (manual testing sufficient)
-- **Test Pyramid:**
-  - 70% unit tests (fast, isolated)
-  - 25% integration tests (CLI commands with real filesystem)
-  - 5% manual testing (full user workflows)
-
-### Test Types and Organization
-
-#### Unit Tests
-
-- **Framework:** `testing` (stdlib)
-- **File Convention:** `filename_test.go` (e.g., `manager_test.go`)
-- **Location:** Same directory as source code
-- **Mocking Library:** `github.com/stretchr/testify/mock` for interfaces
-- **Coverage Requirement:** 80%+ for `internal/` packages
-
-**AI Agent Requirements:**
-- Generate table-driven tests for all public methods
-- Cover edge cases: empty inputs, nil values, boundary conditions
-- Follow AAA pattern (Arrange, Act, Assert)
-- Mock filesystem using `afero` library for isolated tests
-
-**Example:**
-```go
-func TestManager_AddProfile(t *testing.T) {
-    tests := []struct {
-        name    string
-        profile Profile
-        wantErr bool
-        errMsg  string
-    }{
-        {
-            name:    "valid profile",
-            profile: Profile{Name: "test", BaseURL: "https://api.test.com", AuthToken: "token"},
-            wantErr: false,
-        },
-        {
-            name:    "empty name",
-            profile: Profile{BaseURL: "https://api.test.com"},
-            wantErr: true,
-            errMsg:  "profile name cannot be empty",
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            // Arrange
-            mgr := NewManager(mockStorage, mockValidator)
-
-            // Act
-            err := mgr.AddProfile(tt.profile)
-
-            // Assert
-            if tt.wantErr {
-                require.Error(t, err)
-                require.Contains(t, err.Error(), tt.errMsg)
-            } else {
-                require.NoError(t, err)
-            }
-        })
-    }
-}
-```
-
-#### Integration Tests
-
-- **Scope:** Test CLI commands with real filesystem (isolated temp directory)
-- **Location:** `cmd/*_test.go` or separate `test/integration/` directory
-- **Test Infrastructure:**
-  - **Filesystem:** Create temp directory per test, clean up after
-  - **CLI Execution:** Call command functions directly (not via subprocess)
-
-**Example:**
-```go
-func TestAddCommand_Integration(t *testing.T) {
-    // Setup isolated config directory
-    tmpDir := t.TempDir()
-    os.Setenv("HOME", tmpDir)
-
-    // Execute add command
-    cmd := NewAddCommand()
-    cmd.SetArgs([]string{"--name", "test", "--base-url", "https://api.test.com", "--auth-token", "token"})
-    err := cmd.Execute()
-    require.NoError(t, err)
-
-    // Verify file created
-    profilePath := filepath.Join(tmpDir, ".claudecm", "profiles", "test.yaml")
-    require.FileExists(t, profilePath)
-
-    // Verify content
-    data, _ := os.ReadFile(profilePath)
-    var profile Profile
-    yaml.Unmarshal(data, &profile)
-    require.Equal(t, "test", profile.Name)
-}
-```
-
-### Test Data Management
-
-- **Strategy:** In-memory fixtures for unit tests, temp directories for integration tests
-- **Fixtures:** Stored in `testdata/` subdirectories (per Go convention)
-- **Factories:** Helper functions to create test profiles with sensible defaults
-- **Cleanup:** Use `t.TempDir()` for automatic cleanup, `t.Cleanup()` for custom teardown
-
-**Example Factory:**
-```go
-func NewTestProfile(name string) Profile {
-    return Profile{
-        Name:       name,
-        BaseURL:    "https://api.test.com",
-        AuthToken:  "test-token",
-        Model:      "claude-sonnet-4",
-        CustomEnv:  map[string]string{},
-        CreatedAt:  time.Now(),
-        UpdatedAt:  time.Now(),
-    }
-}
-```
-
-### Continuous Testing
-
-- **CI Integration:**
-  - Run `golangci-lint` on every PR
-  - Run `go test ./...` on every push
-  - Report coverage to Codecov
-  - Test on multiple Go versions (1.21, 1.22, 1.23)
-- **Performance Tests:** Not in MVP (CLI operations < 100ms, no need)
-- **Security Tests:**
-  - Run `gosec` for common security issues
-  - Dependency scanning with `govulncheck`
-
-**GitHub Actions CI Pipeline:**
-```yaml
-- name: Run tests
-  run: |
-    go test -v -race -coverprofile=coverage.out ./...
-    go tool cover -func=coverage.out
-```
-
----
-
-## Security
-
-### Input Validation
-
-- **Validation Library:** Custom validators in `internal/config/validator.go`
-- **Validation Location:**
-  - CLI layer: Validate user input before passing to business logic
-  - Config Manager: Re-validate before saving (defense in depth)
-- **Required Rules:**
-  - All profile names must match `^[a-zA-Z0-9_-]+$` (prevent path traversal)
-  - Base URLs must be valid HTTP(S) URLs (use `url.Parse()`)
-  - Auth tokens must not be empty (no format validation - provider-specific)
-  - Custom env keys must not contain special chars that break shell exports
-
-### Authentication & Authorization
-
-**N/A** - This is a local CLI tool with no user authentication.
-
-**File-Level Authorization:**
-- Config directory (`~/.claudecm/`) created with `0700` permissions (owner only)
-- Profile files created with `0600` permissions (owner read/write only)
-- Prevent other users on shared systems from reading API tokens
-
-### Secrets Management
-
-- **v1:** Plaintext YAML, file mode `0600`, directory mode `0700`. No encryption ships in v1.
-- **Post-v1:** Encryption-at-rest is deferred and will be re-evaluated in a follow-up ADR; no specific scheme is promised here.
-- **Code Requirements:**
-  - NEVER log auth tokens (replace with `***` in logs)
-  - Clear token strings from memory after use (best-effort, Go GC limitation)
-  - No tokens in error messages
-
-**Example - Redacted Logging:**
-```go
-func (p Profile) String() string {
-    token := p.AuthToken
-    if len(token) > 10 {
-        token = token[:4] + "..." + token[len(token)-4:]
-    }
-    return fmt.Sprintf("Profile{Name: %s, BaseURL: %s, Token: %s}", p.Name, p.BaseURL, token)
-}
-```
-
-### File System Security
-
-- **Path Validation:** Prevent path traversal attacks
-  - Sanitize profile names before constructing file paths
-  - Use `filepath.Clean()` and `filepath.Join()` consistently
-- **Symlink Attacks:** Check if target is symlink before writing
-- **Atomic Operations:** Use temp file + rename to prevent partial writes
-- **File Locking:** Use `flock` to prevent concurrent modifications
-
-```go
-func SafeWriteFile(path string, data []byte) error {
-    // Check if path escapes config dir
-    absPath, _ := filepath.Abs(path)
-    if !strings.HasPrefix(absPath, configDir) {
-        return errors.New("invalid path: outside config directory")
-    }
-
-    // Check for symlinks
-    if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-        return errors.New("refusing to write to symlink")
-    }
-
-    // Atomic write
-    tmpPath := path + ".tmp"
-    if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-        return err
-    }
-    return os.Rename(tmpPath, path)
-}
-```
-
-### Dependency Security
-
-- **Scanning Tool:** `govulncheck` (official Go vulnerability scanner)
-- **Update Policy:** Review dependencies monthly, update for security issues immediately
-- **Approval Process:**
-  - Minimize dependencies (prefer stdlib)
-  - New dependencies require justification (document in PR)
-  - Check license compatibility (prefer MIT, Apache 2.0, BSD)
-
-**Minimal Dependency List:**
-- `github.com/spf13/cobra` - CLI framework (essential)
-- `github.com/AlecAivazis/survey/v2` - Interactive UI (essential)
-- `gopkg.in/yaml.v3` - YAML parsing (could use stdlib JSON, but YAML is more user-friendly)
-- `github.com/stretchr/testify` - Testing only (dev dependency)
-
-### Security Testing
-
-- **SAST Tool:** `gosec` - Scans for common Go security issues (hardcoded credentials, weak crypto, etc.)
-- **DAST Tool:** N/A (no running service to test)
-- **Penetration Testing:** N/A for MVP (local tool, no network exposure)
-
-**CI Security Checks:**
-```yaml
-- name: Run gosec
-  run: gosec -exclude=G104 ./...
-
-- name: Check for vulnerabilities
-  run: govulncheck ./...
-```
-
----
-
-## Next Steps
-
-### Immediate Actions (Ready to start development)
-
-1. **Initialize Go Module:**
-   ```bash
-   go mod init github.com/a2d2-dev/claudecm
-   go get github.com/spf13/cobra@v1.8.0
-   go get github.com/AlecAivazis/survey/v2@v2.3.7
-   go get gopkg.in/yaml.v3
-   ```
-
-2. **Create Project Structure:**
-   ```bash
-   mkdir -p cmd internal/{config,storage,ui,export} pkg/version docs scripts .github/workflows
-   ```
-
-3. **Set Up Development Environment:**
-   - Create `Makefile` with `build`, `test`, `lint`, `install` targets
-   - Configure `.golangci.yaml` with recommended linters
-   - Set up GitHub Actions for CI (lint + test)
-
-4. **Begin Story Implementation:**
-   - Use **Dev Agent** with this architecture document
-   - Start with Epic 1 (Core CLI Framework)
-   - Implement stories in priority order
-
-5. **First Milestone - Basic CRUD:**
-   - `claudecm add` (interactive profile creation)
-   - `claudecm list` (display all profiles)
-   - `claudecm delete` (remove profile)
-   - Validate with manual testing
-
----
-
-**Document Status:** ✅ Ready for Development
-**Approval:** Pending user confirmation
-**Next Agent:** Dev Agent (to implement stories)
+If you find yourself disagreeing with a section here, the next step is a new ADR that supersedes ADR-0001 or a PRD revision — not a quiet edit.
