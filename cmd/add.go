@@ -163,14 +163,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("profile %q already exists", profileName)
 	}
 
-	// Create profile
+	// Create v1 profile
 	profile := config.NewProfile(profileName, baseURL, authToken)
-	profile.Model = model
-
-	// Add SmallFastModel to custom env if provided
-	if smallFastModel != "" {
-		profile.CustomEnv[envextract.EnvSmallFastModel] = smallFastModel
-	}
+	profile.Core.Model = model
+	profile.Core.SmallFastModel = smallFastModel
 
 	// Add profile
 	if err := mgr.AddProfile(profile); err != nil {

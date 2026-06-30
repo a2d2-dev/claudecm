@@ -15,23 +15,28 @@ func ToMap(profile *config.Profile) map[string]string {
 
 	env := make(map[string]string)
 
-	// Export base URL
-	if profile.BaseURL != "" {
-		env["ANTHROPIC_BASE_URL"] = profile.BaseURL
+	// Export base URL from core
+	if profile.Core.BaseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = profile.Core.BaseURL
 	}
 
-	// Export auth token
-	if profile.AuthToken != "" {
-		env["ANTHROPIC_AUTH_TOKEN"] = profile.AuthToken
+	// Export API key from core
+	if profile.Core.APIKey != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = profile.Core.APIKey
 	}
 
-	// Export model if set
-	if profile.Model != "" {
-		env["ANTHROPIC_MODEL"] = profile.Model
+	// Export model from core
+	if profile.Core.Model != "" {
+		env["ANTHROPIC_MODEL"] = profile.Core.Model
 	}
 
-	// Export custom environment variables
-	for key, value := range profile.CustomEnv {
+	// Export small-fast model from core
+	if profile.Core.SmallFastModel != "" {
+		env["ANTHROPIC_SMALL_FAST_MODEL"] = profile.Core.SmallFastModel
+	}
+
+	// Export extra_env passthrough
+	for key, value := range profile.Core.ExtraEnv {
 		if value != "" {
 			env[key] = value
 		}

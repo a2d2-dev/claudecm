@@ -64,8 +64,9 @@ func (fs *FileStorage) SaveProfile(profile *config.Profile) error {
 		return fmt.Errorf("invalid profile name: path traversal detected")
 	}
 
-	// Marshal to YAML
-	data, err := yaml.Marshal(profile)
+	// Marshal to YAML through the schema gateway so schema_version is always
+	// stamped on disk (NFR-M1 / NFR-S4).
+	data, err := config.MarshalProfile(profile)
 	if err != nil {
 		return fmt.Errorf("failed to marshal profile: %w", err)
 	}
@@ -103,12 +104,15 @@ func (fs *FileStorage) LoadProfile(name string) (*config.Profile, error) {
 		return nil, fmt.Errorf("failed to read profile file: %w", err)
 	}
 
-	var profile config.Profile
-	if err := yaml.Unmarshal(data, &profile); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal profile: %w", err)
+	// Route through the schema gateway: this enforces schema_version policy
+	// (refuse on v2+, migrate on legacy v0) and never returns a partially
+	// populated profile (per E1-S1 AC).
+	profile, err := config.ParseProfile(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse profile %q: %w", name, err)
 	}
 
-	return &profile, nil
+	return profile, nil
 }
 
 // LoadAllProfiles reads all profiles from disk

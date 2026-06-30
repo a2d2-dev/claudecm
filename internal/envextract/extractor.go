@@ -32,17 +32,12 @@ func ExtractCurrentEnv() *ExtractedEnv {
 	}
 }
 
-// ToProfile converts extracted environment variables to a Profile
-// Note: Name, CreatedAt, and UpdatedAt will be set by the caller
+// ToProfile converts extracted environment variables to a v1 Profile.
+// Name, CreatedAt, and UpdatedAt are set by NewProfile.
 func (e *ExtractedEnv) ToProfile(name string) *config.Profile {
 	profile := config.NewProfile(name, e.BaseURL, e.AuthToken)
-	profile.Model = e.Model
-
-	// Add SmallFastModel to custom env if present
-	if e.SmallFastModel != "" {
-		profile.CustomEnv[EnvSmallFastModel] = e.SmallFastModel
-	}
-
+	profile.Core.Model = e.Model
+	profile.Core.SmallFastModel = e.SmallFastModel
 	return profile
 }
 

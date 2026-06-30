@@ -101,9 +101,11 @@ func TestValidator_ValidateProfile(t *testing.T) {
 		{
 			name: "valid profile",
 			profile: &Profile{
-				Name:      "test",
-				BaseURL:   "https://api.test.com",
-				AuthToken: "valid-token-here",
+				Name: "test",
+				Core: CoreConfig{
+					BaseURL: "https://api.test.com",
+					APIKey:  "valid-token-here",
+				},
 			},
 			wantErr: false,
 		},
@@ -115,27 +117,33 @@ func TestValidator_ValidateProfile(t *testing.T) {
 		{
 			name: "invalid name",
 			profile: &Profile{
-				Name:      "test profile",
-				BaseURL:   "https://api.test.com",
-				AuthToken: "valid-token-here",
+				Name: "test profile",
+				Core: CoreConfig{
+					BaseURL: "https://api.test.com",
+					APIKey:  "valid-token-here",
+				},
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid url",
 			profile: &Profile{
-				Name:      "test",
-				BaseURL:   "invalid-url",
-				AuthToken: "valid-token-here",
+				Name: "test",
+				Core: CoreConfig{
+					BaseURL: "invalid-url",
+					APIKey:  "valid-token-here",
+				},
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid token",
 			profile: &Profile{
-				Name:      "test",
-				BaseURL:   "https://api.test.com",
-				AuthToken: "",
+				Name: "test",
+				Core: CoreConfig{
+					BaseURL: "https://api.test.com",
+					APIKey:  "",
+				},
 			},
 			wantErr: true,
 		},
