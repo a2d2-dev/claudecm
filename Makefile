@@ -1,4 +1,4 @@
-.PHONY: build test lint install clean help
+.PHONY: build test test-hooks lint install clean help
 
 # Build variables
 BINARY_NAME=claudecm
@@ -27,6 +27,11 @@ test: ## Run tests
 	@echo "Running tests..."
 	go test -v -race -coverprofile=coverage.out ./...
 	@echo "✓ Tests completed"
+
+test-hooks: ## Run tests that require the build-tagged test seams (e.g. atomic write fsync-error injection)
+	@echo "Running tests with -tags=test..."
+	go test -count=1 -tags=test ./internal/storage/...
+	@echo "✓ Test-tagged tests completed"
 
 test-coverage: test ## Run tests with coverage report
 	go tool cover -html=coverage.out -o coverage.html
