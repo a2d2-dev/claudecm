@@ -4,16 +4,15 @@
 // (the per-project ones under a project's local .claude directory)
 // are explicitly out of v1 scope and are never referenced here.
 //
-// V1 scope (E3-S2): Detect + Files + the OwnedKeysSettingsJSON
-// allowlist. Import / Plan / Apply / Project are declared but return
-// ErrNotImplemented so this package compiles against the adapter.Adapter
-// contract; the real implementations land in E3-S3..E3-S6 under the
-// contract defined in internal/adapter/adapter.go.
+// V1 scope: Detect + Files + Import + Plan + Apply have landed.
+// Project remains a stub returning ErrNotImplemented until E3-S6
+// ships the layered projection.
 package claudecode
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,10 +24,18 @@ import (
 )
 
 // ErrNotImplemented is returned by adapter methods this story does not
-// yet ship (Import / Plan / Apply / Project). E3-S3..E3-S6 replace each
-// stub with a real implementation. Sentinel so callers can errors.Is
-// check without stringly-typed matching.
+// yet ship (Project). E3-S6 replaces the last stub with a real
+// implementation. Sentinel so callers can errors.Is check without
+// stringly-typed matching.
 var ErrNotImplemented = errors.New("claudecm: claudecode adapter method not implemented")
+
+// ErrPlanMismatch is returned by Apply when the WritePlan it was handed
+// does not target this adapter's owned file. Defense in depth: Plan
+// always produces a WritePlan with Tool=ToolClaudeCode and
+// Target=SettingsPath(r), but the interface signature does not statically
+// prevent a caller from handing us a Codex plan (or a hand-forged plan
+// pointing elsewhere). Refusing loudly beats writing the wrong file.
+var ErrPlanMismatch = errors.New("claudecm/claudecode: plan does not target claudecode settings.json")
 
 // binaryName is the CLI executable claudecm looks for on PATH when
 // probing tool presence. Kept as a const so we do not carry
@@ -210,9 +217,42 @@ func (a *Adapter) Plan(ctx context.Context, r *storage.Resolver, p config.Profil
 	return a.planFromProfile(ctx, r, p)
 }
 
-// Apply is a stub — E3-S5 wires this to writepath.Apply.
+// Apply hands a single-file WritePlan to writepath.Apply so every byte
+// this adapter emits goes through the FR-5 locked write-path. The
+// adapter never opens the owned file for write itself — that would
+// bypass the write-path pipeline (parse guard, backup, drift check,
+// atomic rename, post-write reparse, auto-rollback) and violate
+// coding-standards rule 1.
+//
+// Defense in depth. Plan always sets plan.Tool=ToolClaudeCode and
+// plan.Target=SettingsPath(r), but the Adapter interface signature does
+// not statically prevent a caller from handing us a plan authored by
+// another adapter or hand-forged to point elsewhere. Apply refuses any
+// plan whose Tool or Target does not match this adapter's ownership
+// with ErrPlanMismatch — the writepath will never see it.
+//
+// An empty plan.Tool is treated as a mismatch too. Plan sets Tool
+// explicitly; an empty value at this boundary is a programming error
+// upstream, and returning ErrPlanMismatch surfaces it loudly rather
+// than silently claiming ownership of any target the caller supplied.
+//
+// Errors from writepath.Apply pass through unwrapped so callers can
+// errors.Is against the writepath sentinels (ErrLockTimeout,
+// ErrConcurrentEdit, ErrParseFailed, ErrOutsideHome, etc.) without
+// having to unwrap a claudecode-adapter layer.
 func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath.WritePlan) (writepath.WriteReport, error) {
-	return writepath.WriteReport{}, ErrNotImplemented
+	// Refuse a Tool that does not identify this adapter. The empty
+	// string is refused too — Plan always sets Tool; an empty Tool at
+	// this boundary is a caller bug we prefer to surface loudly over
+	// accepting the plan and letting writepath's ValidatePlan reject
+	// it with a less specific error.
+	if plan.Tool != string(adapter.ToolClaudeCode) {
+		return writepath.WriteReport{}, fmt.Errorf("%w: plan.Tool = %q, want %q", ErrPlanMismatch, plan.Tool, adapter.ToolClaudeCode)
+	}
+	if plan.Target != SettingsPath(r) {
+		return writepath.WriteReport{}, fmt.Errorf("%w: plan.Target = %q, want %q", ErrPlanMismatch, plan.Target, SettingsPath(r))
+	}
+	return writepath.Apply(ctx, r, plan)
 }
 
 // Project is a stub — E3-S6 ships the layered resolver projection.
