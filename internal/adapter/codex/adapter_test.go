@@ -15,7 +15,6 @@ import (
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/adapter/codex"
-	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -433,7 +432,7 @@ func TestDetect_ConfigDirIsSymlink(t *testing.T) {
 }
 
 // TestDetect_FreshHomeFallbackNoteFires isolates the fallback
-// "!p.Detected && p.Notes == ''" branch by clearing PATH so the
+// "!p.Detected && p.Notes == ”" branch by clearing PATH so the
 // binary probe cannot fire. This makes the test independent of
 // whether the CI host has `codex` installed — the earlier
 // TestDetect_FreshHomeReturnsNotInstalled skips when the host does.
@@ -485,18 +484,7 @@ func TestDetect_NoteAccumulatesAcrossProbes(t *testing.T) {
 	}
 }
 
-// TestProjectStub_ReturnsErrNotImplemented locks in the fact that
-// Project is still a stub. Import lifted its branch in E4-S3; Plan
-// lifted its branch in E4-S4; Apply lifted its branch in E4-S5;
-// Project follows in E4-S6. Kept as a single flat test because Project
-// is now the only remaining stub — the earlier table/sub-test shape
-// was scaffolding that no longer earns its keep.
-func TestProjectStub_ReturnsErrNotImplemented(t *testing.T) {
-	r := newResolver(t)
-	a := codex.New()
-	ctx := context.Background()
-
-	if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, codex.ErrNotImplemented) {
-		t.Errorf("Project err = %v, want ErrNotImplemented", err)
-	}
-}
+// (Project stub test lifted in E4-S6 — Project is now implemented and
+// exercised by project_test.go / project_hooks_test.go. The
+// ErrNotImplemented sentinel is retained in adapter.go for any
+// future stub method regressions but is no longer wired to Project.)
