@@ -557,7 +557,7 @@ func testMatrix() []matrixRow {
 				if err != nil {
 					t.Fatalf("prime Acquire: %v", err)
 				}
-				return func() { h.Release() }
+				return func() { _ = h.Release() }
 			},
 			assert: func(t *testing.T, home string, rep WriteReport, err error, _ func(t *testing.T, home string)) {
 				if !errors.Is(err, ErrLockTimeout) {

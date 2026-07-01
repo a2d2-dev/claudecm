@@ -320,17 +320,11 @@ func shouldEmitAuthPlan(authPath string, authValues map[string]ownedValue) bool 
 	// current file is missing or whitespace-only.
 	data, err := os.ReadFile(authPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-		// Any other read error — emit the plan and let Apply's
-		// pipeline surface the real problem under lock.
-		return true
+		// Any read error other than IsNotExist — emit the plan and
+		// let Apply's pipeline surface the real problem under lock.
+		return !os.IsNotExist(err)
 	}
-	if treatAsEmpty(data) {
-		return false
-	}
-	return true
+	return !treatAsEmpty(data)
 }
 
 // makeAuthTransform builds the Transform closure for the auth.json

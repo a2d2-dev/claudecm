@@ -239,7 +239,7 @@ func TestApply_LockTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prime Acquire: %v", err)
 	}
-	defer h.Release()
+	defer func() { _ = h.Release() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
