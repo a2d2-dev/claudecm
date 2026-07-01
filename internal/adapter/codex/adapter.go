@@ -227,10 +227,17 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 	return p, nil
 }
 
-// Import will read ~/.codex/config.toml and ~/.codex/auth.json and
-// return the (CoreFromTool, OverlayFromTool) pair. Stubbed until E4-S3.
+// Import reads ~/.codex/config.toml and ~/.codex/auth.json and
+// returns the (CoreFromTool, OverlayFromTool) pair capturing the
+// operator's current Codex configuration. See import.go for the
+// design notes (two-file coordination, refuse-on-malformed,
+// symlink-follow-in-HOME, OPENAI_API_KEY vs OAuth-bundle policy).
+//
+// Returns ErrNoConfig when BOTH files are absent, ErrParseFailed
+// when either exists but is malformed, and ErrOutsideHome when
+// either is a symlink escaping HOME. Body lives in import.go.
 func (a *Adapter) Import(ctx context.Context, r *storage.Resolver) (adapter.CoreFromTool, adapter.OverlayFromTool, error) {
-	return adapter.CoreFromTool{}, adapter.OverlayFromTool{}, ErrNotImplemented
+	return a.importFromCodex(ctx, r)
 }
 
 // Plan will produce the ordered per-file WritePlan slice needed to

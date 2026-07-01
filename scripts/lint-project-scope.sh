@@ -70,6 +70,9 @@ whitelist=(
 codex_whitelist=(
   "internal/adapter/codex/adapter.go"
   "internal/adapter/codex/allowlist.go"
+  # import.go (E4-S3) reads ~/.codex/config.toml and ~/.codex/auth.json;
+  # its package godoc names both paths to document scope.
+  "internal/adapter/codex/import.go"
   "internal/adapter/adapter.go"
 )
 

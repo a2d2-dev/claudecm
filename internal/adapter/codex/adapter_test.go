@@ -487,18 +487,13 @@ func TestDetect_NoteAccumulatesAcrossProbes(t *testing.T) {
 }
 
 // TestStubsReturnErrNotImplemented locks in the fact that the
-// non-E4-S1 methods are still stubs. When E4-S2..E4-S6 land they will
-// each remove one branch of this test alongside their implementation.
+// remaining non-E4-S3 methods are still stubs. Import lifted its
+// branch in E4-S3; Plan/Apply/Project follow in E4-S4/S5/S6.
 func TestStubsReturnErrNotImplemented(t *testing.T) {
 	r := newResolver(t)
 	a := codex.New()
 	ctx := context.Background()
 
-	t.Run("Import", func(t *testing.T) {
-		if _, _, err := a.Import(ctx, r); !errors.Is(err, codex.ErrNotImplemented) {
-			t.Errorf("Import err = %v, want ErrNotImplemented", err)
-		}
-	})
 	t.Run("Plan", func(t *testing.T) {
 		if _, err := a.Plan(ctx, r, config.Profile{}); !errors.Is(err, codex.ErrNotImplemented) {
 			t.Errorf("Plan err = %v, want ErrNotImplemented", err)
