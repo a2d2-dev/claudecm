@@ -202,10 +202,12 @@ func (a *Adapter) Import(ctx context.Context, r *storage.Resolver) (adapter.Core
 	return a.importFromSettings(ctx, r)
 }
 
-// Plan is a stub — E3-S4 replaces this with the real WritePlan
-// generator.
+// Plan produces the ordered []WritePlan needed to activate profile p
+// for Claude Code. V1 owns exactly one file, so the returned slice
+// has length 1. Pure — no I/O. See plan.go for the sjson-driven
+// merge-preserve renderer wired into WritePlan.Transform.
 func (a *Adapter) Plan(ctx context.Context, r *storage.Resolver, p config.Profile) ([]writepath.WritePlan, error) {
-	return nil, ErrNotImplemented
+	return a.planFromProfile(ctx, r, p)
 }
 
 // Apply is a stub — E3-S5 wires this to writepath.Apply.

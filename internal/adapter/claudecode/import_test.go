@@ -99,6 +99,31 @@ func TestImport_EmptyFile(t *testing.T) {
 	}
 }
 
+func TestImport_WhitespaceOnlyTreatedAsEmpty(t *testing.T) {
+	// PR #23 review F1: prior to the treatAsEmpty consolidation the
+	// two paths diverged — Import used len(data) == 0 (strict zero-
+	// byte) while Plan.Transform used bytes.TrimSpace (whitespace-
+	// tolerant), so a settings.json containing "   \n\t  " was
+	// ErrParseFailed on Import but silently normalized to {} on Plan.
+	// The shared treatAsEmpty predicate now guarantees both paths
+	// agree. This test pins the Import side of that contract:
+	// whitespace-only bytes → nil error, zero Core, zero Overlay
+	// (same as an actual {} on disk, same as a zero-byte file).
+	r := newResolver(t)
+	writeSettings(t, r, "   \n\t  ")
+
+	core, overlay, err := runImport(t, r)
+	if err != nil {
+		t.Fatalf("Import on whitespace-only file: err = %v, want nil", err)
+	}
+	if !isZeroCore(core) {
+		t.Errorf("core = %+v, want zero value", core)
+	}
+	if !isZeroOverlay(overlay) {
+		t.Errorf("overlay = %+v, want zero value", overlay)
+	}
+}
+
 func TestImport_EmptyJSONObject(t *testing.T) {
 	r := newResolver(t)
 	writeSettings(t, r, "{}")

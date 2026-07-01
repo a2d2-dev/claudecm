@@ -321,11 +321,9 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 
 	// Import has landed in E3-S3 with its own dedicated tests in
 	// import_test.go; it is no longer in the stub set.
+	// Plan has landed in E3-S4 with its own dedicated tests in
+	// plan_test.go; it is no longer in the stub set.
 
-	// Plan
-	if _, err := a.Plan(ctx, r, config.Profile{}); !errors.Is(err, claudecode.ErrNotImplemented) {
-		t.Errorf("Plan err = %v, want ErrNotImplemented", err)
-	}
 	// Apply
 	if _, err := a.Apply(ctx, r, writepath.WritePlan{}); !errors.Is(err, claudecode.ErrNotImplemented) {
 		t.Errorf("Apply err = %v, want ErrNotImplemented", err)
