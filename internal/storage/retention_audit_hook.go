@@ -5,6 +5,7 @@ package storage
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // auditAppend is the production wiring for the "append one line to the
@@ -27,9 +28,16 @@ import (
 //     is durable after the fsync.
 //   - Chmod is re-asserted every call so a wider umask (or a file that
 //     was hand-touched at 0644) is tightened back to 0600.
-//   - Sync is called on the file before Close. On ext4/xfs the append is
-//     durable at that point; the parent directory is already durable
-//     from EnsureDir's own fsync semantics.
+//   - Sync is called on the file before Close. On ext4/xfs the file
+//     bytes are durable at that point. However, the FIRST append also
+//     creates a new inode entry in the parent directory (the
+//     ~/.claudecm/audit.log file itself), and on ext4/xfs that
+//     directory entry is not durable until the parent inode is fsynced.
+//     EnsureDir does not fsync the parent — it only MkdirAll's. So we
+//     fsync the parent dir here every call. It is a single syscall and
+//     the cost is dominated by the file fsync above; making it
+//     unconditional keeps the code path uniform and closes the
+//     first-write durability gap without a branch.
 func auditAppend(path string, line []byte) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -51,6 +59,14 @@ func auditAppend(path string, line []byte) error {
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close audit %q: %w", path, err)
+	}
+	// fsync the parent directory. On a fresh audit.log this is what makes
+	// the new directory entry (name → inode) durable across a crash. On
+	// subsequent appends the entry already exists and this is a no-op
+	// on-disk but still a syscall — we accept that cost for a uniform
+	// code path. Mirrors AtomicWrite's post-rename fsyncDir step.
+	if err := fsyncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("fsync audit parent %q: %w", filepath.Dir(path), err)
 	}
 	return nil
 }

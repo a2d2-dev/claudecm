@@ -411,6 +411,139 @@ func TestPrune_RefusesSymlinkedAuditLogOutsideHome(t *testing.T) {
 	}
 }
 
+func TestPrune_ToleratesConcurrentRemoval(t *testing.T) {
+	// F1 regression: a concurrent pruner (or an operator running rm -f)
+	// may unlink a victim between our Lstat and our os.Remove. In that
+	// case the file is already in the state we wanted (gone), so the
+	// removal should be silently skipped — no audit line, no error.
+	r, _ := retentionHome(t)
+	all := seedBackups(t, r, "claudecode", "settings.json", 12)
+
+	// all is newest-first; Prune with Keep=10 targets all[10:] (the two
+	// oldest). Race-delete the oldest one BEFORE Prune runs — this is the
+	// file the concurrent pruner would have taken.
+	preDeleted := all[11]
+	if err := os.Remove(preDeleted); err != nil {
+		t.Fatalf("pre-delete %q: %v", preDeleted, err)
+	}
+
+	got, err := Prune(r, "claudecode", "settings.json", PruneOptions{Keep: 10})
+	if err != nil {
+		t.Fatalf("Prune with pre-deleted victim = %v", err)
+	}
+	// Only the still-present victim (all[10]) should appear in the returned
+	// records. The pre-deleted one is skipped silently.
+	if len(got) != 1 {
+		t.Fatalf("Prune returned %d records; want 1 (pre-deleted victim must be skipped, not counted)", len(got))
+	}
+	if got[0].RemovedPath != all[10] {
+		t.Fatalf("Prune record path = %q; want %q (the still-present victim)", got[0].RemovedPath, all[10])
+	}
+
+	// On-disk: 10 files remain (the kept prefix), pre-deleted stayed gone,
+	// still-present victim is now gone.
+	remaining, err := ListBackups(r, "claudecode", "settings.json")
+	if err != nil {
+		t.Fatalf("ListBackups: %v", err)
+	}
+	if len(remaining) != 10 {
+		t.Fatalf("remaining = %d; want 10", len(remaining))
+	}
+	if _, err := os.Lstat(preDeleted); !os.IsNotExist(err) {
+		t.Errorf("pre-deleted file %q reappeared: %v", preDeleted, err)
+	}
+	if _, err := os.Lstat(all[10]); !os.IsNotExist(err) {
+		t.Errorf("still-present victim %q not removed by Prune: %v", all[10], err)
+	}
+
+	// Audit log: exactly 1 line — the pre-deleted victim must NOT appear
+	// (Prune neither destroyed evidence nor logged something it did not do).
+	lines, ok := readAuditLines(t, r)
+	if !ok {
+		t.Fatalf("audit log not created")
+	}
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d; want 1", len(lines))
+	}
+	if strings.Contains(lines[0], preDeleted) {
+		t.Fatalf("audit line references pre-deleted file %q: %q", preDeleted, lines[0])
+	}
+	if !strings.Contains(lines[0], all[10]) {
+		t.Fatalf("audit line %q does not reference the actual removal %q", lines[0], all[10])
+	}
+}
+
+func TestPrune_KeepEqualsLenIsNoop(t *testing.T) {
+	// F6 boundary: the "under-limit" branch triggers on <=, so Keep ==
+	// len(records) must be a no-op. Nothing removed, no audit log created,
+	// all seeded files still on disk.
+	r, _ := retentionHome(t)
+	all := seedBackups(t, r, "claudecode", "settings.json", 10)
+
+	got, err := Prune(r, "claudecode", "settings.json", PruneOptions{Keep: 10})
+	if err != nil {
+		t.Fatalf("Prune Keep=len = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Prune Keep=len removed %d; want 0", len(got))
+	}
+	for _, p := range all {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("seeded file %q disturbed on Keep=len no-op: %v", p, err)
+		}
+	}
+	if _, err := os.Lstat(r.AuditLogPath()); !os.IsNotExist(err) {
+		t.Fatalf("audit log created despite no removals on Keep=len: err=%v", err)
+	}
+}
+
+func TestPrune_SmallCustomKeep(t *testing.T) {
+	// F7 story-brief scenario: `--retention 3` against 4 existing backups
+	// removes the single oldest, leaves 3 in place, writes 1 audit line.
+	r, _ := retentionHome(t)
+	all := seedBackups(t, r, "claudecode", "settings.json", 4)
+
+	got, err := Prune(r, "claudecode", "settings.json", PruneOptions{Keep: 3})
+	if err != nil {
+		t.Fatalf("Prune Keep=3 = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Prune Keep=3 removed %d; want 1", len(got))
+	}
+	// all is newest-first; the removed victim is the oldest (index 3).
+	if got[0].RemovedPath != all[3] {
+		t.Fatalf("removed path = %q; want oldest %q", got[0].RemovedPath, all[3])
+	}
+	// The three newest remain on disk.
+	for _, p := range all[:3] {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("kept file %q missing after Prune Keep=3: %v", p, err)
+		}
+	}
+	if _, err := os.Lstat(all[3]); !os.IsNotExist(err) {
+		t.Errorf("oldest file %q still present after Prune Keep=3: err=%v", all[3], err)
+	}
+	// Belt-and-braces via ListBackups.
+	remaining, err := ListBackups(r, "claudecode", "settings.json")
+	if err != nil {
+		t.Fatalf("ListBackups: %v", err)
+	}
+	if len(remaining) != 3 {
+		t.Fatalf("remaining = %d; want 3", len(remaining))
+	}
+	// Audit log: exactly one line for the oldest victim.
+	lines, ok := readAuditLines(t, r)
+	if !ok {
+		t.Fatalf("audit log not created")
+	}
+	if len(lines) != 1 {
+		t.Fatalf("audit lines = %d; want 1", len(lines))
+	}
+	if !strings.Contains(lines[0], all[3]) {
+		t.Fatalf("audit line %q does not reference removed path %q", lines[0], all[3])
+	}
+}
+
 func TestPrune_AuditFormatRoundTrip(t *testing.T) {
 	r, _ := retentionHome(t)
 	all := seedBackups(t, r, "claudecode", "settings.json", 11)

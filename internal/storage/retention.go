@@ -181,6 +181,15 @@ func Prune(r *Resolver, tool, basename string, opts PruneOptions) ([]PruneRecord
 		}
 
 		if err := os.Remove(victim.BackupPath); err != nil {
+			if os.IsNotExist(err) {
+				// Race: a concurrent pruner (or an operator) removed the
+				// file between our Lstat and our os.Remove. The victim is
+				// already gone, which is exactly the state we wanted, so
+				// skip it silently — no audit line (nothing was destroyed
+				// by *us*, and the earlier remover is responsible for
+				// their own audit trail if they had one).
+				continue
+			}
 			return removed, fmt.Errorf("prune: remove %q: %w", victim.BackupPath, err)
 		}
 
