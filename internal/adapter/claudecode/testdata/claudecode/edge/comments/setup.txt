@@ -1,0 +1,9 @@
+comments — settings.json with a leading `//` line comment.
+
+encoding/json is strict JSON: `//` line comments are rejected at
+parse time. Import refuses with ErrParseFailed rather than
+silently stripping the comment (NFR-S1: no silent normalization
+on the read path).
+
+Expected Import result:
+  errors.Is(err, claudecode.ErrParseFailed) == true
