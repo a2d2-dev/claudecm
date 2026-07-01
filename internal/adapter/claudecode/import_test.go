@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
@@ -434,6 +435,109 @@ func TestImport_ArrayEnvCoerced(t *testing.T) {
 	}
 	if core.Model == "" {
 		t.Errorf("core.Model unexpectedly empty; want a %%v-formatted array literal")
+	}
+}
+
+func TestImport_NullAuthTokenDoesNotShadowAPIKey(t *testing.T) {
+	// A JSON `null` at ANTHROPIC_AUTH_TOKEN is a legal Claude Code
+	// shape (a user editor cleared the value without deleting the
+	// key). The precedence must be decided on "non-null value
+	// present", not on "key present in map", or the real API_KEY
+	// gets silently demoted to Overlay.ExtraEnv while Core.APIKey is
+	// zeroed. This test pins that behaviour so an accidental switch
+	// back to a "has-key" check trips CI immediately.
+	r := newResolver(t)
+	writeSettings(t, r, `{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": null,
+    "ANTHROPIC_API_KEY": "sk-real"
+  }
+}`)
+
+	core, overlay, err := runImport(t, r)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if core.APIKey != "sk-real" {
+		t.Errorf("core.APIKey = %q, want %q (null AUTH_TOKEN must NOT shadow API_KEY)", core.APIKey, "sk-real")
+	}
+	if _, ok := overlay.ExtraEnv["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("overlay.ExtraEnv should not carry ANTHROPIC_API_KEY when it was promoted to Core.APIKey; got overlay=%+v", overlay.ExtraEnv)
+	}
+}
+
+func TestImport_EmptyStringAuthTokenIsPreserved(t *testing.T) {
+	// Empty string is a valid non-null value: the user explicitly
+	// asked Claude Code to run with an empty AUTH_TOKEN. Preserve it
+	// verbatim into Core.APIKey and record the real API_KEY in the
+	// overlay for round-trip fidelity. This asymmetry with the null
+	// case is deliberate and documented in import.go's godoc.
+	r := newResolver(t)
+	writeSettings(t, r, `{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "",
+    "ANTHROPIC_API_KEY": "sk-real"
+  }
+}`)
+
+	core, overlay, err := runImport(t, r)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if core.APIKey != "" {
+		t.Errorf("core.APIKey = %q, want empty (explicit empty AUTH_TOKEN wins per policy)", core.APIKey)
+	}
+	if got := overlay.ExtraEnv["ANTHROPIC_API_KEY"]; got != "sk-real" {
+		t.Errorf("overlay.ExtraEnv[ANTHROPIC_API_KEY] = %q, want %q", got, "sk-real")
+	}
+}
+
+func TestImport_ParentSymlinkOutsideHomeRefused(t *testing.T) {
+	// The parent directory ~/.claude is a symlink to an out-of-HOME
+	// target. An earlier revision only Lstat'd the leaf settings.json
+	// and would happily read through the parent symlink. The FULL
+	// path must be resolved via EvalSymlinks and checked against
+	// HOME; anything escaping HOME is refused with ErrOutsideHome.
+	r := newResolver(t)
+	outsideDir := t.TempDir()
+	outsideClaude := filepath.Join(outsideDir, ".claude")
+	if err := os.MkdirAll(outsideClaude, 0o755); err != nil {
+		t.Fatalf("mkdir outside .claude: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideClaude, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("write outside settings.json: %v", err)
+	}
+	link := filepath.Join(r.Home(), ".claude")
+	if err := os.Symlink(outsideClaude, link); err != nil {
+		t.Fatalf("symlink parent: %v", err)
+	}
+
+	_, _, err := runImport(t, r)
+	if !errors.Is(err, claudecode.ErrOutsideHome) {
+		t.Fatalf("Import through parent symlink out of HOME: err = %v, want ErrOutsideHome", err)
+	}
+	if !errors.Is(err, storage.ErrOutsideHome) {
+		t.Errorf("err = %v, want errors.Is(err, storage.ErrOutsideHome)", err)
+	}
+}
+
+func TestImport_EnvKeyNotObjectRefused(t *testing.T) {
+	// A user typo like `"env": "sk-real"` (scalar instead of object)
+	// would flatten to the single key "env" and every owned
+	// env.ANTHROPIC_* lookup would miss — silent under-import. Refuse
+	// loudly with ErrParseFailed so the operator sees the typo.
+	r := newResolver(t)
+	writeSettings(t, r, `{"env": "sk-typo"}`)
+
+	_, _, err := runImport(t, r)
+	if !errors.Is(err, claudecode.ErrParseFailed) {
+		t.Fatalf("Import on non-object env: err = %v, want ErrParseFailed", err)
+	}
+	if !errors.Is(err, writepath.ErrParseFailed) {
+		t.Errorf("err = %v, want errors.Is(err, writepath.ErrParseFailed) (wrapped)", err)
+	}
+	if !strings.Contains(err.Error(), "env") {
+		t.Errorf("err = %v, want message to mention 'env' so the operator can locate the typo", err)
 	}
 }
 

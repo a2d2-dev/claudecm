@@ -40,12 +40,29 @@
 // ErrOutsideHome — reading /etc/passwd through a planted symlink is
 // still an attack surface.
 //
-// AUTH_TOKEN vs API_KEY. When both env.ANTHROPIC_AUTH_TOKEN and
-// env.ANTHROPIC_API_KEY are present, Import prefers AUTH_TOKEN into
-// Core.APIKey (matches typical enterprise/console flow) and records
-// API_KEY in the overlay's ExtraEnv map so a subsequent round-trip does
-// not silently discard it. When only API_KEY is present it wins into
-// Core.APIKey. When neither is present Core.APIKey stays empty.
+// AUTH_TOKEN vs API_KEY. Precedence is decided on "non-null value
+// present", NOT on "key present in map". The distinction matters
+// because a real Claude Code settings.json can legitimately carry
+// `"ANTHROPIC_AUTH_TOKEN": null` (a user editor clearing the value
+// without deleting the key) alongside `"ANTHROPIC_API_KEY": "sk-real"`
+// — and a naive "was the key in the map?" check would silently zero
+// Core.APIKey and demote the real API_KEY to Overlay.ExtraEnv.
+//
+// Rules:
+//
+//   - AUTH_TOKEN has non-null value → wins into Core.APIKey. If
+//     API_KEY also has a non-null value, API_KEY is recorded in
+//     Overlay.ExtraEnv for round-trip fidelity.
+//   - Else if API_KEY has a non-null value → API_KEY wins into
+//     Core.APIKey. Overlay unchanged.
+//   - Else → Core.APIKey stays empty. Overlay unchanged.
+//
+// Empty string ("") is a valid non-null value: it is preserved
+// verbatim and does NOT trigger fallback to the other slot. That
+// matches operator intent — a user who explicitly writes `""` is
+// asking Claude Code to run with an empty token, not asking claudecm
+// to substitute a different credential. The null case is the only one
+// that skips the slot entirely.
 
 package claudecode
 
@@ -136,6 +153,20 @@ func (a *Adapter) importFromSettings(ctx context.Context, r *storage.Resolver) (
 		}
 	}
 
+	// Shape-check "env" before flattening. A non-object env (e.g. a
+	// user typo like `"env": "sk-typo"`) would flatten to the single
+	// key "env" whose value is a scalar; extractOwned would never
+	// find "env.ANTHROPIC_*" and would silently under-import every
+	// owned credential. Refuse loudly so the operator can fix the
+	// typo, matching NFR-S1's "no silent under-import" spirit.
+	// A null env is treated as absent (skip); anything present that
+	// is not a JSON object is a parse failure.
+	if v, ok := root["env"]; ok && v != nil {
+		if _, isMap := v.(map[string]any); !isMap {
+			return emptyCore, emptyOverlay, fmt.Errorf("%w: %s: env key must be a JSON object, got %T", ErrParseFailed, path, v)
+		}
+	}
+
 	flat, err := writepath.Flatten(root)
 	if err != nil {
 		return emptyCore, emptyOverlay, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, path, err)
@@ -176,16 +207,23 @@ func extractOwned(flat map[string]any) (adapter.CoreFromTool, adapter.OverlayFro
 		core.SmallFastModel = v
 	}
 
-	// AUTH_TOKEN vs API_KEY precedence — see file-level godoc.
-	authToken, hasAuth := getEnvString("ANTHROPIC_AUTH_TOKEN")
-	apiKey, hasAPIKey := getEnvString("ANTHROPIC_API_KEY")
+	// AUTH_TOKEN vs API_KEY precedence — see file-level godoc for the
+	// full rule. The critical property is that a JSON `null` value at
+	// AUTH_TOKEN must NOT shadow a real string at API_KEY. Empty
+	// string is a valid non-null value and is preserved verbatim.
+	hasAuth := hasNonNullEnvValue(flat, "ANTHROPIC_AUTH_TOKEN")
+	hasAPIKey := hasNonNullEnvValue(flat, "ANTHROPIC_API_KEY")
 	switch {
 	case hasAuth && hasAPIKey:
+		authToken, _ := getEnvString("ANTHROPIC_AUTH_TOKEN")
+		apiKey, _ := getEnvString("ANTHROPIC_API_KEY")
 		core.APIKey = authToken
 		putOverlayEnv(&overlay, "ANTHROPIC_API_KEY", apiKey)
 	case hasAuth:
+		authToken, _ := getEnvString("ANTHROPIC_AUTH_TOKEN")
 		core.APIKey = authToken
 	case hasAPIKey:
+		apiKey, _ := getEnvString("ANTHROPIC_API_KEY")
 		core.APIKey = apiKey
 	}
 
@@ -200,6 +238,26 @@ func extractOwned(flat map[string]any) (adapter.CoreFromTool, adapter.OverlayFro
 	}
 
 	return core, overlay
+}
+
+// hasNonNullEnvValue reports whether flat carries an env.<key> entry
+// whose value is NOT JSON null. Used by the AUTH_TOKEN vs API_KEY
+// precedence to distinguish three shapes:
+//
+//   - key absent from map            → returns false
+//   - key present with value == nil  → returns false (JSON null)
+//   - key present with any other v   → returns true (including "")
+//
+// Empty string is deliberately treated as "present, valid value" so
+// that a user who explicitly clears AUTH_TOKEN by writing `""` is not
+// second-guessed by claudecm silently promoting API_KEY into its slot.
+// See the file-level godoc for the policy rationale.
+func hasNonNullEnvValue(flat map[string]any, envKey string) bool {
+	v, ok := flat["env."+envKey]
+	if !ok {
+		return false
+	}
+	return v != nil
 }
 
 // putOverlayEnv lazily initializes overlay.ExtraEnv and writes v under
@@ -244,36 +302,36 @@ func coerceToString(v any) string {
 	}
 }
 
-// verifyReadTargetInHome performs the read-side symlink containment
-// check. If path exists and is a symlink, EvalSymlinks the target and
-// require the result to live under HOME. Absent files and plain
-// (non-symlink) files pass through; the actual read decides existence.
-// A stat error other than ErrNotExist is surfaced verbatim.
+// verifyReadTargetInHome performs the read-side containment check.
+// It resolves the FULL path (not just the leaf) through EvalSymlinks
+// so a symlink at ANY component — including a parent directory such
+// as ~/.claude — must land inside HOME. An earlier revision only
+// Lstat'd the leaf; that contradicted the file-level symlink policy
+// because a hostile parent symlink (e.g. ~/.claude → /etc) would slip
+// through and Import would happily read /etc/settings.json.
 //
-// Duplicating checkUnderHome's semantics rather than exporting it: the
-// write-path's helper is scoped to "planning a write, parent may not
-// exist yet". The read path needs the simpler "the file itself must
-// exist and resolve inside HOME"; conflating the two would force the
-// write-path helper to grow flags. Small duplication, clear contracts.
+// Behaviour:
+//
+//   - EvalSymlinks succeeds → filepath.Rel against the resolved HOME.
+//     A ".." prefix or absolute rel means the resolved path escapes
+//     HOME → ErrOutsideHome. Otherwise nil.
+//   - EvalSymlinks returns ErrNotExist → the file simply is not
+//     there (missing config, or dangling symlink target). Return
+//     ErrNoConfig so the caller presents the "nothing to import" UX.
+//   - Any other EvalSymlinks error → surface verbatim.
+//
+// The write-path's checkUnderHome does something similar but is
+// scoped to "planning a write, parent may not exist yet". The read
+// side always requires the file to already exist, so it is simpler
+// to inline the semantics than to grow the write-path helper.
 func verifyReadTargetInHome(path string, r *storage.Resolver) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil // caller will handle absence via ErrNoConfig
-		}
-		return fmt.Errorf("claudecode import: lstat %q: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		return nil // plain file; nothing to resolve
-	}
-
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		// Dangling symlink → treat as "no config" so the caller can
-		// present the missing-config UX. Any other resolution error is
-		// surfaced verbatim.
+		// ErrNotExist covers both "file/parent absent" and "dangling
+		// symlink target". Both map to ErrNoConfig; the caller does
+		// not care which shape produced the absence.
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: %s (dangling symlink target)", ErrNoConfig, path)
+			return fmt.Errorf("%w: %s", ErrNoConfig, path)
 		}
 		return fmt.Errorf("claudecode import: evalsymlinks %q: %w", path, err)
 	}
