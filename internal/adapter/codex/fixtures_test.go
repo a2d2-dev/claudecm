@@ -48,12 +48,19 @@ package codex_test
 // edge/config-only case whose profile carries Core.APIKey — Plan
 // still emits an auth plan there because the profile claims a slot.
 //
-// Symlink-out-of-HOME. The edge/symlink-out-of-home case seeds a
-// config.toml body inside the fixture dir, then the test setup writes
-// those bytes to a second t.TempDir (a sibling of HOME) and symlinks
-// ~/.codex/config.toml → that outside-HOME real file. Import must
-// refuse via ErrOutsideHome. The case is marked error-only and skips
-// every stage golden — the error assertion IS the check.
+// Symlink-out-of-HOME. Two symmetric cases pin the containment check
+// on both files:
+//
+//	edge/symlink-out-of-home/       — ~/.codex/config.toml → outside HOME
+//	edge/symlink-out-of-home-auth/  — ~/.codex/auth.json   → outside HOME
+//
+// Each seeds the target body inside the fixture dir, then the test
+// setup writes those bytes to a second t.TempDir (a sibling of HOME)
+// and symlinks the ~/.codex/<name> entry to that outside-HOME real
+// file. Import must refuse via ErrOutsideHome for either. Both are
+// marked error-only and skip every stage golden — the error assertion
+// IS the check. Routing is driven by fixtureCase.SymlinkTarget
+// ("config" or "auth"), keyed off the case directory name.
 //
 // Missing / empty / whitespace-only / malformed. Error-only fixtures
 // pin Import's early-exit behaviour:
@@ -63,7 +70,8 @@ package codex_test
 //	edge/whitespace-only/    — both files whitespace-only → ErrNoConfig
 //	edge/malformed-config/   — config.toml unterminated → ErrParseFailed
 //	edge/malformed-auth/     — auth.json unterminated → ErrParseFailed
-//	edge/symlink-out-of-home/ — config.toml resolves outside HOME → ErrOutsideHome
+//	edge/symlink-out-of-home/      — config.toml resolves outside HOME → ErrOutsideHome
+//	edge/symlink-out-of-home-auth/ — auth.json resolves outside HOME → ErrOutsideHome
 //
 // Silent-skip tripwire. Because a missing golden is a valid skip
 // signal, runFixtureCase tracks a compareCount of how many stages
@@ -129,6 +137,34 @@ func shouldUpdate() bool {
 type importCanonical struct {
 	Core    adapter.CoreFromTool    `json:"core"`
 	Overlay adapter.OverlayFromTool `json:"overlay"`
+}
+
+// planCanonical is the JSON shape written to expected/plans.json.
+// Transform + Parser are intentionally omitted: closures and
+// interface values do not marshal, and their behavior is pinned via
+// the after_apply_*.{toml,json} byte-verbatim goldens instead. This
+// projection is the "shallow" plan golden — plan slot order, target
+// path, owned-key allowlist, and reason string.
+type planCanonical struct {
+	Tool      string   `json:"tool"`
+	Target    string   `json:"target"`
+	OwnedKeys []string `json:"owned_keys"`
+	Reason    string   `json:"reason"`
+}
+
+// projectPlans distills a []WritePlan down to the serializable
+// planCanonical projection, preserving Plan's returned order.
+func projectPlans(plans []adapter.WritePlan) []planCanonical {
+	out := make([]planCanonical, 0, len(plans))
+	for _, p := range plans {
+		out = append(out, planCanonical{
+			Tool:      p.Tool,
+			Target:    p.Target,
+			OwnedKeys: append([]string(nil), p.OwnedKeys...),
+			Reason:    p.Reason,
+		})
+	}
+	return out
 }
 
 // TestFixtures is the matrix entry point. It walks fixturesRoot,
@@ -198,8 +234,12 @@ type fixtureCase struct {
 	AuthPath    string // path to fixture auth.json, "" if none
 	ProfilePath string // path to profile.yaml, "" when absent
 
-	// Setup mode.
-	SymlinkOutOfHome bool // ~/.codex/config.toml → outside-HOME real file
+	// Setup mode. SymlinkTarget names the ~/.codex/ file that should be
+	// wired as an out-of-HOME symlink for the read-side containment
+	// check. Empty string means "no symlink wiring" (the common case).
+	// Valid values: "" | "config" | "auth". Routing is keyed off the
+	// case directory name in discoverCases.
+	SymlinkTarget    string
 	ErrorOnlyErrName string
 	ErrorOnly        bool
 }
@@ -253,11 +293,11 @@ func discoverCases(root string) ([]fixtureCase, error) {
 			}
 
 			c := fixtureCase{
-				Class:            class,
-				Name:             name,
-				Dir:              dir,
-				Expected:         filepath.Join(dir, "expected"),
-				SymlinkOutOfHome: name == "symlink-out-of-home",
+				Class:         class,
+				Name:          name,
+				Dir:           dir,
+				Expected:      filepath.Join(dir, "expected"),
+				SymlinkTarget: symlinkTargetForName(name),
 			}
 			if hasConfig {
 				c.ConfigPath = configP
@@ -281,6 +321,23 @@ func discoverCases(root string) ([]fixtureCase, error) {
 		}
 	}
 	return out, nil
+}
+
+// symlinkTargetForName maps a case directory name to the ~/.codex/
+// file that should be wired as an out-of-HOME symlink. Empty string
+// means "no symlink wiring". Keyed by name so the discovery step
+// stays a pure function of the on-disk layout and new symmetric
+// cases (config-side vs auth-side) can be added by directory name
+// alone.
+func symlinkTargetForName(name string) string {
+	switch name {
+	case "symlink-out-of-home":
+		return "config"
+	case "symlink-out-of-home-auth":
+		return "auth"
+	default:
+		return ""
+	}
 }
 
 // statOK folds any error to false.
@@ -351,6 +408,18 @@ func runFixtureCase(t *testing.T, tc fixtureCase) {
 		if len(plans) < 1 || len(plans) > 2 {
 			t.Fatalf("Plan returned %d plans, want 1 or 2", len(plans))
 		}
+
+		// Plan golden. Shallow projection: {Tool, Target, OwnedKeys,
+		// Reason} per WritePlan, in the order Plan returned them (auth
+		// -> config for two-plan cases, single-plan otherwise). The
+		// Transform + Parser fields are function/interface values and
+		// intentionally NOT serializable — their behavior is covered
+		// via the after_apply_*.{toml,json} byte-verbatim goldens.
+		plansGolden := filepath.Join(tc.Expected, "plans.json")
+		if assertOrUpdateJSON(t, plansGolden, projectPlans(plans), r) {
+			compareCount++
+		}
+
 		for i, p := range plans {
 			if _, err := codex.New().Apply(context.Background(), r, p); err != nil {
 				t.Fatalf("Apply[%d] target=%q: %v", i, p.Target, err)
@@ -362,8 +431,8 @@ func runFixtureCase(t *testing.T, tc fixtureCase) {
 		// elision) — the byte-compare against a non-existent golden is
 		// the skip signal.
 		afterConfigGolden := filepath.Join(tc.Expected, "after_apply_config.toml")
-		if got, ok := readIfExists(codex.ConfigPath(r)); ok {
-			if assertOrUpdateBytes(t, afterConfigGolden, got) {
+		if got, ok := readIfExists(t, codex.ConfigPath(r)); ok {
+			if assertOrUpdateBytes(t, afterConfigGolden, got, r) {
 				compareCount++
 			}
 		} else if shouldUpdate() {
@@ -374,8 +443,8 @@ func runFixtureCase(t *testing.T, tc fixtureCase) {
 		}
 
 		afterAuthGolden := filepath.Join(tc.Expected, "after_apply_auth.json")
-		if got, ok := readIfExists(codex.AuthPath(r)); ok {
-			if assertOrUpdateBytes(t, afterAuthGolden, got) {
+		if got, ok := readIfExists(t, codex.AuthPath(r)); ok {
+			if assertOrUpdateBytes(t, afterAuthGolden, got, r) {
 				compareCount++
 			}
 		} else if shouldUpdate() {
@@ -442,28 +511,17 @@ func newFixtureResolver(t *testing.T) *storage.Resolver {
 func seedFiles(t *testing.T, r *storage.Resolver, tc fixtureCase) {
 	t.Helper()
 
-	if tc.SymlinkOutOfHome {
-		// Write config.toml bytes to a sibling of HOME (a second
-		// t.TempDir), then symlink ~/.codex/config.toml to that
-		// out-of-HOME path. EvalSymlinks resolves the leaf outside
-		// HOME → Import fails with ErrOutsideHome.
-		if tc.ConfigPath == "" {
-			t.Fatalf("symlink-out-of-home fixture missing config.toml")
-		}
-		src, err := os.ReadFile(tc.ConfigPath)
-		if err != nil {
-			t.Fatalf("read fixture config.toml %q: %v", tc.ConfigPath, err)
-		}
-		outside := t.TempDir()
-		actual := filepath.Join(outside, "config.toml")
-		if err := os.WriteFile(actual, src, 0o600); err != nil {
-			t.Fatalf("write out-of-HOME config.toml: %v", err)
-		}
-		dst := codex.ConfigPath(r)
-		if err := os.Symlink(actual, dst); err != nil {
-			t.Fatalf("symlink config.toml → %q: %v", actual, err)
-		}
+	switch tc.SymlinkTarget {
+	case "":
+		// no-op; fall through to the regular copy path
+	case "config":
+		seedOutOfHomeSymlink(t, tc.ConfigPath, "config.toml", codex.ConfigPath(r))
 		return
+	case "auth":
+		seedOutOfHomeSymlink(t, tc.AuthPath, "auth.json", codex.AuthPath(r))
+		return
+	default:
+		t.Fatalf("seedFiles: unknown SymlinkTarget %q for %s/%s", tc.SymlinkTarget, tc.Class, tc.Name)
 	}
 
 	if tc.ConfigPath != "" {
@@ -486,6 +544,30 @@ func seedFiles(t *testing.T, r *storage.Resolver, tc fixtureCase) {
 	}
 }
 
+// seedOutOfHomeSymlink writes the fixture's seed body to a sibling
+// t.TempDir (a directory outside HOME) and then symlinks the
+// ~/.codex/ destination to that outside-HOME real file. Used by both
+// symlink-out-of-home cases (config-side and auth-side). Fails the
+// test if the fixture is missing the required seed file.
+func seedOutOfHomeSymlink(t *testing.T, srcPath, srcName, dst string) {
+	t.Helper()
+	if srcPath == "" {
+		t.Fatalf("symlink-out-of-home fixture missing %s", srcName)
+	}
+	src, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("read fixture %s %q: %v", srcName, srcPath, err)
+	}
+	outside := t.TempDir()
+	actual := filepath.Join(outside, srcName)
+	if err := os.WriteFile(actual, src, 0o600); err != nil {
+		t.Fatalf("write out-of-HOME %s: %v", srcName, err)
+	}
+	if err := os.Symlink(actual, dst); err != nil {
+		t.Fatalf("symlink %s → %q: %v", srcName, actual, err)
+	}
+}
+
 // loadProfile decodes tc.ProfilePath into a config.Profile. When the
 // fixture omits profile.yaml, returns (zero Profile, false).
 func loadProfile(t *testing.T, tc fixtureCase) (config.Profile, bool) {
@@ -505,18 +587,18 @@ func loadProfile(t *testing.T, tc fixtureCase) (config.Profile, bool) {
 }
 
 // readIfExists returns (bytes, true) when path exists, (nil, false)
-// otherwise. Any non-ENOENT error is a test fatal.
-func readIfExists(path string) ([]byte, bool) {
+// on ENOENT (the auth-elision or config-elision skip signal). ANY
+// other error (permissions, EIO, symlink loop, …) is a bug in the
+// test harness — never a signal we want to silently fold into
+// "file absent" — so it fails the test loudly via t.Fatalf.
+func readIfExists(t *testing.T, path string) ([]byte, bool) {
+	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false
 		}
-		// Anything else is a bug in the test harness — panic via a
-		// helper would need a *testing.T. Return (nil, false) so the
-		// caller treats it as "file absent" and the golden compare
-		// still surfaces the mismatch.
-		return nil, false
+		t.Fatalf("readIfExists %q: non-ENOENT error: %v", path, err)
 	}
 	return data, true
 }
@@ -531,8 +613,7 @@ func assertOrUpdateJSON(t *testing.T, goldenPath string, got any, r *storage.Res
 		t.Fatalf("marshal for %q: %v", goldenPath, err)
 	}
 	buf = append(buf, '\n')
-	buf = redactHome(buf, r)
-	return assertOrUpdateBytes(t, goldenPath, buf)
+	return assertOrUpdateBytes(t, goldenPath, buf, r)
 }
 
 // redactHome replaces the per-test HOME path with the literal "<HOME>"
@@ -566,9 +647,13 @@ func clearFixtureEnv(t *testing.T) {
 }
 
 // assertOrUpdateBytes is the raw-bytes cousin of assertOrUpdateJSON.
-// Used for after_apply_*.toml/.json bytes.
-func assertOrUpdateBytes(t *testing.T, goldenPath string, got []byte) bool {
+// Used for after_apply_*.toml/.json bytes. Applies redactHome to
+// keep goldens portable when a future fixture embeds a HOME-derived
+// absolute path in an owned string field — otherwise the golden
+// would only match on the regen machine.
+func assertOrUpdateBytes(t *testing.T, goldenPath string, got []byte, r *storage.Resolver) bool {
 	t.Helper()
+	got = redactHome(got, r)
 
 	if shouldUpdate() {
 		if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
