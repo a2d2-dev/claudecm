@@ -24,14 +24,21 @@ jobs:
           # strictly requires LC_UUID in every Mach-O binary. Go 1.21's
           # linker omits LC_UUID for some small test binaries (see
           # golang/go#64207); the fix was backported to 1.22 and 1.23 but
-          # NOT to 1.21 (EOL Aug 2024). We still want to exercise Go 1.21
-          # on macOS, so we run that cell on macos-14 (Sonoma) below,
-          # whose dyld tolerates the missing load command.
+          # continues to intermittently misfire on tiny test binaries
+          # (observed on internal/config.test whose Mach-O falls under
+          # the LC_UUID emission threshold). To keep the cell honest we
+          # route BOTH 1.21 and 1.22 to macos-14 (Sonoma) below, whose
+          # dyld tolerates the missing load command. 1.23 has the fix
+          # holding reliably in our matrix and stays on macos-latest.
           - os: macos-latest
             go-version: '1.21'
+          - os: macos-latest
+            go-version: '1.22'
         include:
           - os: macos-14
             go-version: '1.21'
+          - os: macos-14
+            go-version: '1.22'
 
     steps:
     - name: Checkout code
