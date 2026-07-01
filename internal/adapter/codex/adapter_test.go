@@ -378,6 +378,114 @@ func TestRegistrationHappensInInit(t *testing.T) {
 	}
 }
 
+// TestRegistration_DuplicatePanics — F6. The panic-on-duplicate rule
+// in adapter.DefaultRegistry is defence-in-depth against two adapter
+// packages accidentally claiming the same ToolID. Because init()
+// already registered ToolCodex when this test package loaded, a second
+// Register call from any goroutine (including a fat-finger during
+// refactoring) MUST panic. Guarding it here means a future switch of
+// the registry to silent-overwrite semantics fails loudly.
+func TestRegistration_DuplicatePanics(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic on duplicate adapter.Register(ToolCodex); got nil")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			if err, isErr := r.(error); isErr {
+				msg = err.Error()
+			} else {
+				t.Fatalf("panic value not a string or error: %#v", r)
+			}
+		}
+		if !contains(msg, "duplicate") && !contains(msg, "already registered") {
+			t.Fatalf("panic message = %q, want mention of \"duplicate\" or \"already registered\"", msg)
+		}
+	}()
+	adapter.Register(adapter.ToolCodex, codex.New)
+}
+
+// TestDetect_ConfigDirIsSymlink covers the ~/.codex-is-a-symlink
+// warning branch. The dir is a real directory reached through a
+// symlink at the ~/.codex path; Detect must report Detected + note
+// the symlink so the operator knows the write-path will need
+// symlink-aware semantics before switch.
+func TestDetect_ConfigDirIsSymlink(t *testing.T) {
+	r := newResolver(t)
+	target := filepath.Join(r.Home(), "codex-real")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("mkdir target: %v", err)
+	}
+	link := filepath.Join(r.Home(), ".codex")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink .codex -> codex-real: %v", err)
+	}
+	p, err := codex.New().Detect(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if !p.Detected {
+		t.Errorf("Presence.Detected = false, want true (symlinked dir target present)")
+	}
+	if !contains(p.Notes, "symlink") {
+		t.Errorf("Presence.Notes = %q, want mention of symlink warning", p.Notes)
+	}
+}
+
+// TestDetect_FreshHomeFallbackNoteFires isolates the fallback
+// "!p.Detected && p.Notes == ''" branch by clearing PATH so the
+// binary probe cannot fire. This makes the test independent of
+// whether the CI host has `codex` installed — the earlier
+// TestDetect_FreshHomeReturnsNotInstalled skips when the host does.
+func TestDetect_FreshHomeFallbackNoteFires(t *testing.T) {
+	t.Setenv("PATH", "")
+	r := newResolver(t)
+	p, err := codex.New().Detect(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if p.Detected {
+		t.Errorf("Presence.Detected = true, want false")
+	}
+	if !contains(p.Notes, "no .codex directory") {
+		t.Errorf("Presence.Notes = %q, want fresh-home fallback message", p.Notes)
+	}
+}
+
+// TestDetect_NoteAccumulatesAcrossProbes — F4. When one probe surfaces
+// a diagnostic (e.g. auth.json is directory-shaped) AND another probe
+// then finds a legitimate owned file (config.toml on disk), the
+// composite Notes must carry BOTH signals. The pre-F4 code overwrote
+// p.Notes on the second probe and hid the shape from the operator.
+func TestDetect_NoteAccumulatesAcrossProbes(t *testing.T) {
+	r := newResolver(t)
+	if err := os.MkdirAll(filepath.Join(r.Home(), ".codex", "auth.json"), 0o755); err != nil {
+		t.Fatalf("mkdir auth.json as dir: %v", err)
+	}
+	cfg := filepath.Join(r.Home(), ".codex", "config.toml")
+	if err := os.WriteFile(cfg, []byte("# empty\n"), 0o600); err != nil {
+		t.Fatalf("write config.toml: %v", err)
+	}
+
+	p, err := codex.New().Detect(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if !p.Installed {
+		t.Errorf("Presence.Installed = false, want true (config.toml present)")
+	}
+	if !contains(p.Notes, "is a directory") {
+		t.Errorf("Presence.Notes = %q, want mention of auth.json directory shape", p.Notes)
+	}
+	if !contains(p.Notes, "detected via "+cfg) {
+		t.Errorf("Presence.Notes = %q, want mention of config.toml detection", p.Notes)
+	}
+	if !contains(p.Notes, "; ") {
+		t.Errorf("Presence.Notes = %q, want \"; \" separator between signals", p.Notes)
+	}
+}
+
 // TestStubsReturnErrNotImplemented locks in the fact that the
 // non-E4-S1 methods are still stubs. When E4-S2..E4-S6 land they will
 // each remove one branch of this test alongside their implementation.

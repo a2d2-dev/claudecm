@@ -123,6 +123,21 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 		return p, err
 	}
 
+	// appendNote accumulates diagnostics into p.Notes instead of
+	// overwriting. When the first probe surfaces a permission-denied
+	// or "not a directory" diagnostic and a later probe finds the
+	// owned file anyway, both signals must remain visible — the
+	// original F4 code overwrote the earlier note and hid the shape.
+	// Separator is "; " so the composite note reads as one sentence.
+	// All call-sites pass non-empty literals; no empty-string guard.
+	appendNote := func(note string) {
+		if p.Notes == "" {
+			p.Notes = note
+			return
+		}
+		p.Notes = p.Notes + "; " + note
+	}
+
 	// dirClaimed tracks whether the config-dir signal fired. Only
 	// probe the owned files if ~/.codex looks like a real directory —
 	// stat'ing <file>/auth.json when ~/.codex is a file gives ENOTDIR
@@ -138,19 +153,19 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 		p.Detected = true
 		dirClaimed = true
 		if dirIsSymlink {
-			p.Notes = "warning: " + dir + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)"
+			appendNote("warning: " + dir + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)")
 		}
 	case dirErr == nil:
 		// ~/.codex exists but is not a directory. Do not claim
 		// detection; leave a note so the operator can investigate.
-		p.Notes = "found ~/.codex but it is not a directory"
+		appendNote("found ~/.codex but it is not a directory")
 	case errors.Is(dirErr, os.ErrNotExist):
 		// Fall through — Notes populated below only if nothing else
 		// fires.
 	default:
 		// Any other stat error (permissions, IO) — surface it in Notes
 		// but do not fail Detect; the PATH probe below may still fire.
-		p.Notes = "stat ~/.codex: " + dirErr.Error()
+		appendNote("stat ~/.codex: " + dirErr.Error())
 	}
 
 	if dirClaimed {
@@ -176,25 +191,23 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 					// write-path will refuse to write through an
 					// out-of-HOME symlink, so Files must not promise
 					// ownership of a path the writer will reject.
-					p.Notes = "warning: " + probe.path + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)"
+					appendNote("warning: " + probe.path + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)")
 				} else {
 					p.Files = append(p.Files, probe.path)
-					if p.Notes == "" || (len(p.Files) == 1) {
-						p.Notes = "detected via " + probe.path
-					} else {
-						p.Notes = "detected via " + p.Files[0] + " (+" + probe.label + ")"
-					}
+					appendNote("detected via " + probe.path)
 				}
 			case fileErr == nil:
 				// A directory sitting at an owned-file path is
 				// anomalous but not our bug to solve; report it and
 				// do not treat as installed via this probe.
-				p.Notes = "found " + probe.path + " but it is a directory"
+				appendNote("found " + probe.path + " but it is a directory")
 			case errors.Is(fileErr, os.ErrNotExist):
 				// Not installed via this file; keep probing.
 			default:
-				// Non-ErrNotExist error: leave a note, keep going.
-				p.Notes = "stat " + probe.path + ": " + fileErr.Error()
+				// Non-ErrNotExist error: leave a note, keep going. The
+				// earlier probe's diagnostic (if any) survives via the
+				// appendNote accumulator — the F4 fix.
+				appendNote("stat " + probe.path + ": " + fileErr.Error())
 			}
 		}
 	}
@@ -205,9 +218,7 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 	if path, err := exec.LookPath(binaryName); err == nil {
 		p.Installed = true
 		p.Detected = true
-		if p.Notes == "" {
-			p.Notes = "detected via " + binaryName + " on PATH (" + path + ")"
-		}
+		appendNote("detected via " + binaryName + " on PATH (" + path + ")")
 	}
 
 	if !p.Detected && p.Notes == "" {

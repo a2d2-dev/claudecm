@@ -2,10 +2,32 @@ package codex
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
 )
+
+// TestInitPanic_WrapsSortErrChain guards the F5 fix: init()'s panic
+// value wraps the sentinel via fmt.Errorf(%w) so a downstream
+// recover() can still errors.As back to *sortErr or
+// *duplicateOwnedKeyError. Regressing to errors.New(prefix +
+// err.Error()) would break the chain silently.
+func TestInitPanic_WrapsSortErrChain(t *testing.T) {
+	wrapped := fmt.Errorf("codex.OwnedKeysConfigTOML: %w", validateOwnedKeys([]string{"b", "a"}))
+	var se *sortErr
+	if !errors.As(wrapped, &se) {
+		t.Fatalf("wrapped panic value must errors.As to *sortErr; got %v", wrapped)
+	}
+}
+
+func TestInitPanic_WrapsDuplicateErrChain(t *testing.T) {
+	wrapped := fmt.Errorf("codex.OwnedKeysAuthJSON: %w", validateOwnedKeys([]string{"model", "model"}))
+	var de *duplicateOwnedKeyError
+	if !errors.As(wrapped, &de) {
+		t.Fatalf("wrapped panic value must errors.As to *duplicateOwnedKeyError; got %v", wrapped)
+	}
+}
 
 // TestValidateOwnedKeys_HappyPath — the sorted-and-unique real slices
 // pass; a regression here would take init() with it.
@@ -131,14 +153,24 @@ func TestOwnedKeys_NoOverlapBetweenFiles(t *testing.T) {
 // TestOwnedKeysConfigTOML_ExpectedKeysPresent asserts every key the
 // story's AC names is actually shipped. Missing any of these would
 // silently drop a Codex config knob from the merge-preserve owned set.
+//
+// v1 ships concrete flat leaves matching writepath.Flatten output —
+// the provider-agnostic top-level knobs plus the explicit `openai`
+// and `anthropic` provider entries. Any post-v1 provider expansion
+// requires an ADR + PRD §4.7 edit.
 func TestOwnedKeysConfigTOML_ExpectedKeysPresent(t *testing.T) {
 	required := []string{
+		"approval_mode",
 		"model",
 		"model_provider",
-		"model_providers.<name>.base_url",
-		"model_providers.<name>.wire_api",
-		"model_providers.<name>.env_key",
-		"model_providers.<name>.name",
+		"model_providers.openai.base_url",
+		"model_providers.openai.env_key",
+		"model_providers.openai.name",
+		"model_providers.openai.wire_api",
+		"model_providers.anthropic.base_url",
+		"model_providers.anthropic.env_key",
+		"model_providers.anthropic.name",
+		"model_providers.anthropic.wire_api",
 	}
 	have := make(map[string]struct{}, len(OwnedKeysConfigTOML))
 	for _, k := range OwnedKeysConfigTOML {
@@ -152,12 +184,19 @@ func TestOwnedKeysConfigTOML_ExpectedKeysPresent(t *testing.T) {
 }
 
 // TestOwnedKeysAuthJSON_ExpectedKeysPresent asserts the auth top-level
-// fields declared by architecture §3.1 are shipped. OPENAI_API_KEY is
-// the anchor; the rest are frozen here in code per the arch
-// requirement "expanded in the adapter's var ownedAuthKeys".
+// fields declared by architecture §3.1 are shipped. v1 enumerates the
+// concrete flat leaves of the OAuth token bundle instead of a bare
+// `tokens` key — the write-path flattens nested JSON to dotted paths,
+// so `tokens` alone would not match anything in the merged document.
 func TestOwnedKeysAuthJSON_ExpectedKeysPresent(t *testing.T) {
 	required := []string{
 		"OPENAI_API_KEY",
+		"auth_mode",
+		"last_refresh",
+		"tokens.access_token",
+		"tokens.account_id",
+		"tokens.id_token",
+		"tokens.refresh_token",
 	}
 	have := make(map[string]struct{}, len(OwnedKeysAuthJSON))
 	for _, k := range OwnedKeysAuthJSON {
@@ -177,12 +216,17 @@ func TestOwnedKeysAuthJSON_ExpectedKeysPresent(t *testing.T) {
 // scope of what claudecm claims to own.
 func TestOwnedKeysConfigTOML_NoUnexpectedKeys(t *testing.T) {
 	golden := []string{
+		"approval_mode",
 		"model",
 		"model_provider",
-		"model_providers.<name>.base_url",
-		"model_providers.<name>.env_key",
-		"model_providers.<name>.name",
-		"model_providers.<name>.wire_api",
+		"model_providers.anthropic.base_url",
+		"model_providers.anthropic.env_key",
+		"model_providers.anthropic.name",
+		"model_providers.anthropic.wire_api",
+		"model_providers.openai.base_url",
+		"model_providers.openai.env_key",
+		"model_providers.openai.name",
+		"model_providers.openai.wire_api",
 	}
 	if !reflect.DeepEqual(OwnedKeysConfigTOML, golden) {
 		t.Fatalf("OwnedKeysConfigTOML drifted from golden:\n got: %v\nwant: %v", OwnedKeysConfigTOML, golden)
@@ -192,8 +236,12 @@ func TestOwnedKeysConfigTOML_NoUnexpectedKeys(t *testing.T) {
 func TestOwnedKeysAuthJSON_NoUnexpectedKeys(t *testing.T) {
 	golden := []string{
 		"OPENAI_API_KEY",
+		"auth_mode",
 		"last_refresh",
-		"tokens",
+		"tokens.access_token",
+		"tokens.account_id",
+		"tokens.id_token",
+		"tokens.refresh_token",
 	}
 	if !reflect.DeepEqual(OwnedKeysAuthJSON, golden) {
 		t.Fatalf("OwnedKeysAuthJSON drifted from golden:\n got: %v\nwant: %v", OwnedKeysAuthJSON, golden)
