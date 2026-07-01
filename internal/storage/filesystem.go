@@ -9,6 +9,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// All filesystem paths in this file are constructed through paths.go
+// (ProfilePath, ProfilesDir, StatePath). Do NOT reintroduce inline
+// filepath.Join over user input here — that is a coding-standards rule 3
+// violation (see docs/architecture/coding-standards.md).
+
 // Storage defines the interface for profile and state persistence
 type Storage interface {
 	// SaveProfile writes a profile to disk
@@ -52,16 +57,12 @@ func (fs *FileStorage) SaveProfile(profile *config.Profile) error {
 		return fmt.Errorf("failed to ensure config directory: %w", err)
 	}
 
-	// Get profile path
-	profilePath, err := GetProfilePath(profile.Name)
+	// ProfilePath validates the profile name (NFR-S5), refuses traversal,
+	// and guarantees the result stays under the resolved HOME. Callers do
+	// not need to re-check.
+	profilePath, err := ProfilePath(profile.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get profile path: %w", err)
-	}
-
-	// Validate path (prevent directory traversal)
-	profilesDir, _ := GetProfilesDir()
-	if !strings.HasPrefix(profilePath, profilesDir) {
-		return fmt.Errorf("invalid profile name: path traversal detected")
 	}
 
 	// Marshal to YAML through the schema gateway so schema_version is always
@@ -91,7 +92,7 @@ func (fs *FileStorage) LoadProfile(name string) (*config.Profile, error) {
 		return nil, fmt.Errorf("profile name cannot be empty")
 	}
 
-	profilePath, err := GetProfilePath(name)
+	profilePath, err := ProfilePath(name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get profile path: %w", err)
 	}
@@ -117,7 +118,7 @@ func (fs *FileStorage) LoadProfile(name string) (*config.Profile, error) {
 
 // LoadAllProfiles reads all profiles from disk
 func (fs *FileStorage) LoadAllProfiles() ([]*config.Profile, error) {
-	profilesDir, err := GetProfilesDir()
+	profilesDir, err := ProfilesDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get profiles directory: %w", err)
 	}
@@ -158,7 +159,7 @@ func (fs *FileStorage) DeleteProfile(name string) error {
 		return fmt.Errorf("profile name cannot be empty")
 	}
 
-	profilePath, err := GetProfilePath(name)
+	profilePath, err := ProfilePath(name)
 	if err != nil {
 		return fmt.Errorf("failed to get profile path: %w", err)
 	}
@@ -175,7 +176,7 @@ func (fs *FileStorage) DeleteProfile(name string) error {
 
 // ProfileExists checks if a profile file exists
 func (fs *FileStorage) ProfileExists(name string) (bool, error) {
-	profilePath, err := GetProfilePath(name)
+	profilePath, err := ProfilePath(name)
 	if err != nil {
 		return false, err
 	}
@@ -201,7 +202,7 @@ func (fs *FileStorage) SaveState(state *config.State) error {
 		return fmt.Errorf("failed to ensure config directory: %w", err)
 	}
 
-	statePath, err := GetStatePath()
+	statePath, err := StatePath()
 	if err != nil {
 		return fmt.Errorf("failed to get state path: %w", err)
 	}
@@ -228,7 +229,7 @@ func (fs *FileStorage) SaveState(state *config.State) error {
 
 // LoadState reads the state file
 func (fs *FileStorage) LoadState() (*config.State, error) {
-	statePath, err := GetStatePath()
+	statePath, err := StatePath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get state path: %w", err)
 	}
