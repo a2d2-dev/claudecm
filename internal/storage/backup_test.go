@@ -355,11 +355,22 @@ func TestListBackups_IgnoresForeignEntries(t *testing.T) {
 		t.Fatalf("Backup = %v", err)
 	}
 	toolDir := filepath.Join(r.BackupsRoot(), "claudecode")
-	// A stray file that matches the prefix but has a malformed timestamp
-	// (retention would surface it in E1-S5; ListBackups quietly ignores it).
-	if err := os.WriteFile(filepath.Join(toolDir, "settings.json.bak.NOT-A-TIMESTAMP"),
-		[]byte("junk"), 0o600); err != nil {
-		t.Fatalf("stray file: %v", err)
+	// Foreign entries that share our "<basename>.bak." prefix but whose
+	// timestamp suffix does not match the canonical layout. All must be
+	// silently skipped — retention (E1-S5) is what surfaces junk.
+	foreign := []string{
+		// Wholly malformed timestamp.
+		"settings.json.bak.NOT-A-TIMESTAMP",
+		// Signed nanosecond field (leading '+') — Atoi would accept it,
+		// ParseUint (post-F3) rejects it.
+		"settings.json.bak.20260701T000000Z+00000000",
+		// Signed nanosecond field (leading '-').
+		"settings.json.bak.20260701T000000Z-0000001",
+	}
+	for _, name := range foreign {
+		if err := os.WriteFile(filepath.Join(toolDir, name), []byte("junk"), 0o600); err != nil {
+			t.Fatalf("stray file %s: %v", name, err)
+		}
 	}
 	// A file with the wrong basename prefix.
 	if err := os.WriteFile(filepath.Join(toolDir, "other.json.bak.20260701T000000Z000000000"),
@@ -373,6 +384,80 @@ func TestListBackups_IgnoresForeignEntries(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("ListBackups len = %d; want 1 (%+v)", len(got), got)
+	}
+}
+
+func TestListBackups_RefusesSymlinkedToolDirOutsideHome(t *testing.T) {
+	// A symlink at backups/<tool>/ pointing outside HOME must be caught.
+	// The lexical guard (ensureUnderHome) accepts the symlink path itself
+	// because it is under HOME; the EvalSymlinks + Rel check after ReadDir
+	// (F1) is what refuses the enumeration and returns ErrOutsideHome.
+	r, _ := backupHome(t)
+
+	// A real backups-shaped dir living outside HOME, with a file whose name
+	// matches our expected prefix so we can prove the enumeration never
+	// reached it.
+	outside := t.TempDir()
+	planted := filepath.Join(outside, "settings.json.bak.20260701T000000Z000000000")
+	if err := os.WriteFile(planted, []byte("leaked"), 0o600); err != nil {
+		t.Fatalf("writefile planted: %v", err)
+	}
+
+	// backups/claudecode → outside dir.
+	backupsRoot := r.BackupsRoot()
+	if err := os.MkdirAll(backupsRoot, 0o700); err != nil {
+		t.Fatalf("mkdir backups root: %v", err)
+	}
+	link := filepath.Join(backupsRoot, "claudecode")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	got, err := ListBackups(r, "claudecode", "settings.json")
+	if !errors.Is(err, ErrOutsideHome) {
+		t.Fatalf("ListBackups symlinked tool dir = %v; want ErrOutsideHome", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListBackups symlinked tool dir returned %+v; want none", got)
+	}
+}
+
+func TestBackup_InHomeSymlinkFollowsTarget(t *testing.T) {
+	// In-HOME symlink whose target is also inside HOME: Backup is allowed to
+	// follow it. The receipt's SourcePath preserves the caller-supplied
+	// symlink path, while the hashed bytes are those of the resolved target.
+	r, home := backupHome(t)
+	targetData := []byte(`{"following":"symlink"}` + "\n")
+	target := writeSource(t, home, ".claude/real-settings.json", targetData)
+
+	link := filepath.Join(home, ".claude", "settings-link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	rec, err := Backup(r, "claudecode", "settings-link.json", link)
+	if err != nil {
+		t.Fatalf("Backup in-home symlink = %v", err)
+	}
+	if rec.SourcePath != link {
+		t.Fatalf("BackupRecord.SourcePath = %q; want raw symlink %q", rec.SourcePath, link)
+	}
+	// Fingerprint hashes the bytes of the resolved target.
+	want := sha256.Sum256(targetData)
+	if rec.Fingerprint.SHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("Fingerprint.SHA256 = %q; want %q (target bytes)",
+			rec.Fingerprint.SHA256, hex.EncodeToString(want[:]))
+	}
+	if rec.Fingerprint.Size != int64(len(targetData)) {
+		t.Fatalf("Fingerprint.Size = %d; want %d", rec.Fingerprint.Size, len(targetData))
+	}
+	// Backup file exists on disk and contains the target's bytes verbatim.
+	got, err := os.ReadFile(rec.BackupPath)
+	if err != nil {
+		t.Fatalf("readfile backup: %v", err)
+	}
+	if string(got) != string(targetData) {
+		t.Fatalf("backup bytes = %q; want %q", got, targetData)
 	}
 }
 

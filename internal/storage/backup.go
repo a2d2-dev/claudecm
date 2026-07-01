@@ -81,11 +81,12 @@ var ErrSourceTooLarge = errors.New("claudecm: backup source exceeds size ceiling
 // a value type: writepath.Apply will pass it by value into the reparse-check
 // step in a later story.
 type BackupRecord struct {
-	Tool        string      // "claudecode" / "codex" / ...
-	Basename    string      // basename of the source file (e.g. "settings.json")
-	SourcePath  string      // full path to the file that was backed up
-	BackupPath  string      // full path to the newly written backup file
-	Timestamp   time.Time   // captured before the write (UTC)
+	Tool       string    // "claudecode" / "codex" / ...
+	Basename   string    // basename of the source file (e.g. "settings.json")
+	SourcePath string    // full path to the file that was backed up
+	BackupPath string    // full path to the newly written backup file
+	Timestamp  time.Time // captured before the write (UTC)
+	// Fingerprint.ModTime is the source's mtime at Stat time; concurrent modification of the source during copy is out of scope of this primitive.
 	Fingerprint Fingerprint // fingerprint of the backed-up bytes
 }
 
@@ -135,6 +136,7 @@ func Backup(r *Resolver, tool, basename, srcPath string) (BackupRecord, error) {
 	// Symlink-escape check: EvalSymlinks-resolve srcPath and confirm it stays
 	// under HOME. Same rules AtomicWrite applies to its parent dir. Wrap so
 	// ErrOutsideHome is preserved for errors.Is-checks.
+	// Following symlinks whose target is inside HOME is intentional; BackupRecord.SourcePath preserves the caller's raw path, while the hashed bytes are those of the resolved target.
 	resolvedSrc, err := checkUnderHome(r, srcPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -196,15 +198,8 @@ func Backup(r *Resolver, tool, basename, srcPath string) (BackupRecord, error) {
 	// ErrTargetExists — we surface it verbatim rather than silently retry
 	// with a fresh timestamp so callers see the real problem (clock went
 	// backwards, or the seam was set to a fixed value in a test).
-	fp, err := AtomicWrite(r, dst, buf.Bytes(), AtomicWriteOptions{Mode: 0o600, MustNotExist: true})
-	if err != nil {
+	if _, err := AtomicWrite(r, dst, buf.Bytes(), AtomicWriteOptions{Mode: 0o600, MustNotExist: true}); err != nil {
 		return BackupRecord{}, err
-	}
-	// Belt and braces: the fingerprint AtomicWrite returned hashes the same
-	// bytes we just hashed, but assert size agreement so a caller who reads
-	// BackupRecord.Fingerprint.Size can trust it against info.Size().
-	if fp.Size != n {
-		return BackupRecord{}, fmt.Errorf("backup: fingerprint size mismatch: hashed %d, wrote %d", n, fp.Size)
 	}
 
 	return BackupRecord{
@@ -251,6 +246,16 @@ func ListBackups(r *Resolver, tool, basename string) ([]BackupRecord, error) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("list backups: readdir %q: %w", toolDir, err)
+	}
+
+	// The ReadDir above proved the tool dir exists; now confirm the resolved
+	// path still lives under HOME. Symmetric with Backup's source check:
+	// ensureUnderHome above is a lexical guard on the pre-resolved path, but
+	// an attacker who planted a symlink at backups/<tool>/ pointing outside
+	// HOME would slip past a HasPrefix check. checkUnderHome's EvalSymlinks
+	// + Rel dance is what catches that.
+	if _, err := checkUnderHome(r, toolDir); err != nil {
+		return nil, fmt.Errorf("list backups: %w", err)
 	}
 
 	prefix := basename + ".bak."
@@ -324,7 +329,10 @@ func parseBackupTimestamp(s string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("backup timestamp %q: %w", s, err)
 	}
-	nanos, err := strconv.Atoi(s[16:])
+	// ParseUint (not Atoi) so a signed nanosecond field like "+00000000" or
+	// "-00000001" is rejected. formatBackupTimestamp always emits nine
+	// unsigned digits; anything else is a foreign entry.
+	nanos, err := strconv.ParseUint(s[16:], 10, 32)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("backup timestamp %q nanoseconds: %w", s, err)
 	}
