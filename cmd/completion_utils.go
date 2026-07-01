@@ -13,9 +13,14 @@ func profileNamesCompletion(cmd *cobra.Command, args []string, toComplete string
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	// Create storage and manager
+	// Create storage and manager. Bootstrap is called here too so tab
+	// completion works on a fresh install where no other command has run
+	// yet; the side effect (mkdir 0700) is what the layout requires anyway.
 	resolver, err := storage.Default()
 	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	if err := storage.Bootstrap(resolver); err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}
 	store := storage.NewFileStorage(resolver)
