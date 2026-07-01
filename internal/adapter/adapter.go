@@ -192,11 +192,15 @@ type EffectiveField struct {
 	// WinningLayer is the layer this value came from.
 	WinningLayer Layer
 
-	// Source is a human-readable pointer to where the winning value
-	// lives — env var name for LayerEnvOverride, absolute file path
-	// (optionally suffixed with a JSON pointer) for LayerOnDisk,
-	// "profile.overlay" / "profile.core" for the profile layers, and
-	// "builtin-default" for the built-in default layer.
+	// Source describes where the winning value came from. For on-disk
+	// sources, the format is "<absolute-file-path>:<dotted-json-path>"
+	// where the dotted path is the gjson / writepath.Flatten style
+	// (matching the owned-key allowlist shape), NOT an RFC 6901 JSON
+	// pointer. For env sources: "env:<VARNAME>". For profile sources:
+	// "profile.core:<flat-key>" or "profile.overlay:<flat-key>" (the
+	// bare "profile.core" / "profile.overlay" spellings are also
+	// accepted from adapters that do not yet suffix a flat key). For
+	// the built-in default layer: "builtin-default".
 	Source string
 
 	// Shadowed lists every lower-precedence layer that also carried

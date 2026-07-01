@@ -116,6 +116,24 @@ var secretOwnedKeys = map[string]bool{
 	"env.ANTHROPIC_AUTH_TOKEN": true,
 }
 
+// init verifies that envVarForOwnedKey is a total function over
+// OwnedKeysSettingsJSON. Symmetric with the sorted/no-duplicate init
+// invariant in allowlist.go and the collectOwnedValues completeness
+// panic in plan.go — if a future owned key lands in the allowlist
+// without a paired env-var mapping here, the resolver would silently
+// stop projecting a real on-disk / env / overlay contribution for that
+// key. Fail LOUDLY at package load instead of degrading silently.
+func init() {
+	if len(envVarForOwnedKey) != len(OwnedKeysSettingsJSON) {
+		panic(fmt.Errorf("claudecode project: env-var map size %d != owned keys size %d", len(envVarForOwnedKey), len(OwnedKeysSettingsJSON)))
+	}
+	for _, key := range OwnedKeysSettingsJSON {
+		if _, ok := envVarForOwnedKey[key]; !ok {
+			panic(fmt.Errorf("claudecode project: owned key %q has no env-var mapping", key))
+		}
+	}
+}
+
 // projectFromProfile is the core Project body — split out of adapter.go
 // so the file that lists the adapter's public methods stays a
 // grep-friendly index. Returns an EffectiveView populated with one
@@ -123,6 +141,13 @@ var secretOwnedKeys = map[string]bool{
 //
 // Read-only: never writes to disk, never mutates the process env.
 func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, profile config.Profile) (adapter.EffectiveView, error) {
+	// TODO(E5/E7 state-schema evolution): populate
+	// view.ExternalDriftDetected / view.ExternalDriftFile once
+	// internal/config.State grows a LastAppliedPerTool[claude_code].SHA256
+	// slot. See docs/plan/stories/E3-S6.md "Implementation Notes /
+	// Decision" for the rationale — the EffectiveView fields exist on
+	// the adapter type today but are left zero-valued by E3-S6 because
+	// the state schema does not yet carry the SHA256 to compare against.
 	view := adapter.EffectiveView{Tool: adapter.ToolClaudeCode}
 
 	// Honour ctx cancellation before any filesystem or env work.

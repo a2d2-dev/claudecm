@@ -432,6 +432,95 @@ func TestProject_OverlayShadowsCore(t *testing.T) {
 	}
 }
 
+// TestProject_OnDiskBoolAndNumberValuesPreserved verifies that JSON
+// primitives on disk (bool, number) round-trip through Project with
+// their native Go type intact — not stringified — so downstream
+// renderers ("explain" printing "true"/"false" rather than "1"/"0",
+// numeric knobs staying numeric) do not silently mis-render.
+//
+// F3 followup on PR #25: locks in the "explain renders true/false not
+// 1/0" claim gjsonValueToAny makes in project.go's file-level godoc.
+func TestProject_OnDiskBoolAndNumberValuesPreserved(t *testing.T) {
+	clearClaudeEnv(t)
+	r := projectResolver(t)
+	a := claudecode.New()
+
+	// Numbers/bools, not just strings. USE_BEDROCK is a real-world case
+	// where a hand-edited settings.json can legitimately carry a bare
+	// `true`; ANTHROPIC_MODEL is stretched to a JSON number so the
+	// numeric type-preservation branch of gjsonValueToAny is covered.
+	writeSettings(t, r, `{"env":{"CLAUDE_CODE_USE_BEDROCK": true, "ANTHROPIC_MODEL": 42}}`)
+
+	view, err := a.Project(context.Background(), r, config.Profile{})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+
+	fBool := mustField(t, view, "env.CLAUDE_CODE_USE_BEDROCK")
+	if _, ok := fBool.Value.(bool); !ok {
+		t.Fatalf("env.CLAUDE_CODE_USE_BEDROCK Value type = %T, want bool", fBool.Value)
+	}
+	if fBool.Value.(bool) != true {
+		t.Fatalf("env.CLAUDE_CODE_USE_BEDROCK Value = %v, want true", fBool.Value)
+	}
+	if fBool.WinningLayer != adapter.LayerOnDisk {
+		t.Fatalf("env.CLAUDE_CODE_USE_BEDROCK WinningLayer=%q, want OnDiskToolConfig", fBool.WinningLayer)
+	}
+
+	fNum := mustField(t, view, "env.ANTHROPIC_MODEL")
+	// gjson decodes JSON numbers to float64 (matches encoding/json's
+	// default decoding shape); assert that concrete type.
+	if _, ok := fNum.Value.(float64); !ok {
+		t.Fatalf("env.ANTHROPIC_MODEL Value type = %T, want float64", fNum.Value)
+	}
+	if fNum.Value.(float64) != 42 {
+		t.Fatalf("env.ANTHROPIC_MODEL Value = %v, want 42", fNum.Value)
+	}
+	if fNum.WinningLayer != adapter.LayerOnDisk {
+		t.Fatalf("env.ANTHROPIC_MODEL WinningLayer=%q, want OnDiskToolConfig", fNum.WinningLayer)
+	}
+}
+
+// TestProject_OverlayEmptyClaudeCodeMapButOtherToolPresent covers the
+// overlayExtraEnv branch where profile.Tools is populated but does NOT
+// contain a claudecode entry — so overlayExtraEnv must return nil and
+// no ProfileOverlay contribution should appear in the resulting view.
+//
+// F5 followup on PR #25: closes the per-func coverage gap on
+// overlayExtraEnv (Tools non-nil, claudecode entry absent).
+func TestProject_OverlayEmptyClaudeCodeMapButOtherToolPresent(t *testing.T) {
+	clearClaudeEnv(t)
+	r := projectResolver(t)
+	a := claudecode.New()
+
+	// Populate Tools with a codex overlay (a real ToolID that is NOT
+	// claudecode) so overlayExtraEnv exercises the "Tools non-nil but
+	// no claudecode entry" branch. Core carries BaseURL so ProfileCore
+	// contributes and there is a field to inspect.
+	p := profileWithCore("t", "https://core.example", "", "", "")
+	p.Tools = map[config.ToolID]config.ToolOverlay{
+		adapter.ToolCodex: {
+			ExtraEnv: map[string]string{"OPENAI_API_KEY": "sk-codex"},
+		},
+	}
+
+	view, err := a.Project(context.Background(), r, p)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	f := mustField(t, view, "env.ANTHROPIC_BASE_URL")
+	if f.WinningLayer != adapter.LayerCore {
+		t.Fatalf("WinningLayer=%q, want ProfileCore", f.WinningLayer)
+	}
+	// Overlay must NOT appear in Shadowed — no claudecode overlay
+	// entry means overlayExtraEnv returns nil for this tool.
+	for _, sh := range f.Shadowed {
+		if sh.Layer == adapter.LayerOverlay {
+			t.Fatalf("Shadowed unexpectedly contains ProfileOverlay: %+v", f.Shadowed)
+		}
+	}
+}
+
 // TestProject_OverlayEmptyStringIsRealValue verifies that Overlay's
 // "" is a real value (not "absent") — symmetric with Plan's rule.
 func TestProject_OverlayEmptyStringIsRealValue(t *testing.T) {
