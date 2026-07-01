@@ -77,6 +77,9 @@ codex_whitelist=(
   # ~/.codex/auth.json and ~/.codex/config.toml under the FR-5
   # write-path. Its package godoc names both paths to document scope.
   "internal/adapter/codex/plan.go"
+  # project.go (E4-S6) reads both files for the layer-chain resolver;
+  # its package godoc names both paths to document scope.
+  "internal/adapter/codex/project.go"
   "internal/adapter/adapter.go"
 )
 

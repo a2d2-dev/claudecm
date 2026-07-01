@@ -155,6 +155,58 @@ func TestProject_EnvShadowingConfigTomlKey(t *testing.T) {
 	}
 }
 
+// TestProject_EnvShadowingCodexModelProvider — CODEX_MODEL_PROVIDER
+// shadows the config.toml `model_provider` key. Symmetric with
+// TestProject_EnvShadowingConfigTomlKey but exercises the env-var →
+// owned-key wire specifically for `model_provider` (per architecture
+// §6.1 the Codex env allowlist includes CODEX_MODEL_PROVIDER; without
+// this test, a future rename or accidental removal of the mapping
+// would silently drop env-based provider overrides).
+func TestProject_EnvShadowingCodexModelProvider(t *testing.T) {
+	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+		"CODEX_MODEL_PROVIDER": "env-provider",
+	}))
+	defer restore()
+
+	r := projectResolver(t)
+	a := codex.New()
+
+	configPath := writeConfigTOML(t, r, `model_provider = "disk-provider"
+`)
+	p := codexProfileWith("t", "", map[string]any{
+		"model_provider": "profile-provider",
+	})
+
+	view, err := a.Project(context.Background(), r, p)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	f := mustField(t, view, "model_provider")
+	if f.WinningLayer != adapter.LayerEnvOverride {
+		t.Fatalf("WinningLayer=%q, want EnvOverride", f.WinningLayer)
+	}
+	if f.Value != "env-provider" {
+		t.Fatalf("Value=%v, want env-provider", f.Value)
+	}
+	if f.Source != "env:CODEX_MODEL_PROVIDER" {
+		t.Fatalf("Source=%q, want env:CODEX_MODEL_PROVIDER", f.Source)
+	}
+	if len(f.Shadowed) != 2 {
+		t.Fatalf("Shadowed len=%d, want 2; got=%+v", len(f.Shadowed), f.Shadowed)
+	}
+	// Older-to-newer order: ProfileOverlay first, then OnDiskToolConfig.
+	if f.Shadowed[0].Layer != adapter.LayerOverlay || f.Shadowed[0].Value != "profile-provider" {
+		t.Fatalf("Shadowed[0]=%+v, want ProfileOverlay/profile-provider", f.Shadowed[0])
+	}
+	if f.Shadowed[1].Layer != adapter.LayerOnDisk || f.Shadowed[1].Value != "disk-provider" {
+		t.Fatalf("Shadowed[1]=%+v, want OnDiskToolConfig/disk-provider", f.Shadowed[1])
+	}
+	wantDiskSource := configPath + ":model_provider"
+	if f.Shadowed[1].Source != wantDiskSource {
+		t.Fatalf("Shadowed[1].Source=%q, want %q", f.Shadowed[1].Source, wantDiskSource)
+	}
+}
+
 // TestProject_EnvShadowingOpenAIBaseURL — OPENAI_BASE_URL shadows
 // model_providers.openai.base_url specifically (a nested config.toml
 // key). Verifies the env-var → owned-key mapping picks the correct

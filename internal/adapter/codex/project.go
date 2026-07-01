@@ -109,16 +109,12 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	codextoml "github.com/a2d2-dev/claudecm/internal/adapter/codex/toml"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
-	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
 // envVarForOwnedKey maps a flat owned-key path to the environment
@@ -206,13 +202,18 @@ func init() {
 //
 // Read-only: never writes to disk, never mutates the process env.
 func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, profile config.Profile) (adapter.EffectiveView, error) {
-	// TODO(E5/E7 state-schema evolution): populate
+	// TODO(task #31: state-schema evolution): populate
 	// view.ExternalDriftDetected / view.ExternalDriftFile once
 	// internal/config.State grows a LastAppliedPerTool[codex].SHA256
-	// slot. See docs/plan/stories/E4-S6.md AC 3 — the EffectiveView
-	// fields exist on the adapter type today but are left zero-valued
-	// here because the state schema does not yet carry the two SHA256s
-	// (one per file) to compare against.
+	// slot. See docs/plan/stories/E4-S6.md AC 3 for the E4-S6
+	// deferral, docs/plan/stories/E3-S6.md for the sibling
+	// Claude Code deferral (same schema-evolution dependency), and
+	// the pending "State schema evolution for drift tracking" task
+	// (#31) tracked in the sprint plan — the EffectiveView fields
+	// exist on the adapter type today but are left zero-valued here
+	// because the state schema does not yet carry the two SHA256s
+	// (one per file) to compare against. Grep for `task #31` to find
+	// every deferral site once #31 lands.
 	view := adapter.EffectiveView{Tool: adapter.ToolCodex}
 
 	// Honour ctx cancellation before any filesystem or env work.
@@ -225,13 +226,13 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 
 	// Read both files (best-effort). Missing → treat as absent for
 	// that file's OnDisk contribution. Malformed → ErrParseFailed.
-	// Symlink-outside-HOME → ErrOutsideHome. Reuses the same helpers
-	// Import uses for identical read semantics.
-	configPresent, tomlDoc, err := readCodexTOMLForProject(configPath, r)
+	// Symlink-outside-HOME → ErrOutsideHome. Uses the shared helpers
+	// in readers.go so the read semantics stay identical to Import's.
+	configPresent, tomlDoc, err := readCodexTOMLWithPrefix(configPath, r, "codex project")
 	if err != nil {
 		return view, err
 	}
-	authPresent, authRoot, authFlat, err := readCodexAuthForProject(authPath, r)
+	authPresent, authRoot, authFlat, err := readCodexAuthWithPrefix(authPath, r, "codex project")
 	if err != nil {
 		return view, err
 	}
@@ -483,85 +484,9 @@ func envOverrideLayer(envName string) *layerValue {
 	}
 }
 
-// readCodexTOMLForProject resolves configPath, verifies HOME
-// containment, and loads the TOML doc when present. Returns:
-//
-//   - (false, nil, nil) when the file is absent (ErrNotExist) OR
-//     present-but-empty per treatAsEmpty. Absence is not an error at
-//     this level.
-//   - (true, doc, nil) when the file is present and parses.
-//   - (false, nil, err) on hard failure: parse error, containment
-//     violation, or non-ENOENT read error.
-//
-// Distinct from Import's readCodexTOML in one respect: a
-// containment-check error other than ErrNotExist is surfaced as
-// ErrOutsideHome (verifyReadTargetInHomeCodex already wraps
-// ErrOutsideHome, so we just pass it through), and a parse error
-// wraps this package's ErrParseFailed sentinel (which chains through
-// writepath.ErrParseFailed) so callers can errors.Is either way. The
-// shape here matches Import's for read semantics; only the sentinel
-// chain wraps are re-established for Project so future divergence
-// stays local.
-func readCodexTOMLForProject(configPath string, r *storage.Resolver) (bool, *codextoml.Doc, error) {
-	if err := verifyReadTargetInHomeCodex(configPath, r); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
-		}
-		return false, nil, err
-	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
-		}
-		return false, nil, fmt.Errorf("codex project: read %q: %w", configPath, err)
-	}
-	if treatAsEmpty(data) {
-		return false, nil, nil
-	}
-	doc, err := codextoml.Load(data)
-	if err != nil {
-		return false, nil, fmt.Errorf("%w: %s: %w", ErrParseFailed, configPath, err)
-	}
-	return true, doc, nil
-}
-
-// readCodexAuthForProject resolves authPath, verifies HOME
-// containment, and loads + flattens the JSON when present. Same
-// tri-state return contract as readCodexTOMLForProject; the double
-// map return matches Import.readCodexAuth so OPENAI_API_KEY can be
-// resolved from the unflattened root (null-safety) while the flat
-// view drives tokens.* lookups.
-func readCodexAuthForProject(authPath string, r *storage.Resolver) (bool, map[string]any, map[string]any, error) {
-	if err := verifyReadTargetInHomeCodex(authPath, r); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
-		}
-		return false, nil, nil, err
-	}
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
-		}
-		return false, nil, nil, fmt.Errorf("codex project: read %q: %w", authPath, err)
-	}
-	if treatAsEmpty(data) {
-		return false, nil, nil, nil
-	}
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
-	}
-	if root == nil {
-		// json.Unmarshal into map[string]any accepts `null` and
-		// leaves the map nil. auth.json is documented as an object;
-		// a null root is not a shape we should silently accept.
-		return false, nil, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
-	}
-	flat, err := writepath.Flatten(root)
-	if err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
-	}
-	return true, root, flat, nil
-}
+// The tri-state read helpers formerly named readCodexTOMLForProject /
+// readCodexAuthForProject were consolidated into readCodexTOMLWithPrefix
+// / readCodexAuthWithPrefix in readers.go — see the readers.go file
+// godoc for the behavioural contract. Project passes "codex project"
+// as the log prefix so operator-facing read errors stay distinguishable
+// from Import's.

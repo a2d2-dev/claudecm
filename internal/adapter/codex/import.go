@@ -123,14 +123,9 @@
 package codex
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	codextoml "github.com/a2d2-dev/claudecm/internal/adapter/codex/toml"
@@ -190,12 +185,12 @@ func (a *Adapter) importFromCodex(ctx context.Context, r *storage.Resolver) (ada
 	// visibly wins the last-writer-into-Core.APIKey slot even if a
 	// future config.toml owned-key expansion tries to touch it.
 
-	configPresent, tomlDoc, err := readCodexTOML(configPath, r)
+	configPresent, tomlDoc, err := readCodexTOMLWithPrefix(configPath, r, "codex import")
 	if err != nil {
 		return emptyCore, emptyOverlay, err
 	}
 
-	authPresent, authRoot, authFlat, err := readCodexAuth(authPath, r)
+	authPresent, authRoot, authFlat, err := readCodexAuthWithPrefix(authPath, r, "codex import")
 	if err != nil {
 		return emptyCore, emptyOverlay, err
 	}
@@ -211,100 +206,11 @@ func (a *Adapter) importFromCodex(ctx context.Context, r *storage.Resolver) (ada
 	return core, overlay, nil
 }
 
-// readCodexTOML resolves configPath, verifies HOME containment, and
-// loads the TOML doc when present. Returns:
-//
-//   - (false, nil, nil) when the file is absent (ErrNotExist) OR
-//     present-but-empty per treatAsEmpty. Absence is not an error at
-//     this level; the caller decides whether both files being absent
-//     is an error.
-//   - (true, doc, nil) when the file is present and parses.
-//   - (false, nil, err) on any hard failure: parse error, containment
-//     violation, or non-ENOENT read error.
-func readCodexTOML(configPath string, r *storage.Resolver) (bool, *codextoml.Doc, error) {
-	if err := verifyReadTargetInHomeCodex(configPath, r); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// verifyReadTargetInHomeCodex surfaces ErrNotExist via
-			// EvalSymlinks. Map to "absent"; the caller decides.
-			return false, nil, nil
-		}
-		return false, nil, err
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
-		}
-		return false, nil, fmt.Errorf("codex import: read %q: %w", configPath, err)
-	}
-
-	if treatAsEmpty(data) {
-		// Documented policy: zero-byte or whitespace-only config.toml
-		// is treated as absent (no contribution) rather than as an
-		// empty valid document. Symmetric with auth.json.
-		return false, nil, nil
-	}
-
-	doc, err := codextoml.Load(data)
-	if err != nil {
-		// Multi-%w preserves BOTH the adapter sentinel chain (through
-		// ErrParseFailed → writepath.ErrParseFailed) AND the TOML
-		// parser sentinel (codextoml.ErrParseFailed) so callers can
-		// errors.Is against either.
-		return false, nil, fmt.Errorf("%w: %s: %w", ErrParseFailed, configPath, err)
-	}
-	return true, doc, nil
-}
-
-// readCodexAuth resolves authPath, verifies HOME containment, and
-// loads + flattens the JSON when present. Same tri-state return
-// contract as readCodexTOML.
-//
-// Returns the unflattened root map alongside the flattened view so
-// extractOwnedCodex can read OPENAI_API_KEY directly from the root
-// (decoupling the null-vs-empty-vs-string decision from any future
-// change to writepath.Flatten's nil-handling contract — OPENAI_API_KEY
-// is top-level and unambiguously scalar). tokens.* lookups still go
-// through the flat view where the flat dotted-path shape is exactly
-// what OwnedKeysAuthJSON encodes.
-func readCodexAuth(authPath string, r *storage.Resolver) (bool, map[string]any, map[string]any, error) {
-	if err := verifyReadTargetInHomeCodex(authPath, r); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
-		}
-		return false, nil, nil, err
-	}
-
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
-		}
-		return false, nil, nil, fmt.Errorf("codex import: read %q: %w", authPath, err)
-	}
-
-	if treatAsEmpty(data) {
-		return false, nil, nil, nil
-	}
-
-	var root map[string]any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
-	}
-	if root == nil {
-		// json.Unmarshal into map[string]any accepts `null` and
-		// leaves the map nil. auth.json is documented as an object;
-		// a null root is not a shape we should silently accept.
-		return false, nil, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
-	}
-
-	flat, err := writepath.Flatten(root)
-	if err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
-	}
-	return true, root, flat, nil
-}
+// Read-side helpers (readCodexTOMLWithPrefix, readCodexAuthWithPrefix,
+// treatAsEmpty, verifyReadTargetInHomeCodex) live in readers.go so
+// Import and Project share one implementation of the two-file read
+// discipline. See readers.go for the tri-state contract and the
+// null/empty/symlink policy documented here.
 
 // extractOwnedCodex distributes owned-key values from the two source
 // documents into (CoreFromTool, OverlayFromTool) per the mapping
@@ -416,63 +322,6 @@ func coerceToStringCodex(v any) string {
 	}
 }
 
-// treatAsEmpty reports whether the given byte payload should be
-// interpreted as an absent contribution. Returns true for a zero-byte
-// file or a file whose only content is JSON/TOML-insignificant
-// whitespace (space, tab, newline, carriage return).
-//
-// Duplicated from claudecode/emptycheck.go on purpose: importing the
-// claudecode package from codex would create a cross-adapter
-// dependency the interface contract forbids (each adapter is opaque
-// to the others). Shape is intentionally identical so any future
-// tweak (BOM handling, etc.) is applied to both call sites in the
-// same PR.
-func treatAsEmpty(data []byte) bool {
-	if len(data) == 0 {
-		return true
-	}
-	return len(bytes.TrimSpace(data)) == 0
-}
-
-// verifyReadTargetInHomeCodex performs the read-side containment
-// check for one owned file. Resolves the FULL path (not just the
-// leaf) through EvalSymlinks so a symlink at ANY component — including
-// a parent directory such as ~/.codex — must land inside HOME.
-//
-// Behaviour:
-//
-//   - EvalSymlinks succeeds → filepath.Rel against the resolved HOME.
-//     A ".." prefix or absolute rel means the resolved path escapes
-//     HOME → ErrOutsideHome. Otherwise nil.
-//   - EvalSymlinks returns ErrNotExist → the file simply is not
-//     there (missing config, or dangling symlink target). Return
-//     os.ErrNotExist verbatim so the caller can distinguish absence
-//     from real errors and decide (per two-file coordination) whether
-//     absence is the "nothing to import" UX or just this half missing.
-//   - Any other EvalSymlinks error → surface verbatim.
-//
-// Duplicated (with narrow shape variations) from the claudecode
-// adapter's verifyReadTargetInHome for the same reason as treatAsEmpty:
-// cross-adapter dependencies are forbidden by the interface contract.
-func verifyReadTargetInHomeCodex(path string, r *storage.Resolver) error {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			// Bubble ErrNotExist to caller so it can map to "absent".
-			return err
-		}
-		return fmt.Errorf("codex import: evalsymlinks %q: %w", path, err)
-	}
-	resolvedHome, err := filepath.EvalSymlinks(r.Home())
-	if err != nil {
-		return fmt.Errorf("codex import: evalsymlinks home %q: %w", r.Home(), err)
-	}
-	rel, err := filepath.Rel(resolvedHome, resolved)
-	if err != nil {
-		return fmt.Errorf("%w: rel %q vs %q: %v", ErrOutsideHome, resolvedHome, resolved, err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("%w: %q resolves to %q (not under %q)", ErrOutsideHome, path, resolved, resolvedHome)
-	}
-	return nil
-}
+// treatAsEmpty and verifyReadTargetInHomeCodex live in readers.go so
+// Import and Project share the empty-file and symlink-containment
+// policies. See readers.go for the behavioural contract.
