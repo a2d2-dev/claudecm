@@ -576,12 +576,19 @@ func TestResolve_RegistryInconsistencyIsTopLevelError(t *testing.T) {
 	reg := adapter.NewRegistry()
 	reg.Register(adapter.ToolID("foo"), func() adapter.Adapter { return nil })
 
-	view, err := Resolve(context.Background(), testHomeResolver(t), reg, config.Profile{}, Filter{})
+	profile := config.Profile{Name: "p"}
+	view, err := Resolve(context.Background(), testHomeResolver(t), reg, profile, Filter{})
 	if err == nil {
 		t.Fatalf("Resolve err = nil, want registry-inconsistency error")
 	}
-	if !reflect.DeepEqual(view, View{}) {
-		t.Errorf("view = %+v, want zero View", view)
+	// Caller diagnostics benefit from "even on error, tell me what
+	// profile was attempted"; Profile is preserved, Tools is nil
+	// (empty because inconsistency hit before any tool completed).
+	if view.Profile.Name != "p" {
+		t.Errorf("view.Profile.Name = %q, want %q (Profile must be preserved even on registry inconsistency)", view.Profile.Name, "p")
+	}
+	if view.Tools != nil {
+		t.Errorf("view.Tools = %+v, want nil (inconsistency hit before any tool completed)", view.Tools)
 	}
 	if got := err.Error(); got == "" || !containsAll(got, "registry inconsistency", "foo") {
 		t.Errorf("err.Error() = %q, want mention of 'registry inconsistency' and 'foo'", got)
@@ -703,6 +710,129 @@ func TestResolve_FileExtractionFromErrorMessage(t *testing.T) {
 	// this kind by design (only Parse/OutsideHome try extraction).
 	if bareTV.Errors[0].File != "" {
 		t.Errorf("mock_bare File = %q, want empty (ProjectFailed skips extraction)", bareTV.Errors[0].File)
+	}
+}
+
+// TestResolve_DetectFailsCarriesPartialPresence asserts that when
+// Detect returns a non-nil error AND a non-zero Presence, the resolver
+// preserves the Presence value verbatim (best-effort — adapters may
+// fill some fields before hitting the error) rather than clobbering
+// it. The ErrorDetectFailed entry still lands on the ToolView.
+func TestResolve_DetectFailsCarriesPartialPresence(t *testing.T) {
+	t.Parallel()
+
+	reg := adapter.NewRegistry()
+	registerMock(reg, &mockAdapter{
+		id: adapter.ToolID("mock_a"),
+		presence: adapter.Presence{
+			Installed: true,
+			Detected:  false,
+			ConfigDir: "/partial/dir",
+			Notes:     "partial",
+		},
+		detectEr: errors.New("boom partial detect"),
+	})
+
+	view, err := Resolve(context.Background(), testHomeResolver(t), reg, config.Profile{}, Filter{})
+	if err != nil {
+		t.Fatalf("Resolve err = %v, want nil", err)
+	}
+	if len(view.Tools) != 1 {
+		t.Fatalf("view.Tools len = %d, want 1", len(view.Tools))
+	}
+	tv := view.Tools[0]
+	if len(tv.Errors) != 1 || tv.Errors[0].Kind != ErrorDetectFailed {
+		t.Fatalf("tv.Errors = %+v, want one ErrorDetectFailed entry", tv.Errors)
+	}
+	// The non-zero Presence returned by Detect must be preserved.
+	if !tv.Presence.Installed {
+		t.Errorf("Presence.Installed = false, want true (partial Presence must be carried through)")
+	}
+	if tv.Presence.ConfigDir != "/partial/dir" {
+		t.Errorf("Presence.ConfigDir = %q, want %q", tv.Presence.ConfigDir, "/partial/dir")
+	}
+	if tv.Presence.Notes != "partial" {
+		t.Errorf("Presence.Notes = %q, want %q", tv.Presence.Notes, "partial")
+	}
+}
+
+// TestResolve_DetectReturnsOutsideHomeCategorized asserts a Detect
+// error wrapping storage.ErrOutsideHome is classified as
+// ErrorOutsideHome (not ErrorDetectFailed) — the classifier is shared
+// with Project by design.
+func TestResolve_DetectReturnsOutsideHomeCategorized(t *testing.T) {
+	t.Parallel()
+
+	reg := adapter.NewRegistry()
+	registerMock(reg, &mockAdapter{
+		id:       adapter.ToolID("mock_a"),
+		detectEr: fmt.Errorf("claudecode detect \"/some/other/root/settings.json\": %w", storage.ErrOutsideHome),
+	})
+
+	view, err := Resolve(context.Background(), testHomeResolver(t), reg, config.Profile{}, Filter{})
+	if err != nil {
+		t.Fatalf("Resolve err = %v, want nil", err)
+	}
+	if len(view.Tools) != 1 {
+		t.Fatalf("view.Tools len = %d, want 1", len(view.Tools))
+	}
+	tv := view.Tools[0]
+	if len(tv.Errors) != 1 {
+		t.Fatalf("tv.Errors = %+v, want one entry", tv.Errors)
+	}
+	if tv.Errors[0].Kind != ErrorOutsideHome {
+		t.Errorf("tv.Errors[0].Kind = %q, want %q", tv.Errors[0].Kind, ErrorOutsideHome)
+	}
+	if tv.Errors[0].File != "/some/other/root/settings.json" {
+		t.Errorf("tv.Errors[0].File = %q, want %q", tv.Errors[0].File, "/some/other/root/settings.json")
+	}
+}
+
+// TestResolve_DetectReturnsParseFailedCategorized asserts a Detect
+// error wrapping writepath.ErrParseFailed classifies as
+// ErrorParseFailed.
+func TestResolve_DetectReturnsParseFailedCategorized(t *testing.T) {
+	t.Parallel()
+
+	reg := adapter.NewRegistry()
+	registerMock(reg, &mockAdapter{
+		id:       adapter.ToolID("mock_a"),
+		detectEr: fmt.Errorf("codex detect \"/home/x/.codex/config.toml\": %w", writepath.ErrParseFailed),
+	})
+
+	view, err := Resolve(context.Background(), testHomeResolver(t), reg, config.Profile{}, Filter{})
+	if err != nil {
+		t.Fatalf("Resolve err = %v, want nil", err)
+	}
+	tv := view.Tools[0]
+	if len(tv.Errors) != 1 || tv.Errors[0].Kind != ErrorParseFailed {
+		t.Fatalf("tv.Errors = %+v, want one ErrorParseFailed entry", tv.Errors)
+	}
+	if tv.Errors[0].File != "/home/x/.codex/config.toml" {
+		t.Errorf("tv.Errors[0].File = %q, want %q", tv.Errors[0].File, "/home/x/.codex/config.toml")
+	}
+}
+
+// TestResolve_DetectContextCanceledCategorized asserts a Detect error
+// wrapping context.Canceled classifies as ErrorCanceled (and, per the
+// updated ErrorCanceled contract, the outer walk does NOT abort — it
+// only aborts when the parent ctx itself is canceled).
+func TestResolve_DetectContextCanceledCategorized(t *testing.T) {
+	t.Parallel()
+
+	reg := adapter.NewRegistry()
+	registerMock(reg, &mockAdapter{
+		id:       adapter.ToolID("mock_a"),
+		detectEr: fmt.Errorf("mid-detect: %w", context.Canceled),
+	})
+
+	view, err := Resolve(context.Background(), testHomeResolver(t), reg, config.Profile{}, Filter{})
+	if err != nil {
+		t.Fatalf("Resolve err = %v, want nil (per-tool Detect cancel is non-fatal)", err)
+	}
+	tv := view.Tools[0]
+	if len(tv.Errors) != 1 || tv.Errors[0].Kind != ErrorCanceled {
+		t.Fatalf("tv.Errors = %+v, want one ErrorCanceled entry", tv.Errors)
 	}
 }
 

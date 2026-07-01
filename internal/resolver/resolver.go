@@ -69,8 +69,8 @@ type ToolView struct {
 	Tool adapter.ToolID
 
 	// Presence is the Detect result for this tool at resolve time.
-	// Zero value means Detect was not called (e.g. filter excluded
-	// this tool) or Detect returned its zero value.
+	// Zero value means Detect returned its zero value or errored
+	// before populating fields.
 	Presence adapter.Presence
 
 	// Effective is the layered projection this adapter produced via
@@ -121,8 +121,9 @@ type ErrorKind string
 // discipline in internal/adapter/adapter.go.
 const (
 	// ErrorDetectFailed marks a Detect call that returned a
-	// non-nil error. Resolve records it and continues with a zero
-	// Presence.
+	// non-nil error. Resolve records the error and carries whatever
+	// Presence value Detect returned (best-effort — may be zero, may
+	// be partially populated).
 	ErrorDetectFailed ErrorKind = "DetectFailed"
 
 	// ErrorProjectFailed marks a Project call that returned a
@@ -142,9 +143,11 @@ const (
 	ErrorOutsideHome ErrorKind = "OutsideHome"
 
 	// ErrorCanceled marks a per-tool step that returned
-	// context.Canceled or context.DeadlineExceeded. Resolve stops
-	// after recording this on the current ToolView and returns the
-	// context error at the top level.
+	// context.Canceled or context.DeadlineExceeded. The per-tool
+	// Project (or Detect) returned a context-derived error. Resolve
+	// records this on the ToolView and continues to the next
+	// iteration; the outer walk aborts only if the parent ctx is
+	// also canceled (checked at the top of each iteration).
 	ErrorCanceled ErrorKind = "Canceled"
 )
 
@@ -192,6 +195,12 @@ func (f Filter) Allows(tool adapter.ToolID) bool {
 // the match never returns a non-path string. Best-effort — an empty
 // return means the resolver could not identify a specific file, which
 // is fine because ToolError.Message already carries the full text.
+//
+// This intentionally picks the FIRST quoted path, which is the
+// adapter-owned file we care about (the file the adapter was applying
+// or projecting when the error surfaced). Deeper wrapped paths in the
+// message may be intermediate stat targets or symlink resolutions;
+// the full Message field carries them for operator inspection.
 var filePathRE = regexp.MustCompile(`"(/[^"]+)"`)
 
 // extractFilePath best-effort lifts an absolute file path from an
@@ -205,13 +214,19 @@ func extractFilePath(msg string) string {
 	return m[1]
 }
 
-// classifyProjectError maps a Project error onto the ErrorKind enum.
+// classifyAdapterError maps an adapter-returned error (from either
+// Detect or Project) onto the ErrorKind enum for the categorized
+// kinds: Canceled, OutsideHome, ParseFailed. Returns the empty
+// ErrorKind ("") when the error does not match any categorized
+// sentinel — callers must supply their own fallthrough (typically
+// ErrorProjectFailed for Project, ErrorDetectFailed for Detect).
+//
 // Order matters: context cancellation is checked first because a
 // canceled parse would otherwise be mis-classified as ParseFailed;
 // OutsideHome is checked before ParseFailed because the two writepath
 // sentinels are distinct but adapters may wrap both in the same call
 // site.
-func classifyProjectError(err error) ErrorKind {
+func classifyAdapterError(err error) ErrorKind {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return ErrorCanceled
@@ -220,7 +235,7 @@ func classifyProjectError(err error) ErrorKind {
 	case errors.Is(err, writepath.ErrParseFailed):
 		return ErrorParseFailed
 	default:
-		return ErrorProjectFailed
+		return ""
 	}
 }
 
@@ -300,17 +315,30 @@ func Resolve(ctx context.Context, r *storage.Resolver, reg *adapter.Registry, pr
 			// no Unregister — but it costs nothing to detect and
 			// tells operators the Registry is in an impossible
 			// state rather than silently skipping the tool.
-			return View{}, fmt.Errorf("claudecm/resolver: registry inconsistency: List returned %q but Get failed", id)
+			//
+			// Return the view built so far (Profile-preserving,
+			// partial Tools) so caller diagnostics benefit from
+			// "even on error, tell me what profile was attempted
+			// and which tools we made it through".
+			return view, fmt.Errorf("claudecm/resolver: registry inconsistency: List returned %q but Get failed", id)
 		}
 
 		tv := ToolView{Tool: id}
 
 		presence, derr := adap.Detect(ctx, r)
 		if derr != nil {
-			tv.Errors = append(tv.Errors, ToolError{
-				Kind:    ErrorDetectFailed,
+			kind := classifyAdapterError(derr)
+			if kind == "" {
+				kind = ErrorDetectFailed
+			}
+			te := ToolError{
+				Kind:    kind,
 				Message: derr.Error(),
-			})
+			}
+			if kind == ErrorParseFailed || kind == ErrorOutsideHome {
+				te.File = extractFilePath(derr.Error())
+			}
+			tv.Errors = append(tv.Errors, te)
 			// Presence carries whatever Detect returned; adapters
 			// may still fill best-effort fields on error, so we do
 			// not force it to the zero value.
@@ -319,7 +347,10 @@ func Resolve(ctx context.Context, r *storage.Resolver, reg *adapter.Registry, pr
 
 		effective, perr := adap.Project(ctx, r, profile)
 		if perr != nil {
-			kind := classifyProjectError(perr)
+			kind := classifyAdapterError(perr)
+			if kind == "" {
+				kind = ErrorProjectFailed
+			}
 			te := ToolError{
 				Kind:    kind,
 				Message: perr.Error(),
