@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/config"
@@ -268,6 +269,31 @@ func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath
 	report, err := writepath.Apply(ctx, r, plan)
 	if err != nil {
 		return report, fmt.Errorf("claudecode apply %q: %w", plan.Target, err)
+	}
+
+	// E5-S4 state update: after writepath.Apply succeeds, persist the
+	// (path, SHA256, timestamp) tuple state.yaml uses for external drift
+	// detection. The SHA256 comes from report.PostFingerprint — that is
+	// the digest storage.AtomicWrite computed over the bytes it just
+	// renamed into place, so the digest is guaranteed to match what a
+	// subsequent Project's re-hash of the on-disk file computes without
+	// a duplicate read.
+	//
+	// Skipped/DryRun runs do NOT update state: no bytes changed on disk
+	// so the prior LastApplied entry remains the honest anchor.
+	// PostFingerprint.SHA256 is empty on the skipped path; the guard
+	// below covers that.
+	//
+	// Failures here bubble up so an operator sees "write succeeded but
+	// state.yaml update failed" as a distinct condition — silently
+	// swallowing would leave the drift detector in a permanent
+	// false-positive state after the next external edit. The concrete
+	// scenarios this surfaces (state.yaml on a read-only mount,
+	// bootstrap not run) are actionable operator errors.
+	if !plan.DryRun && !report.Skipped && report.PostFingerprint.SHA256 != "" {
+		if serr := recordAppliedToState(r, adapter.ToolClaudeCode, plan.Target, report.PostFingerprint.SHA256, time.Now()); serr != nil {
+			return report, fmt.Errorf("claudecode apply %q: state update: %w", plan.Target, serr)
+		}
 	}
 	return report, nil
 }

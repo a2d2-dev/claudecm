@@ -207,18 +207,16 @@ func init() {
 //
 // Read-only: never writes to disk, never mutates the process env.
 func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, profile config.Profile) (adapter.EffectiveView, error) {
-	// TODO(task #31: state-schema evolution): populate
-	// view.ExternalDriftDetected / view.ExternalDriftFile once
-	// internal/config.State grows a LastAppliedPerTool[codex].SHA256
-	// slot. See docs/plan/stories/E4-S6.md AC 3 for the E4-S6
-	// deferral, docs/plan/stories/E3-S6.md for the sibling
-	// Claude Code deferral (same schema-evolution dependency), and
-	// the pending "State schema evolution for drift tracking" task
-	// (#31) tracked in the sprint plan — the EffectiveView fields
-	// exist on the adapter type today but are left zero-valued here
-	// because the state schema does not yet carry the two SHA256s
-	// (one per file) to compare against. Grep for `task #31` to find
-	// every deferral site once #31 lands.
+	// E5-S4: external drift detection. State.LastAppliedPerTool[codex]
+	// records a per-file entry (auth.json and config.toml are tracked
+	// independently) with the SHA256 of the last successful Apply.
+	// Project re-hashes each owned file (raw bytes, before any parse
+	// or normalisation) and reports drift for each file whose SHA256
+	// no longer matches. No prior state for a given file → no drift
+	// reported for that file (E5-S4 AC edge case). Both files can
+	// drift independently — the check runs per file so partial drift
+	// (e.g. auth.json edited, config.toml intact) surfaces only the
+	// touched file.
 	view := adapter.EffectiveView{Tool: adapter.ToolCodex}
 
 	// Honour ctx cancellation before any filesystem or env work.
@@ -228,6 +226,22 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 
 	configPath := ConfigPath(r)
 	authPath := AuthPath(r)
+
+	// Drift check runs BEFORE the field loop so the flag is populated
+	// regardless of which owned keys turn out to contribute. Order the
+	// slice auth-first to match Files() ordering — deterministic
+	// output for renderers that iterate ExternalDriftFiles verbatim.
+	var driftFiles []string
+	if driftForFile(r, adapter.ToolCodex, authPath) {
+		driftFiles = append(driftFiles, authPath)
+	}
+	if driftForFile(r, adapter.ToolCodex, configPath) {
+		driftFiles = append(driftFiles, configPath)
+	}
+	if len(driftFiles) > 0 {
+		view.ExternalDriftDetected = true
+		view.ExternalDriftFiles = driftFiles
+	}
 
 	// Read both files (best-effort). Missing → treat as absent for
 	// that file's OnDisk contribution. Malformed → ErrParseFailed.

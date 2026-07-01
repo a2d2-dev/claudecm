@@ -121,7 +121,7 @@ func TestView_Shape(t *testing.T) {
 						{Key: "env.ANTHROPIC_API_KEY", Value: "sk-live", Secret: true, WinningLayer: adapter.LayerOnDisk, Source: "/home/x/.claude/settings.json:env.ANTHROPIC_API_KEY"},
 					},
 					ExternalDriftDetected: true,
-					ExternalDriftFile:     "/home/x/.claude/settings.json",
+					ExternalDriftFiles:    []string{"/home/x/.claude/settings.json"},
 				},
 				Errors: []ToolError{
 					{Kind: ErrorParseFailed, Message: "unparseable JSON", File: "/home/x/.claude/settings.json"},

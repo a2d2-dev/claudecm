@@ -160,16 +160,16 @@ const (
 //
 // Redaction contract (NFR-S8). Because Value is any, redactors CANNOT
 // rely on regex-over-string. The contract is:
-//   1. The adapter that populated this field is the authority. If the
-//      adapter knows the field is a secret (env vars ending in _KEY,
-//      _TOKEN, _SECRET, or matching an explicit per-adapter secret
-//      allowlist), it MUST set Secret=true. Downstream renderers
-//      (list / current / explain / export) then redact regardless of
-//      the underlying Go type.
-//   2. For non-string Value types, renderers must type-switch before
-//      formatting; passing a bool or int64 through fmt.Sprintf("%s",...)
-//      is a rendering bug, not a data bug.
-//   3. --reveal disables redaction uniformly across every type.
+//  1. The adapter that populated this field is the authority. If the
+//     adapter knows the field is a secret (env vars ending in _KEY,
+//     _TOKEN, _SECRET, or matching an explicit per-adapter secret
+//     allowlist), it MUST set Secret=true. Downstream renderers
+//     (list / current / explain / export) then redact regardless of
+//     the underlying Go type.
+//  2. For non-string Value types, renderers must type-switch before
+//     formatting; passing a bool or int64 through fmt.Sprintf("%s",...)
+//     is a rendering bug, not a data bug.
+//  3. --reveal disables redaction uniformly across every type.
 //
 // architecture.md §6 (EffectiveField shape) is updated in this PR to
 // match this contract.
@@ -242,12 +242,17 @@ type EffectiveView struct {
 	// ExternalDriftDetected is true when any owned file's on-disk
 	// SHA256 differs from state.LastAppliedPerTool[Tool].SHA256
 	// (architecture §6.2). Never taken as an automatic action —
-	// reported as a warning only.
+	// reported as a warning only. Equivalent to
+	// len(ExternalDriftFiles) > 0.
 	ExternalDriftDetected bool
 
-	// ExternalDriftFile is the absolute path of the drifting file
-	// when ExternalDriftDetected is true. Empty otherwise.
-	ExternalDriftFile string
+	// ExternalDriftFiles lists the absolute paths of every owned
+	// file this adapter detected drift on. Empty when no drift.
+	// Slice-shaped (not a single path) because the Codex adapter owns
+	// two files — auth.json and config.toml can independently drift.
+	// The Claude Code adapter owns one file so this slice is either
+	// empty or a single-entry slice for that tool.
+	ExternalDriftFiles []string
 }
 
 // SortFields sorts fields lexicographically by Key in place. Downstream
