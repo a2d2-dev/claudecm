@@ -7,8 +7,10 @@
 //	WinningLayer + Source + Value  (top of the precedence chain)
 //	Shadowed[]                    (older→newer entries that lost)
 //
-// Read-only. Never mutates env, files, or the Profile. Every adapter's
-// Project method is pure over its inputs — explain is a thin renderer.
+// Read-only over profiles, tool configs, and state. Ensures the
+// ~/.claudecm/ layout exists (via Bootstrap) but never mutates profile
+// YAML, tool config files, or state.yaml. Every adapter's Project method
+// is pure over its inputs — explain is a thin renderer.
 //
 // Redaction. Fields with Secret=true (adapters set this per architecture §6
 // and PRD NFR-S8) are redacted to `<first4>***<last4>` unless the operator
@@ -372,11 +374,19 @@ func renderExplainText(w io.Writer, view resolver.View, diagnostic map[string]st
 // resolution chain, external-drift banner, and per-tool errors.
 func renderToolText(w io.Writer, tv resolver.ToolView, reveal bool) {
 	fmt.Fprintf(w, "Tool: %s\n", tv.Tool)
-	fmt.Fprintf(w, "  Presence: Installed=%v ConfigDir=%s Notes=%s\n",
+	fmt.Fprintf(w, "  Presence: Installed=%v Detected=%v ConfigDir=%s Version=%s Notes=%s\n",
 		tv.Presence.Installed,
+		tv.Presence.Detected,
 		orDash(tv.Presence.ConfigDir),
+		orDash(tv.Presence.Version),
 		orDash(tv.Presence.Notes),
 	)
+	if len(tv.Presence.Files) > 0 {
+		fmt.Fprintln(w, "  Files:")
+		for _, f := range tv.Presence.Files {
+			fmt.Fprintf(w, "    - %s\n", f)
+		}
+	}
 
 	if len(tv.Effective.Fields) == 0 {
 		fmt.Fprintln(w, "  Owned Fields: (none set by any layer)")

@@ -422,35 +422,48 @@ func TestExplain_EnvOverrideShownAsWinning(t *testing.T) {
 	}
 }
 
-// TestExplain_AllEnvListsMatchingVars: --all-env includes env vars whose
-// names match a per-tool prefix but are not adapter-owned. Vars with no
-// prefix match are excluded.
+// TestExplain_AllEnvListsMatchingVars: --all-env exposes env vars whose
+// names match a per-tool prefix but are not adapter-owned. We assert
+// against the JSON diagnostic_env map rather than the text output so
+// the check is hermetic to whatever ambient CODEX_* / ANTHROPIC_* vars
+// the CI runner or the developer's shell happens to export — those may
+// still appear in the map but do not affect the specific asserts here.
 func TestExplain_AllEnvListsMatchingVars(t *testing.T) {
 	h := newExplainHarness(t)
 	h.saveProfile("prod", "sk-longsecretvalue123", "https://api.anthropic.com", "opus")
 	h.activate("prod")
 
 	// The diagnostic dump reads live os.Environ(); inject via t.Setenv.
-	// Only ANTHROPIC_UNKNOWN (prefix ANTHROPIC_, unowned) should surface.
+	// clearAdapterEnv already zeroed RANDOM_VAR / ANTHROPIC_UNKNOWN so
+	// the assertions below are hermetic no matter what the ambient
+	// shell exported.
 	t.Setenv("ANTHROPIC_UNKNOWN", "unknown-value-xyz")
 	t.Setenv("RANDOM_VAR", "should-not-appear")
 
+	explainOutputFlag = "json"
 	explainAllEnvFlag = true
 	stdout, _, err := runExplainCmd(t, nil)
 	if err != nil {
 		t.Fatalf("runExplain err = %v", err)
 	}
-	if !strings.Contains(stdout, "ANTHROPIC_UNKNOWN") {
-		t.Errorf("stdout missing ANTHROPIC_UNKNOWN in diagnostic dump:\n%s", stdout)
+	var doc jsonExplain
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
 	}
-	if !strings.Contains(stdout, "unknown-value-xyz") {
-		t.Errorf("stdout missing ANTHROPIC_UNKNOWN value:\n%s", stdout)
+	got, ok := doc.DiagnosticEnv["ANTHROPIC_UNKNOWN"]
+	if !ok {
+		t.Errorf("diagnostic_env missing ANTHROPIC_UNKNOWN; got=%v", doc.DiagnosticEnv)
 	}
-	if strings.Contains(stdout, "RANDOM_VAR") {
-		t.Errorf("stdout leaked RANDOM_VAR (no prefix match):\n%s", stdout)
+	if got != "unknown-value-xyz" {
+		t.Errorf("diagnostic_env[ANTHROPIC_UNKNOWN]=%q, want %q", got, "unknown-value-xyz")
 	}
-	if !strings.Contains(stdout, "Diagnostic env vars") {
-		t.Errorf("stdout missing 'Diagnostic env vars' section header:\n%s", stdout)
+	if _, hit := doc.DiagnosticEnv["RANDOM_VAR"]; hit {
+		t.Errorf("diagnostic_env leaked RANDOM_VAR (no prefix match); got=%v", doc.DiagnosticEnv)
+	}
+	// Also: an owned env var must never appear in the diagnostic map
+	// regardless of ambient environment.
+	if _, hit := doc.DiagnosticEnv["ANTHROPIC_API_KEY"]; hit {
+		t.Errorf("diagnostic_env leaked owned ANTHROPIC_API_KEY; got=%v", doc.DiagnosticEnv)
 	}
 }
 
