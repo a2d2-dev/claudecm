@@ -90,6 +90,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
+	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
@@ -185,8 +186,8 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 	// are swallowed here: drift is informational, and a corrupt or
 	// unreadable state.yaml must not break `current` / `explain`.
 	if haveOnDiskFile {
-		if last, ok := loadLastApplied(r, adapter.ToolClaudeCode, settingsPath); ok {
-			currentSHA := sha256Hex(rawOnDisk)
+		if last, ok, _ := stateio.LoadLastApplied(r, adapter.ToolClaudeCode, settingsPath); ok {
+			currentSHA := stateio.Sha256Hex(rawOnDisk)
 			if currentSHA != last.SHA256 {
 				view.ExternalDriftDetected = true
 				view.ExternalDriftFiles = []string{settingsPath}

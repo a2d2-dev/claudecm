@@ -37,12 +37,15 @@ import (
 // readCodexTOMLWithPrefix resolves configPath, verifies HOME
 // containment, and loads the TOML doc when present. Returns:
 //
-//   - (false, nil, nil) when the file is absent (ErrNotExist) OR
+//   - (false, nil, nil, nil) when the file is absent (ErrNotExist) OR
 //     present-but-empty per treatAsEmpty. Absence is not an error at
 //     this level; the caller decides whether both files being absent
 //     is an error.
-//   - (true, doc, nil) when the file is present and parses.
-//   - (false, nil, err) on any hard failure: parse error, containment
+//   - (true, doc, raw, nil) when the file is present and parses. raw
+//     is the untransformed byte payload — Project's drift SHA256 hashes
+//     these bytes so the drift check does NOT open the owned file a
+//     second time (F4/F5 fix).
+//   - (false, nil, nil, err) on any hard failure: parse error, containment
 //     violation, or non-ENOENT read error.
 //
 // logPrefix is embedded verbatim into non-sentinel error strings so
@@ -50,22 +53,27 @@ import (
 // distinguishable in operator-facing errors. Parse-failure and
 // outside-HOME errors still wrap ErrParseFailed / ErrOutsideHome
 // unchanged — the sentinel chain is the caller-facing contract.
-func readCodexTOMLWithPrefix(configPath string, r *storage.Resolver, logPrefix string) (bool, *codextoml.Doc, error) {
+func readCodexTOMLWithPrefix(configPath string, r *storage.Resolver, logPrefix string) (bool, *codextoml.Doc, []byte, error) {
 	if err := verifyReadTargetInHomeCodex(configPath, r); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
+			return false, nil, nil, nil
 		}
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
+			return false, nil, nil, nil
 		}
-		return false, nil, fmt.Errorf("%s: read %q: %w", logPrefix, configPath, err)
+		return false, nil, nil, fmt.Errorf("%s: read %q: %w", logPrefix, configPath, err)
 	}
 	if treatAsEmpty(data) {
-		return false, nil, nil
+		// Present-but-empty is "no owned contribution" for parsing
+		// purposes; return no doc but still surface the raw bytes so
+		// the caller's drift check hashes what is on disk (an empty
+		// file's SHA256 legitimately matches state's recorded empty
+		// SHA256 after a first-time Apply).
+		return false, nil, data, nil
 	}
 	doc, err := codextoml.Load(data)
 	if err != nil {
@@ -73,14 +81,16 @@ func readCodexTOMLWithPrefix(configPath string, r *storage.Resolver, logPrefix s
 		// ErrParseFailed → writepath.ErrParseFailed) AND the TOML
 		// parser sentinel (codextoml.ErrParseFailed) so callers can
 		// errors.Is against either.
-		return false, nil, fmt.Errorf("%w: %s: %w", ErrParseFailed, configPath, err)
+		return false, nil, nil, fmt.Errorf("%w: %s: %w", ErrParseFailed, configPath, err)
 	}
-	return true, doc, nil
+	return true, doc, data, nil
 }
 
 // readCodexAuthWithPrefix resolves authPath, verifies HOME containment,
 // and loads + flattens the JSON when present. Same tri-state return
-// contract as readCodexTOMLWithPrefix.
+// contract as readCodexTOMLWithPrefix, plus a raw-bytes tail so
+// Project's drift check hashes the exact bytes read here instead of
+// re-opening the owned file (F4/F5 fix).
 //
 // Returns the unflattened root map alongside the flattened view so
 // callers can read OPENAI_API_KEY directly from the root (decoupling
@@ -89,38 +99,41 @@ func readCodexTOMLWithPrefix(configPath string, r *storage.Resolver, logPrefix s
 // top-level and unambiguously scalar). tokens.* lookups still go
 // through the flat view where the flat dotted-path shape is exactly
 // what OwnedKeysAuthJSON encodes.
-func readCodexAuthWithPrefix(authPath string, r *storage.Resolver, logPrefix string) (bool, map[string]any, map[string]any, error) {
+func readCodexAuthWithPrefix(authPath string, r *storage.Resolver, logPrefix string) (bool, map[string]any, map[string]any, []byte, error) {
 	if err := verifyReadTargetInHomeCodex(authPath, r); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
+			return false, nil, nil, nil, nil
 		}
-		return false, nil, nil, err
+		return false, nil, nil, nil, err
 	}
 	data, err := os.ReadFile(authPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil, nil
+			return false, nil, nil, nil, nil
 		}
-		return false, nil, nil, fmt.Errorf("%s: read %q: %w", logPrefix, authPath, err)
+		return false, nil, nil, nil, fmt.Errorf("%s: read %q: %w", logPrefix, authPath, err)
 	}
 	if treatAsEmpty(data) {
-		return false, nil, nil, nil
+		// Present-but-empty file — return no parsed content but keep
+		// the raw bytes so the caller's drift SHA256 sees what is on
+		// disk (mirrors the TOML reader's empty-file policy).
+		return false, nil, nil, data, nil
 	}
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
+		return false, nil, nil, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
 	}
 	if root == nil {
 		// json.Unmarshal into map[string]any accepts `null` and leaves
 		// the map nil. auth.json is documented as an object; a null
 		// root is not a shape we should silently accept.
-		return false, nil, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
+		return false, nil, nil, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
 	}
 	flat, err := writepath.Flatten(root)
 	if err != nil {
-		return false, nil, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
+		return false, nil, nil, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
 	}
-	return true, root, flat, nil
+	return true, root, flat, data, nil
 }
 
 // treatAsEmpty reports whether the given byte payload should be

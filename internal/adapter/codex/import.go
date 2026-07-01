@@ -185,12 +185,12 @@ func (a *Adapter) importFromCodex(ctx context.Context, r *storage.Resolver) (ada
 	// visibly wins the last-writer-into-Core.APIKey slot even if a
 	// future config.toml owned-key expansion tries to touch it.
 
-	configPresent, tomlDoc, err := readCodexTOMLWithPrefix(configPath, r, "codex import")
+	configPresent, tomlDoc, _, err := readCodexTOMLWithPrefix(configPath, r, "codex import")
 	if err != nil {
 		return emptyCore, emptyOverlay, err
 	}
 
-	authPresent, authRoot, authFlat, err := readCodexAuthWithPrefix(authPath, r, "codex import")
+	authPresent, authRoot, authFlat, _, err := readCodexAuthWithPrefix(authPath, r, "codex import")
 	if err != nil {
 		return emptyCore, emptyOverlay, err
 	}

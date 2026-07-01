@@ -117,6 +117,7 @@ import (
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	codextoml "github.com/a2d2-dev/claudecm/internal/adapter/codex/toml"
+	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
@@ -227,33 +228,43 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 	configPath := ConfigPath(r)
 	authPath := AuthPath(r)
 
-	// Drift check runs BEFORE the field loop so the flag is populated
-	// regardless of which owned keys turn out to contribute. Order the
-	// slice auth-first to match Files() ordering — deterministic
-	// output for renderers that iterate ExternalDriftFiles verbatim.
+	// Read both files (best-effort). Missing → treat as absent for
+	// that file's OnDisk contribution. Malformed → ErrParseFailed.
+	// Symlink-outside-HOME → ErrOutsideHome. Uses the shared helpers
+	// in readers.go so the read semantics stay identical to Import's.
+	// The raw-bytes tail lets the drift check hash the SAME bytes the
+	// parser saw, without opening the owned file a second time
+	// (F4/F5 fix; the previous driftForFile / os.ReadFile pass also
+	// bypassed the readers' HOME-containment check).
+	configPresent, tomlDoc, configRaw, err := readCodexTOMLWithPrefix(configPath, r, "codex project")
+	if err != nil {
+		return view, err
+	}
+	authPresent, authRoot, authFlat, authRaw, err := readCodexAuthWithPrefix(authPath, r, "codex project")
+	if err != nil {
+		return view, err
+	}
+
+	// Drift check. Runs AFTER the reads so we hash the same bytes the
+	// parser consumed — no second os.ReadFile, no second HOME-containment
+	// check. Order the slice auth-first to match Files() ordering so
+	// renderers iterating ExternalDriftFiles get deterministic output.
+	//
+	// A file whose read helper returned raw==nil (absent, or a
+	// containment/parse error propagated above) contributes no drift
+	// entry: for absent files this matches the AC "absent file → no
+	// drift"; for error paths we would already have returned before
+	// reaching this point.
 	var driftFiles []string
-	if driftForFile(r, adapter.ToolCodex, authPath) {
+	if authRaw != nil && driftForFileBytes(r, adapter.ToolCodex, authPath, authRaw) {
 		driftFiles = append(driftFiles, authPath)
 	}
-	if driftForFile(r, adapter.ToolCodex, configPath) {
+	if configRaw != nil && driftForFileBytes(r, adapter.ToolCodex, configPath, configRaw) {
 		driftFiles = append(driftFiles, configPath)
 	}
 	if len(driftFiles) > 0 {
 		view.ExternalDriftDetected = true
 		view.ExternalDriftFiles = driftFiles
-	}
-
-	// Read both files (best-effort). Missing → treat as absent for
-	// that file's OnDisk contribution. Malformed → ErrParseFailed.
-	// Symlink-outside-HOME → ErrOutsideHome. Uses the shared helpers
-	// in readers.go so the read semantics stay identical to Import's.
-	configPresent, tomlDoc, err := readCodexTOMLWithPrefix(configPath, r, "codex project")
-	if err != nil {
-		return view, err
-	}
-	authPresent, authRoot, authFlat, err := readCodexAuthWithPrefix(authPath, r, "codex project")
-	if err != nil {
-		return view, err
 	}
 
 	// Cache the overlay Raw map once so the per-key loop does not
@@ -505,6 +516,27 @@ func envOverrideLayer(envName string) *layerValue {
 		value:  v,
 		source: "env:" + envName,
 	}
+}
+
+// driftForFileBytes reports whether raw differs from the SHA256 that
+// state.yaml records for (tool, filePath). Returns false when state
+// has no prior entry (E5-S4 AC: no anchor → no drift) or when the
+// state read itself errored — drift is informational and must never
+// break `current` / `explain` (state read errors are swallowed here
+// on purpose; the E5-S4 review's F4/F5 findings verified we do not
+// double-read the owned file).
+//
+// Symmetric with the claudecode adapter's onDisk-hash path, which
+// runs against stateio directly out of project.go's readOnDiskSettings.
+// The codex readers surface raw bytes to keep the drift check honest
+// against the parser's view of the file (no TOCTOU between parse and
+// hash).
+func driftForFileBytes(r *storage.Resolver, tool config.ToolID, filePath string, raw []byte) bool {
+	last, ok, err := stateio.LoadLastApplied(r, tool, filePath)
+	if err != nil || !ok {
+		return false
+	}
+	return stateio.Sha256Hex(raw) != last.SHA256
 }
 
 // The tri-state read helpers formerly named readCodexTOMLForProject /
