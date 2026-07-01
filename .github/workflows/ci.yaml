@@ -62,6 +62,9 @@ jobs:
     - name: os.Rename discipline
       run: bash scripts/lint-osrename.sh
 
+    - name: Project-scope discipline
+      run: bash scripts/lint-project-scope.sh
+
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v4
       with:

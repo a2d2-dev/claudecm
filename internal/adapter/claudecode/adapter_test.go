@@ -245,6 +245,49 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
+func TestDetect_SettingsJsonIsSymlink(t *testing.T) {
+	// F3 regression: Detect must not follow symlinks silently. Even
+	// when the symlink target lives inside HOME (a "benign" shape),
+	// Detect must (a) still report Detected/Installed via the target,
+	// (b) leave the symlinked path OUT of Presence.Files — the
+	// write-path refuses to write through symlinks and Files must not
+	// promise ownership of a path the writer will reject, and (c)
+	// leave a note mentioning "symlink" so the operator sees why the
+	// file did not appear in the owned list.
+	r := newResolver(t)
+	if err := os.MkdirAll(filepath.Join(r.Home(), ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	// Real target lives inside ~/.claude/ — a legitimate in-HOME
+	// destination so the write-path's future symlink-aware mode has
+	// something plausible to target.
+	target := filepath.Join(r.Home(), ".claude", "settings-actual.json")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write settings-actual.json: %v", err)
+	}
+	link := filepath.Join(r.Home(), ".claude", "settings.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink settings.json -> settings-actual.json: %v", err)
+	}
+
+	p, err := claudecode.New().Detect(context.Background(), r)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if !p.Detected {
+		t.Errorf("Presence.Detected = false, want true (target file exists)")
+	}
+	if !p.Installed {
+		t.Errorf("Presence.Installed = false, want true (target file exists)")
+	}
+	if len(p.Files) != 0 {
+		t.Errorf("Presence.Files = %v, want empty (symlinked settings.json must not be admitted)", p.Files)
+	}
+	if !contains(p.Notes, "symlink") {
+		t.Errorf("Presence.Notes = %q, want mention of \"symlink\"", p.Notes)
+	}
+}
+
 func TestDetect_ContextCancelled(t *testing.T) {
 	// Detect honours ctx.Err() before filesystem I/O so cmd/* can
 	// abort on SIGINT/SIGTERM. Verify the shape.

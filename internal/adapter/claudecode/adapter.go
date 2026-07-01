@@ -31,11 +31,11 @@ import (
 var ErrNotImplemented = errors.New("claudecm: claudecode adapter method not implemented")
 
 // binaryName is the CLI executable claudecm looks for on PATH when
-// probing tool presence. Named as a var (not const) so tests can swap
-// it if they ever need to sandbox exec.LookPath — currently the tests
-// t.Skip when the real binary is present or absent, so nothing swaps
-// this, but keeping it a var future-proofs the seam.
-var binaryName = "claude"
+// probing tool presence. Kept as a const so we do not carry
+// package-level mutable state (coding-standards rule 12). If a future
+// story genuinely needs to swap this for tests, promote back to a var
+// alongside the actual test that swaps it — not before.
+const binaryName = "claude"
 
 // Adapter is the concrete Claude Code adapter. It carries no state:
 // every method takes the *storage.Resolver as a parameter, honouring
@@ -103,7 +103,17 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 	// probe settings.json if ~/.claude looks like a real directory —
 	// stat'ing <file>/settings.json when ~/.claude is a file gives
 	// ENOTDIR noise the operator doesn't need.
+	//
+	// Symlinks are probed with Lstat first so Detect does not silently
+	// follow a link out of HOME. The write-path (E1-S3 / E2-S2)
+	// refuses to write through an out-of-HOME symlink, so if Detect
+	// followed the link and reported the file as owned, the operator
+	// would get "installed" here and a refusal at apply time. We
+	// annotate the note instead and let Stat decide the boolean
+	// signals — the target's existence still drives Detected/Installed.
 	dir := configDir(r)
+	dirLstat, dirLstatErr := os.Lstat(dir)
+	dirIsSymlink := dirLstatErr == nil && dirLstat.Mode()&os.ModeSymlink != 0
 	dirInfo, dirErr := os.Stat(dir)
 	dirClaimed := false
 	switch {
@@ -111,6 +121,9 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 		p.ConfigDir = dir
 		p.Detected = true
 		dirClaimed = true
+		if dirIsSymlink {
+			p.Notes = "warning: " + dir + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)"
+		}
 	case dirErr == nil:
 		// ~/.claude exists but is not a directory. Do not claim
 		// detection; leave a note so the operator can investigate.
@@ -126,13 +139,24 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 
 	if dirClaimed {
 		settings := SettingsPath(r)
+		settingsLstat, settingsLstatErr := os.Lstat(settings)
+		settingsIsSymlink := settingsLstatErr == nil && settingsLstat.Mode()&os.ModeSymlink != 0
 		settingsInfo, settingsErr := os.Stat(settings)
 		switch {
 		case settingsErr == nil && !settingsInfo.IsDir():
 			p.Installed = true
 			p.Detected = true
-			p.Files = append(p.Files, settings)
-			p.Notes = "detected via " + settings
+			if settingsIsSymlink {
+				// Do NOT add symlinked settings.json to Files: the
+				// write-path will refuse to write through an
+				// out-of-HOME symlink, so Files must not lie about
+				// ownership. Detected/Installed still reflect that a
+				// legitimate target exists on the far side of the link.
+				p.Notes = "warning: " + settings + " is a symlink; treated as present but activation will require symlink-aware writepath (E1-S3 semantics apply)"
+			} else {
+				p.Files = append(p.Files, settings)
+				p.Notes = "detected via " + settings
+			}
 		case settingsErr == nil:
 			// A directory sitting at the settings.json path is
 			// anomalous but not our bug to solve; report it and do
