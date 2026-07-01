@@ -17,7 +17,6 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter/claudecode"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
-	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
 // newResolver builds a Resolver anchored at a per-test HOME. Tests need
@@ -323,11 +322,9 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 	// import_test.go; it is no longer in the stub set.
 	// Plan has landed in E3-S4 with its own dedicated tests in
 	// plan_test.go; it is no longer in the stub set.
+	// Apply has landed in E3-S5 with its own dedicated tests in
+	// apply_test.go; it is no longer in the stub set.
 
-	// Apply
-	if _, err := a.Apply(ctx, r, writepath.WritePlan{}); !errors.Is(err, claudecode.ErrNotImplemented) {
-		t.Errorf("Apply err = %v, want ErrNotImplemented", err)
-	}
 	// Project
 	if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, claudecode.ErrNotImplemented) {
 		t.Errorf("Project err = %v, want ErrNotImplemented", err)
