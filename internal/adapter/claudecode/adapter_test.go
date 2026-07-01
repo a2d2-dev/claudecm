@@ -15,7 +15,6 @@ import (
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/adapter/claudecode"
-	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -313,20 +312,9 @@ func TestRegistrationHappensInInit(t *testing.T) {
 	}
 }
 
-func TestStubsReturnErrNotImplemented(t *testing.T) {
-	r := newResolver(t)
-	a := claudecode.New()
-	ctx := context.Background()
-
-	// Import has landed in E3-S3 with its own dedicated tests in
-	// import_test.go; it is no longer in the stub set.
-	// Plan has landed in E3-S4 with its own dedicated tests in
-	// plan_test.go; it is no longer in the stub set.
-	// Apply has landed in E3-S5 with its own dedicated tests in
-	// apply_test.go; it is no longer in the stub set.
-
-	// Project
-	if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, claudecode.ErrNotImplemented) {
-		t.Errorf("Project err = %v, want ErrNotImplemented", err)
-	}
-}
+// TestStubsReturnErrNotImplemented was the epic-scoped stub sentinel
+// test. All five interface methods have landed in E3-S2..E3-S6 with
+// dedicated tests in their own *_test.go files (detect / files: this
+// file; import: import_test.go; plan: plan_test.go; apply:
+// apply_test.go; project: project_test.go). The stub test itself is
+// removed so the file does not carry a dead test body.

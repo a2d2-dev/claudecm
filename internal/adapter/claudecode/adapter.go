@@ -4,9 +4,9 @@
 // (the per-project ones under a project's local .claude directory)
 // are explicitly out of v1 scope and are never referenced here.
 //
-// V1 scope: Detect + Files + Import + Plan + Apply have landed.
-// Project remains a stub returning ErrNotImplemented until E3-S6
-// ships the layered projection.
+// V1 scope: Detect + Files + Import + Plan + Apply + Project have
+// landed. E3-S7 (fixtures) is the only remaining item on the E3
+// adapter surface.
 package claudecode
 
 import (
@@ -23,10 +23,12 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
-// ErrNotImplemented is returned by adapter methods this story does not
-// yet ship (Project). E3-S6 replaces the last stub with a real
-// implementation. Sentinel so callers can errors.Is check without
-// stringly-typed matching.
+// ErrNotImplemented was returned by adapter method stubs while their
+// implementations landed epic-by-epic. E3-S6 shipped the last stub
+// (Project); the sentinel is retained as a package-public identifier
+// for one release cycle so any downstream errors.Is checks continue
+// to compile, and will be removed in a follow-up cleanup PR once the
+// grep across cmd/* confirms no live caller depends on it.
 var ErrNotImplemented = errors.New("claudecm: claudecode adapter method not implemented")
 
 // ErrPlanMismatch is returned by Apply when the WritePlan it was handed
@@ -270,9 +272,22 @@ func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath
 	return report, nil
 }
 
-// Project is a stub — E3-S6 ships the layered resolver projection.
+// Project resolves the layered EffectiveView for Claude Code given
+// the active profile plus current env and on-disk state. Real
+// implementation lives in project.go; this method is a thin
+// dispatcher so adapter.go stays a grep-friendly index of the public
+// contract.
+//
+// Read-only: never writes to disk, never mutates the process env.
+//
+// Errors: errors.Is(err, ErrParseFailed) when settings.json exists
+// but does not decode as a JSON object; errors.Is(err, ErrOutsideHome)
+// when a symlink at the file (or a parent component) escapes HOME;
+// ctx.Err() when the caller cancelled. An absent settings.json is a
+// well-formed input, not an error — the OnDiskToolConfig layer simply
+// contributes no values in that case.
 func (a *Adapter) Project(ctx context.Context, r *storage.Resolver, p config.Profile) (adapter.EffectiveView, error) {
-	return adapter.EffectiveView{}, ErrNotImplemented
+	return a.projectFromProfile(ctx, r, p)
 }
 
 // init wires this adapter into adapter.DefaultRegistry so cmd/current
