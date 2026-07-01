@@ -1,0 +1,1 @@
+auth.json is symlinked to a path outside HOME. Import must fail with ErrOutsideHome. Symmetric with the config-side symlink-out-of-home case — ensures out-of-HOME containment applies to both files, not just config.toml.

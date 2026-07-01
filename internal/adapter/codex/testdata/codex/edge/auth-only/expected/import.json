@@ -1,0 +1,18 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "",
+    "APIKey": "sk-existing",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": null
+  }
+}

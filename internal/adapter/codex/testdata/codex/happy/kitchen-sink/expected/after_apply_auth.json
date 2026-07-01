@@ -1,0 +1,12 @@
+{
+  "OPENAI_API_KEY": "sk-new-key",
+  "auth_mode": "api_key",
+  "last_refresh": "2026-06-01T00:00:00Z",
+  "tokens": {
+    "access_token": "at-new",
+    "id_token": "it-new",
+    "refresh_token": "rt-new",
+    "account_id": "acct-new"
+  },
+  "unowned_top": "preserved"
+}

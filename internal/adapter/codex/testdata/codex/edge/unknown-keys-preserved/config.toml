@@ -1,0 +1,12 @@
+model = "gpt-5"
+model_provider = "myrelay"
+disable_response_storage = true
+
+[model_providers.myrelay]
+name = "MyRelay"
+base_url = "https://relay.example.com"
+env_key = "MYRELAY_API_KEY"
+wire_api = "responses"
+
+[history]
+max_entries = 42

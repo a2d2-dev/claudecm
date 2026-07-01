@@ -1,0 +1,52 @@
+{
+  "Tool": "codex",
+  "Fields": [
+    {
+      "Key": "OPENAI_API_KEY",
+      "Value": "sk-new",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:OPENAI_API_KEY",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core:api_key",
+          "Value": "sk-new",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "model",
+      "Value": "gpt-4o",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model",
+          "Value": "gpt-4o",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_provider",
+      "Value": "openai",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_provider",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_provider",
+          "Value": "openai",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

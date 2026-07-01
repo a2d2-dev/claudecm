@@ -1,0 +1,34 @@
+[
+  {
+    "tool": "codex",
+    "target": "<HOME>/.codex/auth.json",
+    "owned_keys": [
+      "OPENAI_API_KEY",
+      "auth_mode",
+      "last_refresh",
+      "tokens.access_token",
+      "tokens.account_id",
+      "tokens.id_token",
+      "tokens.refresh_token"
+    ],
+    "reason": "codex auth: switch to profile \"auth-only\""
+  },
+  {
+    "tool": "codex",
+    "target": "<HOME>/.codex/config.toml",
+    "owned_keys": [
+      "approval_mode",
+      "model",
+      "model_provider",
+      "model_providers.anthropic.base_url",
+      "model_providers.anthropic.env_key",
+      "model_providers.anthropic.name",
+      "model_providers.anthropic.wire_api",
+      "model_providers.openai.base_url",
+      "model_providers.openai.env_key",
+      "model_providers.openai.name",
+      "model_providers.openai.wire_api"
+    ],
+    "reason": "codex config: switch to profile \"auth-only\""
+  }
+]

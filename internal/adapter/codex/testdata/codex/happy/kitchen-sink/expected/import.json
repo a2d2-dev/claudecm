@@ -1,0 +1,36 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "",
+    "APIKey": "sk-existing-key",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": {
+      "approval_mode": "on-request",
+      "auth_mode": "api_key",
+      "last_refresh": "2026-05-01T12:34:56Z",
+      "model": "gpt-5",
+      "model_provider": "openai",
+      "model_providers.anthropic.base_url": "https://api.anthropic.com",
+      "model_providers.anthropic.env_key": "ANTHROPIC_API_KEY",
+      "model_providers.anthropic.name": "Anthropic",
+      "model_providers.anthropic.wire_api": "messages",
+      "model_providers.openai.base_url": "https://api.openai.com/v1",
+      "model_providers.openai.env_key": "OPENAI_API_KEY",
+      "model_providers.openai.name": "OpenAI",
+      "model_providers.openai.wire_api": "responses",
+      "tokens.access_token": "at-existing",
+      "tokens.account_id": "acct-1234",
+      "tokens.id_token": "it-existing",
+      "tokens.refresh_token": "rt-existing"
+    }
+  }
+}
