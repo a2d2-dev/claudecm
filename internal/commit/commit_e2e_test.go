@@ -128,7 +128,7 @@ func TestStage_HappyBothFilesTwoTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	defer c.Abort(txn)
+	defer func() { _ = c.Abort(txn) }()
 
 	if len(txn.Prepared) != 2 {
 		t.Fatalf("Prepared len = %d, want 2", len(txn.Prepared))
@@ -230,7 +230,7 @@ func TestStage_TouchesUnownedWithAllowUnownedProceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	defer c.Abort(txn)
+	defer func() { _ = c.Abort(txn) }()
 	if len(txn.Prepared) != 1 {
 		t.Fatalf("Prepared len = %d, want 1", len(txn.Prepared))
 	}
@@ -253,7 +253,7 @@ func TestStage_DryRunNoBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	defer c.Abort(txn)
+	defer func() { _ = c.Abort(txn) }()
 	if len(txn.Prepared) != 1 {
 		t.Fatalf("Prepared len = %d, want 1", len(txn.Prepared))
 	}
@@ -289,7 +289,7 @@ func TestStage_SkippedBytesEqual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	defer c.Abort(txn)
+	defer func() { _ = c.Abort(txn) }()
 	if !txn.Prepared[0].Skipped {
 		t.Errorf("Skipped = false, want true (byte-identical)")
 	}
@@ -787,7 +787,7 @@ func TestStage_DedupSameTargetLocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
-	defer c.Abort(txn)
+	defer func() { _ = c.Abort(txn) }()
 	if len(txn.Locks) != 1 {
 		t.Errorf("Locks len = %d, want 1 (deduped)", len(txn.Locks))
 	}
