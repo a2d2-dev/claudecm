@@ -61,6 +61,12 @@ whitelist=(
   "internal/adapter/claudecode/plan.go"
   "internal/adapter/adapter.go"
   "internal/storage/lock.go"
+  # commit.go (E7-S1) is the two-phase commit orchestrator every
+  # multi-file write must route through (coding-standards rule 13 /
+  # PRD FR-16). Its package godoc documents the auth-first commit
+  # order (architecture §5) which names ~/.claude/settings.json as
+  # the last-committed target.
+  "internal/commit/commit.go"
 )
 
 # Whitelist for R3 — files that may legitimately mention Codex's two
@@ -81,6 +87,12 @@ codex_whitelist=(
   # its package godoc names both paths to document scope.
   "internal/adapter/codex/project.go"
   "internal/adapter/adapter.go"
+  # commit.go (E7-S1) is the two-phase commit orchestrator every
+  # multi-file write must route through (coding-standards rule 13 /
+  # PRD FR-16). Its package godoc documents the auth-first commit
+  # order (architecture §5) which names ~/.codex/auth.json first and
+  # ~/.codex/config.toml second.
+  "internal/commit/commit.go"
 )
 
 fail=0
