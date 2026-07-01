@@ -1,9 +1,12 @@
 // Package writepath encodes the FR-5 locked write-path contract for every
 // tool-owned config file claudecm mutates. This file (E2-S1) is types-only:
 // it declares the value types that adapters (E3/E4) produce and that the
-// pipeline body (E2-S2..E2-S4) consumes. The pipeline itself lives in a
-// sibling apply.go added by later stories; the Apply stub here exists solely
-// so downstream callers can compile against the contract in this PR.
+// pipeline body (E2-S2..E2-S4) consumes. The pipeline itself will live in
+// this package alongside these types; the Apply stub here exists solely so
+// downstream callers can compile against the contract in this PR.
+//
+// Nested inputs must be flattened by the caller (see Flatten) before being
+// passed to Diff. Diff itself operates on a single-level map[string]any.
 //
 // Design deviations from the story text worth noting in code:
 //
@@ -20,10 +23,14 @@
 //     WriteReport, matching how E2-S2..E2-S4 will refer to it.
 //
 //   - The story treats KeyPath as its own typed string with helpers. In
-//     this shape OwnedKeys is []string. Nested-path helpers are deferred
-//     to whichever consumer (Diff / merge-preserve) actually needs them;
-//     encoding them here without a caller invites speculative surface
-//     area (coding-standards §12).
+//     this shape OwnedKeys is []string. Nested-path traversal for callers
+//     is provided by Flatten; ownership matching is exact-string against
+//     the fully-flattened key (see OwnedKeys godoc).
+//
+//   - The story references a separate diff.go / apply.go layout. The
+//     whole package currently lives in plan.go; the source-tree split
+//     diagram in the architecture doc will catch up when the pipeline
+//     lands in E2-S2..E2-S4. No behavioral impact.
 //
 // Everything downstream of these types (locking, backup, atomic write,
 // reparse, rollback, concurrency fingerprinting) is out of scope for this
@@ -34,8 +41,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/storage"
@@ -74,11 +83,15 @@ type WritePlan struct {
 	// atomic-write portion (a rare case).
 	Parser Parser
 
-	// OwnedKeys is the frozen allowlist of key paths claudecm manages
-	// in this file. Everything outside this list must be preserved
-	// verbatim (merge-preserve, PRD §4.7). Empty allowlist is legal
-	// (means "claudecm owns nothing in this file yet"); empty strings
-	// inside the slice are not.
+	// OwnedKeys is the frozen allowlist of fully-flattened key paths
+	// claudecm manages in this file. Ownership is EXACT string match
+	// against the flattened key produced by Flatten: an OwnedKeys entry
+	// of "env" does NOT own "env.ANTHROPIC_API_KEY" — those are two
+	// different keys. Wildcards, prefixes, and glob syntax are out of
+	// v1 scope. Everything outside this list must be preserved verbatim
+	// (merge-preserve, PRD §4.7). Empty allowlist is legal (means
+	// "claudecm owns nothing in this file yet"); empty strings inside
+	// the slice and duplicate entries are not.
 	OwnedKeys []string
 
 	// Reason is a human-friendly explanation attached to the backup
@@ -149,6 +162,10 @@ type WriteReport struct {
 
 // Sentinel error kinds. Adapters and cmd/* switch on these via errors.Is;
 // each maps to a documented exit-code / rollback path.
+//
+// The Err* values below whose comments reference FR-5 pipeline steps are
+// returned by writepath.Apply once E2-S2..E2-S4 wire the pipeline in.
+// Callers should switch on the specific sentinel, not on error string.
 var (
 	// ErrPlanInvalid indicates a WritePlan failed cheap pre-execution
 	// validation. Wrapped with the specific reason via fmt.Errorf.
@@ -157,6 +174,31 @@ var (
 	// ErrConcurrentEdit indicates the target changed under the lock
 	// between fingerprint capture and rename. Maps to NFR-C2. Exit code 2.
 	ErrConcurrentEdit = errors.New("claudecm: target changed under lock; aborted")
+
+	// ErrLockTimeout indicates Apply could not acquire the write lock
+	// within the configured timeout (NFR-C1). Distinct from
+	// ErrConcurrentEdit, which fires only after a lock was obtained.
+	// writepath.Apply wraps storage.ErrLockTimeout with this sentinel so
+	// callers of writepath can errors.Is on this value without needing
+	// to import the storage package.
+	ErrLockTimeout = errors.New("claudecm: lock acquisition timed out")
+
+	// ErrParseFailed indicates the parser refused the current on-disk
+	// bytes before any write happened. Maps to FR-5 step 3 (refuse on
+	// malformed) and NFR-S1 (no silent fallback rewriting). Returned by
+	// writepath.Apply once E2-S2..E2-S4 wire the pipeline.
+	ErrParseFailed = errors.New("claudecm: parse failed")
+
+	// ErrOutsideHome indicates the resolved (symlink-followed) Target
+	// escapes $HOME. Maps to FR-5 step 4 and NFR-S2/NFR-S3 (HOME
+	// containment). Returned by writepath.Apply once E2-S2..E2-S4 wire
+	// the pipeline.
+	ErrOutsideHome = errors.New("claudecm: target resolves outside HOME")
+
+	// ErrBackupFailed indicates the backup snapshot (FR-5 step 6) could
+	// not be created. Apply aborts before touching the target. Returned
+	// by writepath.Apply once E2-S2..E2-S4 wire the pipeline.
+	ErrBackupFailed = errors.New("claudecm: backup creation failed")
 
 	// ErrPostWriteReparse indicates FR-5 step 8 reparse failed or an
 	// owned key disagreed with intent.
@@ -174,6 +216,11 @@ var (
 	// ErrDryRunUnownedTouched indicates a dry-run diff touched keys not
 	// in OwnedKeys and the caller did not pre-authorize with --yes.
 	ErrDryRunUnownedTouched = errors.New("claudecm: dry-run touched unowned keys; requires --yes")
+
+	// ErrFlattenInvalidKey indicates Flatten was given a map whose key
+	// contains a control character (NUL, newline, CR, or tab). Such
+	// keys cannot legally appear in a config file we manage.
+	ErrFlattenInvalidKey = errors.New("claudecm: flatten: key contains control character")
 
 	// ErrNotImplemented is returned by the E2-S1 Apply stub. E2-S2
 	// replaces the stub and this sentinel is removed.
@@ -208,10 +255,28 @@ func ValidatePlan(plan WritePlan) error {
 	if !isAbsolute(plan.Target) {
 		return fmt.Errorf("%w: Target %q is not absolute", ErrPlanInvalid, plan.Target)
 	}
+	if i := strings.IndexAny(plan.Target, "\x00\n\r\t"); i >= 0 {
+		return fmt.Errorf("%w: Target contains control character at byte %d", ErrPlanInvalid, i)
+	}
+	// Defense-in-depth: reject any surviving ".." component after Clean.
+	// Real symlink escape checks live in internal/storage/paths.go and
+	// run inside Apply; this catches obvious mistakes at plan-construction
+	// time so adapters fail fast.
+	cleaned := path.Clean(plan.Target)
+	for _, part := range strings.Split(cleaned, "/") {
+		if part == ".." {
+			return fmt.Errorf("%w: Target %q contains '..' component after Clean", ErrPlanInvalid, plan.Target)
+		}
+	}
+	seen := make(map[string]struct{}, len(plan.OwnedKeys))
 	for i, k := range plan.OwnedKeys {
 		if k == "" {
 			return fmt.Errorf("%w: OwnedKeys[%d] is empty", ErrPlanInvalid, i)
 		}
+		if _, dup := seen[k]; dup {
+			return fmt.Errorf("%w: OwnedKeys[%d] %q is a duplicate", ErrPlanInvalid, i, k)
+		}
+		seen[k] = struct{}{}
 	}
 	// Note: WritePlan.Transform + WritePlan.NewContent may both be set.
 	// This is accepted intentionally — Transform wins at Apply time,
@@ -219,50 +284,113 @@ func ValidatePlan(plan WritePlan) error {
 	return nil
 }
 
-// Diff computes a deterministic, pure DiffResult from two parsed values.
-// Both inputs come from a Parser; nil inputs are treated as "absent".
+// Flatten walks a nested map[string]any and returns a single-level map
+// whose keys are the fully-qualified paths joined by '.'. Leaves (any
+// non-map value: scalars, arrays, nil) are stored under their flattened
+// key. Empty maps at any depth contribute no keys.
+//
+// Escape rule for keys that themselves contain the join delimiters:
+// backslash is escaped as `\\` and '.' is escaped as `\.`. Backslash is
+// escaped first, then '.'. Consumers that need to reverse the flatten
+// must reverse the escape in the same order (unescape '.' first, then
+// '\'). This rule matches the OwnedKeys allowlist convention: an
+// adapter that owns a key literally named "a.b" would list it as `a\.b`
+// in OwnedKeys, not as `a.b`.
+//
+// Keys containing a control character (NUL, newline, CR, or tab) are
+// rejected with an error wrapping ErrFlattenInvalidKey; such keys
+// cannot legally appear in a config file we manage.
+//
+// A non-map top-level input is treated as a leaf and returned as
+// {"": v}. Adapters whose top-level document is not a map (rare —
+// Codex/Claude configs are all map-shaped) should wrap explicitly
+// with map[string]any{"": value} to make the caller-visible key
+// deliberate rather than relying on this shortcut.
+func Flatten(v any) (map[string]any, error) {
+	out := make(map[string]any)
+	if err := flattenInto(out, "", v); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func flattenInto(out map[string]any, prefix string, v any) error {
+	m, ok := v.(map[string]any)
+	if !ok {
+		out[prefix] = v
+		return nil
+	}
+	if len(m) == 0 {
+		// Empty map at any depth emits no keys. At the top level this
+		// yields an empty result; at a leaf it means that subtree
+		// contributes nothing to the flat view (Diff will report the
+		// parent key as unchanged if both sides agree it is empty).
+		return nil
+	}
+	for _, k := range sortedKeys(m) {
+		if err := validateFlattenKey(k); err != nil {
+			return err
+		}
+		escaped := escapeFlattenKey(k)
+		var next string
+		if prefix == "" {
+			next = escaped
+		} else {
+			next = prefix + "." + escaped
+		}
+		if err := flattenInto(out, next, m[k]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateFlattenKey(k string) error {
+	if i := strings.IndexAny(k, "\x00\n\r\t"); i >= 0 {
+		return fmt.Errorf("%w: %q (byte %d)", ErrFlattenInvalidKey, k, i)
+	}
+	return nil
+}
+
+func escapeFlattenKey(k string) string {
+	// Order matters: escape backslash first, then dot. Reversing means
+	// unescape dot first, then backslash.
+	k = strings.ReplaceAll(k, `\`, `\\`)
+	k = strings.ReplaceAll(k, `.`, `\.`)
+	return k
+}
+
+// Diff computes a deterministic, pure DiffResult from two flat maps.
+// Callers with nested configuration MUST pass their values through
+// Flatten first; Diff does not descend into nested map[string]any
+// values. This split keeps the ownership-match semantics simple: an
+// OwnedKeys entry matches a Diff-reported key by exact string equality.
 //
 // Semantics:
 //
-//   - If current and next are both map[string]any, Diff walks the union
-//     of keys at the top level and reports Added / Removed / Changed.
-//     This is a shallow diff on purpose: v1 owned-key allowlists are
-//     dotted paths ("env.ANTHROPIC_API_KEY"), which the caller will
-//     have already flattened into map[string]any before invoking Diff
-//     if they need nested comparison.
+//   - Diff walks the union of keys in current and next. For each key
+//     it emits Removed (in current only), Added (in next only), or
+//     Changed (present in both, values differ by reflect.DeepEqual).
 //
-//   - If either side is not a map, Diff falls back to a single-scalar
-//     comparison with an empty Key. If the two scalars are equal, Diff
-//     returns the zero DiffResult.
-//
-//   - Two values that compare equal via reflect.DeepEqual produce the
+//   - Two maps that compare equal via reflect.DeepEqual produce the
 //     zero DiffResult.
+//
+//   - Passing nil for either side is legal and means "absent" — every
+//     key on the other side becomes Added or Removed accordingly.
 //
 // TouchesUnowned is true iff any Added / Removed / Changed key is not
 // present in ownedKeys.
-func Diff(current, next any, ownedKeys []string) DiffResult {
+func Diff(current, next map[string]any, ownedKeys []string) DiffResult {
 	if reflect.DeepEqual(current, next) {
 		return DiffResult{}
 	}
 
-	curMap, curOK := current.(map[string]any)
-	nextMap, nextOK := next.(map[string]any)
-	if !curOK || !nextOK {
-		// Scalar fallback: one Changed entry keyed to the empty
-		// string, so callers can still render "value differs".
-		res := DiffResult{
-			Changed: []KeyDelta{{Key: "", OldValue: current, NewValue: next}},
-		}
-		res.TouchesUnowned = !isOwned("", ownedKeys)
-		return res
-	}
-
 	owned := sliceToSet(ownedKeys)
 	var res DiffResult
-	seen := make(map[string]struct{}, len(curMap)+len(nextMap))
-	for _, k := range sortedKeys(curMap) {
+	seen := make(map[string]struct{}, len(current)+len(next))
+	for _, k := range sortedKeys(current) {
 		seen[k] = struct{}{}
-		nv, ok := nextMap[k]
+		nv, ok := next[k]
 		if !ok {
 			res.Removed = append(res.Removed, k)
 			if _, isOwn := owned[k]; !isOwn {
@@ -270,10 +398,10 @@ func Diff(current, next any, ownedKeys []string) DiffResult {
 			}
 			continue
 		}
-		if !reflect.DeepEqual(curMap[k], nv) {
+		if !reflect.DeepEqual(current[k], nv) {
 			res.Changed = append(res.Changed, KeyDelta{
 				Key:      k,
-				OldValue: curMap[k],
+				OldValue: current[k],
 				NewValue: nv,
 			})
 			if _, isOwn := owned[k]; !isOwn {
@@ -281,7 +409,7 @@ func Diff(current, next any, ownedKeys []string) DiffResult {
 			}
 		}
 	}
-	for _, k := range sortedKeys(nextMap) {
+	for _, k := range sortedKeys(next) {
 		if _, ok := seen[k]; ok {
 			continue
 		}
@@ -298,16 +426,6 @@ func Diff(current, next any, ownedKeys []string) DiffResult {
 // FR-5's Target is a POSIX absolute path in every architecture ref.
 func isAbsolute(p string) bool { return len(p) > 0 && p[0] == '/' }
 
-// isOwned reports whether key is present in ownedKeys.
-func isOwned(key string, ownedKeys []string) bool {
-	for _, k := range ownedKeys {
-		if k == key {
-			return true
-		}
-	}
-	return false
-}
-
 func sliceToSet(s []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(s))
 	for _, v := range s {
@@ -317,8 +435,8 @@ func sliceToSet(s []string) map[string]struct{} {
 }
 
 // sortedKeys returns m's keys sorted lexicographically. Used to make
-// Diff deterministic across runs — critical because DiffResult flows
-// into the FR-4 pre-apply confirmation surface.
+// Diff and Flatten deterministic across runs — critical because
+// DiffResult flows into the FR-4 pre-apply confirmation surface.
 func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
