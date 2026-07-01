@@ -38,8 +38,6 @@ package writepath
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -125,22 +123,4 @@ func seedFile(t *testing.T, path string, contents []byte) {
 	if err := os.WriteFile(path, contents, 0o600); err != nil {
 		t.Fatalf("seedFile write %q: %v", path, err)
 	}
-}
-
-// readFileSHA returns the SHA256 of the file at path as a hex string.
-// Used by matrix rows that assert "on-disk bytes are unchanged" without
-// wanting to compare the raw bytes (some rows care about identity, not
-// content). Returns "" when the file does not exist so callers can
-// distinguish "target absent" from "target has zero-byte hash".
-func readFileSHA(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return ""
-		}
-		t.Fatalf("readFileSHA %q: %v", path, err)
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
 }
