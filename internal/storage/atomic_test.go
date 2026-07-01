@@ -352,16 +352,77 @@ func TestAtomicWrite_TempFilenameCollisionResistance(t *testing.T) {
 	assertNoTempFiles(t, filepath.Dir(target))
 }
 
-// TestAtomicWrite_FsyncErrorPath documents that we do NOT synthetically
-// trigger a real fsync error. Doing so would require either a fake
-// filesystem or a package-level hook. Coding standards rule 12 forbids
-// package-level mutable state; introducing an unexported hook variable
-// solely for tests would create a state footgun disproportionate to the
-// value. Instead, the error path is verifiable by inspection of
-// AtomicWrite: tmp.Sync() and fsyncDir() failures both go through the
-// standard cleanup path (Close, Remove) and return a wrapped error. The
-// simulated-crash coverage of the "temp cleaned up, original untouched"
-// contract lives in TestAtomicWrite_RenameFailureLeavesOriginalUntouched.
-func TestAtomicWrite_FsyncErrorPath(t *testing.T) {
-	t.Skip("fsync error injection intentionally not implemented; see test comment")
+// TestAtomicWrite_MustNotExist_RaceExactlyOneWinner exercises the atomic
+// EEXIST guarantee of the os.Link-based MustNotExist publish. Two goroutines
+// race to create the SAME target under MustNotExist=true; exactly one must
+// win (nil error, byte-for-byte content on disk, non-empty SHA256), the
+// other must lose with errors.Is(err, ErrTargetExists), and no
+// ".claudecm-tmp-*" siblings may remain in the parent directory.
+//
+// This is the on-disk proof that the TOCTOU window in the old
+// "Lstat pre-check + Rename" flow is gone: os.Link on POSIX either creates
+// the directory entry or fails with EEXIST as a single kernel step.
+func TestAtomicWrite_MustNotExist_RaceExactlyOneWinner(t *testing.T) {
+	r, home := atomicHome(t)
+	target := filepath.Join(home, ConfigDirName, ProfilesDirName, "race.yaml")
+	payloadA := []byte("payload-A payload-A payload-A")
+	payloadB := []byte("payload-B payload-B payload-B")
+
+	type result struct {
+		payload []byte
+		fp      Fingerprint
+		err     error
+	}
+	// Buffered so goroutines never block if the receiver is slow.
+	results := make(chan result, 2)
+	start := make(chan struct{})
+	launch := func(p []byte) {
+		go func() {
+			<-start // fire both goroutines as simultaneously as we can
+			fp, err := AtomicWrite(r, target, p, AtomicWriteOptions{MustNotExist: true})
+			results <- result{payload: p, fp: fp, err: err}
+		}()
+	}
+	launch(payloadA)
+	launch(payloadB)
+	close(start)
+
+	r1 := <-results
+	r2 := <-results
+
+	winners := 0
+	losers := 0
+	var winnerPayload []byte
+	var winnerSHA string
+	for _, r := range []result{r1, r2} {
+		switch {
+		case r.err == nil:
+			winners++
+			winnerPayload = r.payload
+			winnerSHA = r.fp.SHA256
+			if winnerSHA == "" {
+				t.Fatalf("winner returned empty SHA256 fingerprint: %+v", r.fp)
+			}
+		case errors.Is(r.err, ErrTargetExists):
+			losers++
+		default:
+			t.Fatalf("unexpected error from racer: %v", r.err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("winners=%d losers=%d; want exactly 1 of each", winners, losers)
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("readfile: %v", err)
+	}
+	if string(got) != string(winnerPayload) {
+		t.Fatalf("on-disk bytes = %q; want winner payload %q", got, winnerPayload)
+	}
+	sum := sha256.Sum256(winnerPayload)
+	if hex.EncodeToString(sum[:]) != winnerSHA {
+		t.Fatalf("winner SHA %q does not match hash of payload it claimed to have written", winnerSHA)
+	}
+	assertNoTempFiles(t, filepath.Dir(target))
 }

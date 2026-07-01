@@ -109,21 +109,32 @@ func Stat(path string) (Fingerprint, bool, error) {
 //     The parent MUST already exist — AtomicWrite does NOT auto-create it;
 //     callers use EnsureDir first. Keeping the primitive minimal makes the
 //     writepath.Apply audit trail cleaner in later stories.
-//  2. If opts.MustNotExist is true and the target already exists, refuse
-//     with ErrTargetExists (NFR-C3).
-//  3. Open a sibling temp file "<basename>.claudecm-tmp-<pid>-<rand>" with
+//  2. Open a sibling temp file "<basename>.claudecm-tmp-<pid>-<rand>" with
 //     O_CREATE|O_EXCL|O_WRONLY at the requested mode (default 0600). Mode
 //     is re-asserted via Chmod immediately after open, per architecture §8
 //     ("mode is re-asserted on every write").
-//  4. Write bytes to a MultiWriter fanning to the temp file and a SHA-256
+//  3. Write bytes to a MultiWriter fanning to the temp file and a SHA-256
 //     hasher — single-pass hash, no re-read.
-//  5. fsync the temp file, close it, then os.Rename(temp, target).
-//  6. fsync the parent directory so the rename is durable on ext4/xfs.
+//  4. fsync the temp file, close it.
+//  5. Publish the temp to the final path:
+//     - opts.MustNotExist=false: os.Rename(temp, target). Rename is atomic
+//       on POSIX and clobbers any pre-existing target as a single step.
+//     - opts.MustNotExist=true: os.Link(temp, target) then os.Remove(temp).
+//       Link fails atomically with EEXIST if the target already exists,
+//       eliminating the TOCTOU window a Lstat pre-check would leave open
+//       between check and rename. On EEXIST we return ErrTargetExists.
+//  6. fsync the parent directory so the rename/link is durable on ext4/xfs.
 //  7. Return the post-write Fingerprint.
 //
 // Any error at any step deletes the temp file (best-effort) and returns.
 // There is no partial-write recovery: a failed AtomicWrite leaves the
 // original target file — if any — byte-for-byte untouched.
+//
+// Fingerprint semantics: the returned Fingerprint.SHA256 is the hash of the
+// intended payload (the data slice), computed in-line while writing to the
+// temp file. It is NOT a post-fsync re-read of the on-disk bytes; the code
+// deliberately avoids reading back what it just wrote. Callers that need
+// belt-and-braces on-disk verification should Stat the final path.
 func AtomicWrite(r *Resolver, path string, data []byte, opts AtomicWriteOptions) (Fingerprint, error) {
 	if r == nil {
 		return Fingerprint{}, errors.New("atomic write: resolver is nil")
@@ -149,13 +160,12 @@ func AtomicWrite(r *Resolver, path string, data []byte, opts AtomicWriteOptions)
 	}
 	finalPath := filepath.Join(resolvedParent, base)
 
-	if opts.MustNotExist {
-		if _, err := os.Lstat(finalPath); err == nil {
-			return Fingerprint{}, fmt.Errorf("atomic write %q: %w", finalPath, ErrTargetExists)
-		} else if !os.IsNotExist(err) {
-			return Fingerprint{}, fmt.Errorf("atomic write: lstat %q: %w", finalPath, err)
-		}
-	}
+	// NOTE: MustNotExist is NOT enforced here with an os.Lstat pre-check —
+	// doing so would open a TOCTOU window between the check and the rename
+	// during which a concurrent writer could create the target and be
+	// silently clobbered. The check is executed atomically at publish time
+	// via os.Link (see step 5 below), which fails with EEXIST if the target
+	// exists.
 
 	tmpName, err := tempFilename(base)
 	if err != nil {
@@ -191,7 +201,7 @@ func AtomicWrite(r *Resolver, path string, data []byte, opts AtomicWriteOptions)
 		return Fingerprint{}, fmt.Errorf("atomic write: short write %d/%d to %q", n, len(data), tmpPath)
 	}
 
-	if err := tmp.Sync(); err != nil {
+	if err := syncFile(tmp); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return Fingerprint{}, fmt.Errorf("atomic write: fsync temp %q: %w", tmpPath, err)
@@ -201,7 +211,27 @@ func AtomicWrite(r *Resolver, path string, data []byte, opts AtomicWriteOptions)
 		return Fingerprint{}, fmt.Errorf("atomic write: close temp %q: %w", tmpPath, err)
 	}
 
-	if err := os.Rename(tmpPath, finalPath); err != nil {
+	if opts.MustNotExist {
+		// os.Link fails atomically with EEXIST if finalPath already exists,
+		// closing the TOCTOU window an Lstat-then-Rename dance would leave
+		// open. Success means we're the first writer; then remove the temp.
+		if err := os.Link(tmpPath, finalPath); err != nil {
+			// Detect EEXIST via errors.Is(fs.ErrExist) — portable across
+			// Link, OpenFile-O_EXCL, and any future os.LinkError wrapping.
+			_ = os.Remove(tmpPath)
+			if errors.Is(err, os.ErrExist) {
+				return Fingerprint{}, fmt.Errorf("atomic write %q: %w", finalPath, ErrTargetExists)
+			}
+			return Fingerprint{}, fmt.Errorf("atomic write: link %q -> %q: %w", tmpPath, finalPath, err)
+		}
+		if err := os.Remove(tmpPath); err != nil {
+			// The target is already published at this point; the temp
+			// hardlink is just a duplicate directory entry. Failing to
+			// unlink it would leave a stray file in the parent dir, so
+			// surface it, but the write itself succeeded.
+			return Fingerprint{}, fmt.Errorf("atomic write: cleanup link temp %q: %w", tmpPath, err)
+		}
+	} else if err := os.Rename(tmpPath, finalPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return Fingerprint{}, fmt.Errorf("atomic write: rename %q -> %q: %w", tmpPath, finalPath, err)
 	}
