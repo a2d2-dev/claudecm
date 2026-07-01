@@ -23,8 +23,8 @@ func TestFilter_EmptyAllowsAll(t *testing.T) {
 	cases := []adapter.ToolID{
 		adapter.ToolClaudeCode,
 		adapter.ToolCodex,
-		adapter.ToolID("gemini"),   // future/unknown must still pass
-		adapter.ToolID(""),          // even the zero value passes
+		adapter.ToolID("gemini"), // future/unknown must still pass
+		adapter.ToolID(""),       // even the zero value passes
 	}
 
 	for _, tc := range cases {
