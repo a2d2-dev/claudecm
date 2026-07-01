@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# lint-project-scope.sh — enforces Story E3-S2 AC: project-scope
+# Claude Code settings paths are NEVER referenced from production
+# Go code.
+#
+# claudecm owns exactly one Claude Code file: the HOME-rooted
+# ~/.claude/settings.json (user scope). PRD §4.7 and architecture.md
+# §3.1 put the project-scope siblings —
+#
+#   <project>/.claude/settings.json
+#   <project>/.claude/settings.local.json
+#
+# — explicitly out of v1 scope. The tool must never read, write, or
+# even name them. This script is the "grep guard" that Story E3-S2
+# calls out in its acceptance criteria.
+#
+# Rules
+# =====
+#
+#   R1. The string "settings.local.json" must not appear anywhere in
+#       cmd/ or internal/ Go files, period. Not in code, not in
+#       comments. Tests are exempt so they can *assert* the absence.
+#
+#   R2. Any file that references ".claude/settings.json" or the Go
+#       two-arg join pattern `".claude", "settings.json"` must be on
+#       the whitelist below. The whitelist is the set of files that
+#       legitimately build or document the HOME-rooted user-scope
+#       path via r.Home() — anywhere else is a project-scope leak.
+#       Tests are exempt (they build fixtures under a temp HOME).
+#
+# Exit codes: 0 = clean, 1 = one or more forbidden hits.
+
+set -uo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd -- "$here/.." && pwd)"
+cd "$repo"
+
+# Whitelist for R2 — files that may legitimately mention the
+# HOME-rooted ~/.claude/settings.json path (in code or doc comments).
+# Each entry is a repo-relative path; extend deliberately, with
+# review, when a new owner emerges.
+whitelist=(
+  "internal/adapter/claudecode/adapter.go"
+  "internal/adapter/claudecode/allowlist.go"
+  "internal/adapter/adapter.go"
+  "internal/storage/lock.go"
+)
+
+fail=0
+
+# ---------------------------------------------------------------- R1
+# settings.local.json is a project-scope-only string. It is never a
+# HOME-rooted path (~/.claude/ has no settings.local.json sibling
+# claudecm owns), so any mention in prod code is a bug.
+r1_hits="$(grep -rEn --include='*.go' 'settings\.local\.json' -- 'cmd' 'internal' 2>/dev/null \
+  | grep -v '_test\.go' \
+  || true)"
+
+if [ -n "$r1_hits" ]; then
+  echo "lint-project-scope: forbidden 'settings.local.json' reference(s):" >&2
+  echo "$r1_hits" >&2
+  echo >&2
+  echo "The project-scope .claude/settings.local.json file is out of" >&2
+  echo "v1 scope (PRD §4.7). Production code must never name it." >&2
+  echo >&2
+  fail=1
+fi
+
+# ---------------------------------------------------------------- R2
+# Match either the literal path "<something>.claude/settings.json"
+# or the Go join pattern that produces it: `".claude", "settings.json"`.
+# Both shapes can, in principle, be used to build a project-scope
+# path if the caller supplies a non-HOME anchor.
+r2_hits="$(grep -rEn --include='*.go' -e '\.claude/settings\.json' -e '"\.claude", *"settings\.json"' -- 'cmd' 'internal' 2>/dev/null \
+  | grep -v '_test\.go' \
+  || true)"
+
+if [ -n "$r2_hits" ]; then
+  # Filter out whitelisted files.
+  bad=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # grep -n output shape: <path>:<lineno>:<content>
+    path="${line%%:*}"
+    keep=1
+    for w in "${whitelist[@]}"; do
+      if [ "$path" = "$w" ]; then
+        keep=0
+        break
+      fi
+    done
+    if [ "$keep" -eq 1 ]; then
+      bad+="${line}"$'\n'
+    fi
+  done <<< "$r2_hits"
+
+  if [ -n "$bad" ]; then
+    echo "lint-project-scope: reference(s) to .claude/settings.json outside the owning file(s):" >&2
+    printf '%s' "$bad" >&2
+    echo >&2
+    echo "Only the following files may build or document" >&2
+    echo "~/.claude/settings.json (user-scope, HOME-rooted):" >&2
+    for w in "${whitelist[@]}"; do
+      echo "  - $w" >&2
+    done
+    echo >&2
+    echo "If a new owner needs to be added, extend the whitelist in" >&2
+    echo "scripts/lint-project-scope.sh with a review comment." >&2
+    echo >&2
+    fail=1
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  exit 1
+fi
+
+echo "lint-project-scope: OK (no project-scope Claude Code paths in production code)"
