@@ -38,7 +38,6 @@
 package writepath
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"path"
@@ -105,6 +104,18 @@ type WritePlan struct {
 	// MustNotExist requests O_CREAT|O_EXCL semantics on the first
 	// write against a missing target. Maps to NFR-C3.
 	MustNotExist bool
+
+	// AllowUnowned tells Apply to proceed with the write even when the
+	// pre-write diff reports Diff.TouchesUnowned == true. Default false:
+	// touching an unowned key is refused with ErrDryRunUnownedTouched so
+	// the caller (typically the FR-4 confirmation surface) must
+	// explicitly opt in. Adapters and UI layers that have already
+	// gathered user consent set this true to skip the guard. The
+	// sentinel keeps its historic name — the guard fires on any write,
+	// not only dry-runs — but the intent is "unowned keys touched
+	// without opt-in", not "dry-run only". Kept name-stable for
+	// errors.Is-based callers already coded against E2-S1's plan.go.
+	AllowUnowned bool
 }
 
 // Transform is a pure (currentBytes) -> (newBytes, error) function that
@@ -221,25 +232,7 @@ var (
 	// contains a control character (NUL, newline, CR, or tab). Such
 	// keys cannot legally appear in a config file we manage.
 	ErrFlattenInvalidKey = errors.New("claudecm: flatten: key contains control character")
-
-	// ErrNotImplemented is returned by the E2-S1 Apply stub. E2-S2
-	// replaces the stub and this sentinel is removed.
-	ErrNotImplemented = errors.New("claudecm: writepath.Apply not implemented (see E2-S2)")
 )
-
-// Apply is the single legal path to disk for tool-owned files. This story
-// (E2-S1) ships only the signature and a stub that returns a typed
-// not-implemented error, so adapter code and cmd/* callers can compile
-// against the final contract while E2-S2..E2-S4 land the pipeline.
-//
-// The stub deliberately does NOT lock, back up, or write. Do not fill it
-// in here; that is the entire scope of E2-S2.
-func Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (WriteReport, error) {
-	_ = ctx
-	_ = r
-	_ = plan
-	return WriteReport{}, ErrNotImplemented
-}
 
 // ValidatePlan performs cheap pre-execution checks. It is pure and does
 // no I/O; anything requiring disk access (symlink resolution, HOME

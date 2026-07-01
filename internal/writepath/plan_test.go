@@ -1,7 +1,6 @@
 package writepath
 
 import (
-	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -445,22 +444,6 @@ func TestDiff_DeterministicOrdering(t *testing.T) {
 	}
 }
 
-func TestApply_StubReturnsNotImplemented(t *testing.T) {
-	// E2-S1 ships only the signature. The stub must return a typed
-	// sentinel so callers can compile against Apply without accidentally
-	// treating a nil error as success. E2-S2 replaces this test.
-	report, err := Apply(context.Background(), nil, WritePlan{
-		Tool:   "codex",
-		Target: "/tmp/does-not-matter",
-	})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Apply err = %v; want wraps ErrNotImplemented", err)
-	}
-	if !reflect.DeepEqual(report, WriteReport{}) {
-		t.Fatalf("Apply report = %+v; want zero WriteReport", report)
-	}
-}
-
 func TestParserFunc_ImplementsParser(t *testing.T) {
 	// Guard against accidental interface drift.
 	var p Parser = ParserFunc(func(data []byte) (any, error) {
@@ -491,7 +474,6 @@ func TestSentinels_AllDistinct(t *testing.T) {
 		ErrRollbackFailed,
 		ErrDryRunUnownedTouched,
 		ErrFlattenInvalidKey,
-		ErrNotImplemented,
 	}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
