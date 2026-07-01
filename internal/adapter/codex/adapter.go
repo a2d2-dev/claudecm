@@ -328,10 +328,19 @@ func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath
 	return report, nil
 }
 
-// Project will resolve the layered EffectiveView for Codex. Stubbed
-// until E4-S6.
+// Project resolves the layered EffectiveView for Codex — walks both
+// owned files (config.toml + auth.json) through the frozen precedence
+// chain (BuiltInDefault < ProfileCore < ProfileOverlay <
+// OnDiskToolConfig < EnvOverride) and emits one EffectiveField per
+// owned key that any layer contributed to. Read-only. See project.go
+// for the design notes and the env-var allowlist (NFR-E1) that gates
+// which owned keys can be shadowed by process env.
+//
+// Returns ErrOutsideHome if either owned file is a symlink escaping
+// HOME, ErrParseFailed if either exists but is malformed, or
+// ctx.Err() if the caller cancelled before we touched the filesystem.
 func (a *Adapter) Project(ctx context.Context, r *storage.Resolver, p config.Profile) (adapter.EffectiveView, error) {
-	return adapter.EffectiveView{}, ErrNotImplemented
+	return a.projectFromProfile(ctx, r, p)
 }
 
 // init wires this adapter into adapter.DefaultRegistry so cmd/current

@@ -288,7 +288,7 @@ Redaction contract (NFR-S8) — because `Value` is `any`, redactors cannot regex
 The EnvOverride layer considers **only** these variables. Anything else is ignored by `explain` (it may surface under `explain --all-env` as diagnostic-only, never shadowing). Allowlists are exported as a single Go `var` per adapter and exercised by the CI fixture matrix.
 
 - **Claude Code:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`.
-- **Codex CLI:** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_MODEL`, `CODEX_MODEL_PROVIDER`.
+- **Codex CLI:** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_HOME`, `CODEX_MODEL`, `CODEX_MODEL_PROVIDER`. `CODEX_HOME` is a **config-dir relocation** (it moves the `~/.codex` tree itself); it is intentionally **not projected as an `EffectiveField`** because it does not shadow any owned key value. The other four each shadow exactly one owned key (`OPENAI_API_KEY`, `model_providers.openai.base_url`, `model`, `model_provider`).
 
 `internal/envextract` is the package the resolver calls into to read these variables. It already exists and is kept; the resolver uses it as a sub-component rather than re-implementing the lookup.
 

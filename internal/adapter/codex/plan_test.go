@@ -613,10 +613,10 @@ func TestPlan_TypedValuesRoundTrip(t *testing.T) {
 		Name: "typed",
 		Core: config.CoreConfig{APIKey: "sk"},
 		Tools: withCodexOverlay(map[string]any{
-			"model":                              "opus",
-			"model_provider":                     "openai",
-			"model_providers.openai.base_url":    "https://api.openai.com",
-			"model_providers.openai.wire_api":    "responses",
+			"model":                           "opus",
+			"model_provider":                  "openai",
+			"model_providers.openai.base_url": "https://api.openai.com",
+			"model_providers.openai.wire_api": "responses",
 		}),
 	}
 	plans := runPlan(t, r, profile)
@@ -951,8 +951,8 @@ func TestPlan_ConfigLoadErrorPropagates(t *testing.T) {
 	// still surfaces via writepath.ErrParseFailed.
 	r := newResolver(t)
 	plans := runPlan(t, r, config.Profile{
-		Name: "bad-config",
-		Core: config.CoreConfig{APIKey: "sk"},
+		Name:  "bad-config",
+		Core:  config.CoreConfig{APIKey: "sk"},
 		Tools: withCodexOverlay(map[string]any{"model": "opus"}),
 	})
 	configPlan := findPlanByTarget(t, plans, codex.ConfigPath(r))
