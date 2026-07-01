@@ -1,10 +1,10 @@
-// Package commit tests (E7-S1).
+// Package commit tests (E7-S1 + E7-S2/S3).
 //
-// These are compile-time shape tests: they pin the interface, the
-// method signatures, the FileStatus enum values, the PartialFailure
-// error contract, and the canonical commit order. The pipeline body
-// lands in E7-S2..E7-S5; behavioural tests for the real Stage/Commit
-// live with those stories.
+// The E7-S1 rows here are compile-time shape tests: they pin the
+// interface, the method signatures, the FileStatus enum values, the
+// PartialFailure error contract, and the canonical commit order.
+// The E7-S2/S3 behavioural tests for Stage/Commit/Abort live in
+// commit_e2e_test.go so this file remains a stable type-shape gate.
 package commit
 
 import (
@@ -26,11 +26,8 @@ var (
 	// *PartialFailure satisfies the error interface.
 	_ error = (*PartialFailure)(nil)
 
-	// The stub *stubCommitter satisfies the Committer interface.
-	// Assigning through the (*stubCommitter)(nil) sentinel avoids
-	// staticcheck ST1023/QF1011 (redundant type on rhs) while still
-	// pinning the interface contract at compile time.
-	_ Committer = (*stubCommitter)(nil)
+	// *committer satisfies the Committer interface.
+	_ Committer = (*committer)(nil)
 )
 
 // TestCommit_TypesCompile pins the shape of every exported type by
@@ -84,55 +81,6 @@ func TestCommit_TypesCompile(t *testing.T) {
 	// var _ Committer = (*stubCommitter)(nil) assertion above.
 	if NewCommitter() == nil {
 		t.Fatalf("NewCommitter returned nil")
-	}
-}
-
-// TestCommit_ErrNotImplementedFromStubs verifies the E7-S1 stub
-// contract for non-empty input. The stub returns ErrNotImplemented
-// from Stage / Commit for non-zero plans and nil from Abort. The
-// zero-plan path is covered in TestCommit_ZeroPlansStageOK.
-//
-// NOTE: E7-S2 will run writepath.ValidatePlan on Stage inputs; when that
-// lands, either add Parser + valid fields to these test plans, or change
-// the assertion path.
-func TestCommit_ErrNotImplementedFromStubs(t *testing.T) {
-	c := NewCommitter()
-	ctx := context.Background()
-
-	// Non-empty plan input → Stage returns ErrNotImplemented.
-	plans := []writepath.WritePlan{{
-		Tool:       "claude_code",
-		Target:     "/home/u/.claude/settings.json",
-		NewContent: []byte("{}"),
-	}}
-	txn, err := c.Stage(ctx, nil, plans)
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Stage: want ErrNotImplemented, got %v", err)
-	}
-	if len(txn.Plans) != 0 || len(txn.Prepared) != 0 {
-		t.Fatalf("Stage: expected zero-value StagedTxn on ErrNotImplemented, got %+v", txn)
-	}
-
-	// Commit against a non-empty txn (constructed manually to
-	// simulate a caller that somehow synthesised one) → ErrNotImplemented.
-	nonEmpty := StagedTxn{
-		Plans:    plans,
-		Prepared: []PreparedFile{{Plan: plans[0]}},
-	}
-	rep, err := c.Commit(ctx, nonEmpty)
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Commit: want ErrNotImplemented, got %v", err)
-	}
-	if len(rep.PerFile) != 0 {
-		t.Fatalf("Commit: expected zero-value CommitReport on ErrNotImplemented, got %+v", rep)
-	}
-
-	// Abort is a no-op that always returns nil in the stub.
-	if err := c.Abort(nonEmpty); err != nil {
-		t.Fatalf("Abort: want nil, got %v", err)
-	}
-	if err := c.Abort(StagedTxn{}); err != nil {
-		t.Fatalf("Abort(empty): want nil, got %v", err)
 	}
 }
 
