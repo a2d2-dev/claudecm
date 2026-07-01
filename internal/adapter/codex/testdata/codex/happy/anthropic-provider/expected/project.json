@@ -1,0 +1,97 @@
+{
+  "Tool": "codex",
+  "Fields": [
+    {
+      "Key": "model",
+      "Value": "claude-haiku-4-5",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model",
+          "Value": "claude-haiku-4-5",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_provider",
+      "Value": "anthropic",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_provider",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_provider",
+          "Value": "anthropic",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.base_url",
+      "Value": "https://api.anthropic.com",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.base_url",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.base_url",
+          "Value": "https://api.anthropic.com",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.env_key",
+      "Value": "ANTHROPIC_API_KEY",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.env_key",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.env_key",
+          "Value": "ANTHROPIC_API_KEY",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.name",
+      "Value": "Anthropic",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.name",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.name",
+          "Value": "Anthropic",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.wire_api",
+      "Value": "messages",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.wire_api",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.wire_api",
+          "Value": "messages",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

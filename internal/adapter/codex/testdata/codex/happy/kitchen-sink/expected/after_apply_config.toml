@@ -1,0 +1,21 @@
+model = "gpt-5-turbo"
+model_provider = "anthropic"
+approval_mode = "never"
+disable_response_storage = false
+sandbox_mode = "workspace-write"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://relay.example.com/openai"
+env_key = "OPENAI_API_KEY"
+wire_api = "responses"
+
+[model_providers.anthropic]
+name = "Anthropic"
+base_url = "https://relay.example.com/anthropic"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "messages"
+
+[history]
+max_entries = 500
+persistence = "session"

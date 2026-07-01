@@ -1,0 +1,11 @@
+schema_version: 1
+name: auth-only
+created_at: 2026-01-01T00:00:00Z
+updated_at: 2026-01-01T00:00:00Z
+core:
+  base_url: ""
+  api_key: sk-existing
+tools:
+  codex:
+    raw:
+      model: gpt-5

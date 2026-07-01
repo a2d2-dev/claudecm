@@ -1,0 +1,1 @@
+config.toml is symlinked to a path outside HOME. Import must fail with ErrOutsideHome.

@@ -1,0 +1,277 @@
+{
+  "Tool": "codex",
+  "Fields": [
+    {
+      "Key": "OPENAI_API_KEY",
+      "Value": "sk-new-key",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:OPENAI_API_KEY",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core:api_key",
+          "Value": "sk-new-key",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "approval_mode",
+      "Value": "never",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:approval_mode",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:approval_mode",
+          "Value": "never",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "auth_mode",
+      "Value": "api_key",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:auth_mode",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:auth_mode",
+          "Value": "api_key",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "last_refresh",
+      "Value": "2026-06-01T00:00:00Z",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:last_refresh",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:last_refresh",
+          "Value": "2026-06-01T00:00:00Z",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model",
+      "Value": "gpt-5-turbo",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model",
+          "Value": "gpt-5-turbo",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_provider",
+      "Value": "anthropic",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_provider",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_provider",
+          "Value": "anthropic",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.base_url",
+      "Value": "https://relay.example.com/anthropic",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.base_url",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.base_url",
+          "Value": "https://relay.example.com/anthropic",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.env_key",
+      "Value": "ANTHROPIC_API_KEY",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.env_key",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.env_key",
+          "Value": "ANTHROPIC_API_KEY",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.name",
+      "Value": "Anthropic",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.name",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.name",
+          "Value": "Anthropic",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.anthropic.wire_api",
+      "Value": "messages",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.anthropic.wire_api",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.anthropic.wire_api",
+          "Value": "messages",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.base_url",
+      "Value": "https://relay.example.com/openai",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.base_url",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.base_url",
+          "Value": "https://relay.example.com/openai",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.env_key",
+      "Value": "OPENAI_API_KEY",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.env_key",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.env_key",
+          "Value": "OPENAI_API_KEY",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.name",
+      "Value": "OpenAI",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.name",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.name",
+          "Value": "OpenAI",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.wire_api",
+      "Value": "responses",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.wire_api",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.wire_api",
+          "Value": "responses",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "tokens.access_token",
+      "Value": "at-new",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:tokens.access_token",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:tokens.access_token",
+          "Value": "at-new",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "tokens.account_id",
+      "Value": "acct-new",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:tokens.account_id",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:tokens.account_id",
+          "Value": "acct-new",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "tokens.id_token",
+      "Value": "it-new",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:tokens.id_token",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:tokens.id_token",
+          "Value": "it-new",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "tokens.refresh_token",
+      "Value": "rt-new",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:tokens.refresh_token",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:tokens.refresh_token",
+          "Value": "rt-new",
+          "Secret": true
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

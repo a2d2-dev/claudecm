@@ -1,0 +1,21 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "",
+    "APIKey": "sk-test",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": {
+      "model": "gpt-5",
+      "model_provider": "openai"
+    }
+  }
+}

@@ -1,0 +1,1 @@
+No config.toml, no auth.json. Import must fail with ErrNoConfig.

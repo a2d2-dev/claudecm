@@ -1,0 +1,37 @@
+{
+  "Tool": "codex",
+  "Fields": [
+    {
+      "Key": "OPENAI_API_KEY",
+      "Value": "sk-existing",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:OPENAI_API_KEY",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core:api_key",
+          "Value": "sk-existing",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "model",
+      "Value": "gpt-5",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model",
+          "Value": "gpt-5",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

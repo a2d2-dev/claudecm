@@ -1,0 +1,112 @@
+{
+  "Tool": "codex",
+  "Fields": [
+    {
+      "Key": "OPENAI_API_KEY",
+      "Value": "sk-openai-new",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/auth.json:OPENAI_API_KEY",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core:api_key",
+          "Value": "sk-openai-new",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "model",
+      "Value": "gpt-4o",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model",
+          "Value": "gpt-4o",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_provider",
+      "Value": "openai",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_provider",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_provider",
+          "Value": "openai",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.base_url",
+      "Value": "https://api.openai.com/v1",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.base_url",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.base_url",
+          "Value": "https://api.openai.com/v1",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.env_key",
+      "Value": "OPENAI_API_KEY",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.env_key",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.env_key",
+          "Value": "OPENAI_API_KEY",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.name",
+      "Value": "OpenAI",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.name",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.name",
+          "Value": "OpenAI",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "model_providers.openai.wire_api",
+      "Value": "chat",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.codex/config.toml:model_providers.openai.wire_api",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay:model_providers.openai.wire_api",
+          "Value": "chat",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}
