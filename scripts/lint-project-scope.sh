@@ -73,6 +73,10 @@ codex_whitelist=(
   # import.go (E4-S3) reads ~/.codex/config.toml and ~/.codex/auth.json;
   # its package godoc names both paths to document scope.
   "internal/adapter/codex/import.go"
+  # plan.go (E4-S4) renders the auth-first WritePlan slice that writes
+  # ~/.codex/auth.json and ~/.codex/config.toml under the FR-5
+  # write-path. Its package godoc names both paths to document scope.
+  "internal/adapter/codex/plan.go"
   "internal/adapter/adapter.go"
 )
 

@@ -240,10 +240,18 @@ func (a *Adapter) Import(ctx context.Context, r *storage.Resolver) (adapter.Core
 	return a.importFromCodex(ctx, r)
 }
 
-// Plan will produce the ordered per-file WritePlan slice needed to
-// activate a profile for Codex. Stubbed until E4-S4.
+// Plan produces the ordered per-file WritePlan slice needed to
+// activate a profile for Codex. Two WritePlans are returned in
+// auth-first order (auth.json then config.toml) so the two-phase
+// commit stages credentials before the config that references
+// them. Body lives in plan.go.
+//
+// Special case: when the profile carries zero auth-related content
+// AND the on-disk auth.json is missing or whitespace-only, only
+// the config.toml plan is returned (length-1 slice). See
+// plan.go file godoc.
 func (a *Adapter) Plan(ctx context.Context, r *storage.Resolver, p config.Profile) ([]writepath.WritePlan, error) {
-	return nil, ErrNotImplemented
+	return a.planFromProfile(ctx, r, p)
 }
 
 // Apply will hand a single-file WritePlan to writepath.Apply. Stubbed
