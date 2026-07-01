@@ -70,14 +70,27 @@
 // Doc.Warnings handling. When Marshal returns non-empty Warnings
 // (comments/order may shift), Plan surfaces them to stderr from
 // within the Transform closure BEFORE returning the rendered bytes.
-// Warnings are informational — they do NOT abort the write (returning
-// an error would be a fallback-avoidance violation the other way:
-// we'd be silently refusing to complete a legitimate render because
-// the wrapper heuristic couldn't prove pristine preservation).
-// Logging to stderr matches storage.LoadAllProfiles's warning
-// pattern. WriteReport has no Warnings field (frozen shape) so this
-// is the only surfacing channel until E7's commit orchestrator adds
-// one.
+// The emission is gated by a per-Plan-invocation sync.Once captured
+// in the closure — writepath.Apply invokes Transform on both the
+// preview and apply paths, so without the Once the same warning
+// would double-print. sync.Once inside the closure is
+// per-Plan-invocation state, NOT package-global mutable state.
+// Warnings are informational — they do NOT abort the write
+// (returning an error would be a fallback-avoidance violation the
+// other way: we'd be silently refusing to complete a legitimate
+// render because the wrapper heuristic couldn't prove pristine
+// preservation). Logging to stderr matches storage.LoadAllProfiles's
+// warning pattern. WriteReport has no Warnings field (frozen shape
+// via writepath package boundary — extending it is deferred to E7
+// or a future writepath enhancement); the sync.Once stderr emission
+// is the v1 surfacing channel.
+//
+// AC #3 reconciliation. Story E4-S4 AC #3 originally spoke of
+// "WritePlan.Warnings". The frozen writepath.WriteReport shape has
+// no Warnings field, and expanding it is a cross-package change
+// out of scope for E4-S4. The sync.Once stderr emission from the
+// Transform closure supersedes that AC clause. See
+// docs/plan/stories/E4-S4.md for the documented reconcile.
 //
 // Empty-file policy. A zero-byte or whitespace-only current file is
 // interpreted as an empty document ("{}" for auth.json, empty Doc
@@ -108,6 +121,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -272,6 +286,28 @@ func collectOwnedConfigValues(profile config.Profile) map[string]ownedValue {
 // "cannot prove elision is safe, emit the plan". Better to emit an
 // unneeded plan (writepath.Apply will Skip on empty diff) than to
 // silently miss a legitimate deletion.
+//
+// Locking asymmetry vs claudecode. This read happens BEFORE
+// writepath.Apply grabs its flock, which is asymmetric with
+// claudecode's Plan (which does zero disk I/O in Plan). Two race
+// windows exist and neither is correctness-critical:
+//
+//  1. auth.json is created between our read and Apply's flock: we
+//     already decided config-only; the emitted config.toml plan
+//     still succeeds correctly; auth.json is left unchanged. Result
+//     is consistent.
+//  2. auth.json is deleted between our read (which saw content) and
+//     Apply's Transform: the emitted auth-plan Transform sees an
+//     absent (empty) file, walks the owned-key Delete loop over the
+//     "{}" seed, and writes the same "{}" (with our owned Sets
+//     applied if any). Result is consistent.
+//
+// The only observable effect of a race is "we may emit an
+// unnecessary auth plan in the elide-then-delete case", which
+// writepath.Apply's diff-then-skip step handles cleanly. Accepted
+// as a v1 trade-off; a future refactor could move the elision
+// decision inside the flock (or express it as an in-Transform
+// no-op check) if the asymmetry becomes problematic.
 func shouldEmitAuthPlan(authPath string, authValues map[string]ownedValue) bool {
 	// If any owned auth slot is present the plan is required.
 	for _, v := range authValues {
@@ -365,28 +401,52 @@ func renderAuth(current []byte, authValues map[string]ownedValue) ([]byte, error
 		work = next
 	}
 
+	// Prune orphan empty "tokens" object. sjson.DeleteBytes on the
+	// four tokens.* leaf keys leaves the parent "tokens" object in
+	// place — {} when all four were owned-and-cleared, or a shrunk
+	// object when unowned siblings remain. An empty tokens object is
+	// confusing UI noise (users switching away from a Codex-authed
+	// profile expect a clean auth.json), and Codex CLI treats {} and
+	// absent identically, so no behavior change. Only prune when the
+	// object is present AND empty; a tokens map with any unowned
+	// sibling (e.g. tokens.other_unowned) is left intact.
+	tokens := gjson.GetBytes(work, "tokens")
+	if tokens.Exists() && tokens.IsObject() && len(tokens.Map()) == 0 {
+		next, err := sjson.DeleteBytes(work, "tokens")
+		if err != nil {
+			return nil, fmt.Errorf("%w: codex plan: prune empty tokens: %v", writepath.ErrParseFailed, err)
+		}
+		work = next
+	}
+
 	return work, nil
 }
 
 // makeConfigTransform builds the Transform closure for the
 // config.toml WritePlan. Pre-resolved configValues are captured so
-// the closure is a pure function of `current`. Doc.Warnings are
-// surfaced to stderr from within the closure — see file godoc.
+// the closure is a pure function of `current`, up to a single
+// per-Plan sync.Once stderr emission of any Doc.Warnings (see file
+// godoc). writepath.Apply invokes Transform on both the preview and
+// apply paths; without the Once, the same warning would double-print.
+// The sync.Once lives INSIDE the closure so it is per-Plan-invocation
+// state, not package-global mutable state.
 func makeConfigTransform(configValues map[string]ownedValue) writepath.Transform {
+	var warnOnce sync.Once
 	return func(current []byte) ([]byte, error) {
-		return renderConfig(current, configValues)
+		return renderConfig(current, configValues, &warnOnce)
 	}
 }
 
 // renderConfig is the config.toml Transform body. Loads current
 // through codextoml.Load, applies each owned key from configValues
-// via Doc.Set / Doc.Delete, returns Marshal output. Pure — no I/O
-// beyond stderr warnings.
+// via Doc.Set / Doc.Delete, returns Marshal output. Deterministic;
+// the only side effect is a single stderr emission of Doc.Warnings
+// per Plan invocation, gated by the caller-supplied sync.Once.
 //
 // Empty / whitespace-only current becomes an empty Doc (codextoml.Load
 // handles this internally). Malformed TOML is refused with
 // writepath.ErrParseFailed wrapping codextoml.ErrParseFailed.
-func renderConfig(current []byte, configValues map[string]ownedValue) ([]byte, error) {
+func renderConfig(current []byte, configValues map[string]ownedValue, warnOnce *sync.Once) ([]byte, error) {
 	doc, err := codextoml.Load(current)
 	if err != nil {
 		return nil, fmt.Errorf("%w: codex plan: load current config.toml: %v", writepath.ErrParseFailed, err)
@@ -412,11 +472,19 @@ func renderConfig(current []byte, configValues map[string]ownedValue) ([]byte, e
 		return nil, fmt.Errorf("%w: codex plan: Doc.Marshal: %v", writepath.ErrParseFailed, err)
 	}
 
-	// Surface Doc warnings to stderr. Warnings are informational
-	// (NFR-S7 "comments/order may shift"); they DO NOT abort the
-	// render. Logging matches storage.LoadAllProfiles's pattern.
-	for _, w := range doc.Warnings() {
-		fmt.Fprintln(os.Stderr, "codex plan: "+w)
+	// Surface Doc warnings to stderr, at most ONCE per Plan
+	// invocation. Warnings are informational (NFR-S7
+	// "comments/order may shift"); they DO NOT abort the render.
+	// Logging matches storage.LoadAllProfiles's pattern. writepath.Apply
+	// runs the Transform twice (preview + apply), and without the
+	// sync.Once the user would see the same warnings duplicated —
+	// documented AC #3 reconcile (see file godoc).
+	if warnings := doc.Warnings(); len(warnings) > 0 && warnOnce != nil {
+		warnOnce.Do(func() {
+			for _, w := range warnings {
+				fmt.Fprintln(os.Stderr, "codex plan: "+w)
+			}
+		})
 	}
 
 	return out, nil

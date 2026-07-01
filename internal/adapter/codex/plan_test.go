@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,9 +100,9 @@ func mustLoadTOML(t *testing.T, b []byte) *codextoml.Doc {
 	return d
 }
 
-// hasAllTools checks that the given profile's Tools[ToolCodex]
-// overlay populates the value under the given owned key. Small
-// helper for building profiles in table-driven tests.
+// withCodexOverlay builds a Profile.Tools map wrapping the given raw
+// overlay under ToolCodex. Small helper for table-driven tests so
+// each Profile literal doesn't repeat the ToolID keying boilerplate.
 func withCodexOverlay(raw map[string]any) map[config.ToolID]config.ToolOverlay {
 	return map[config.ToolID]config.ToolOverlay{
 		adapter.ToolCodex: {Raw: raw},
@@ -347,6 +348,50 @@ func TestPlan_OverlayAsTruthDeletesAuth(t *testing.T) {
 	}
 	if v, ok := got["vendor_specific"]; !ok || v != "keep-me" {
 		t.Errorf("vendor_specific = %v, want keep-me (unowned survives)", v)
+	}
+	// Orphan-tokens prune: the input had {tokens:{access_token:"t"}}
+	// and access_token is owned; after deletion the `tokens` object
+	// would be {} and renderAuth prunes it. Assert the raw bytes do
+	// not carry a lingering "tokens" key.
+	if strings.Contains(string(out), `"tokens"`) {
+		t.Errorf("output still contains \"tokens\" key; want pruned as empty. bytes=%s", string(out))
+	}
+	if _, ok := got["tokens"]; ok {
+		t.Errorf("got[tokens] present, want pruned (empty object)")
+	}
+}
+
+func TestPlan_OverlayAsTruthKeepsTokensWithUnownedSibling(t *testing.T) {
+	// Positive counterpart to the orphan-tokens prune: if the
+	// on-disk `tokens` object has BOTH owned children (which get
+	// deleted) AND unowned children (which merge-preserve survives),
+	// the parent `tokens` object must be kept. Deletion is limited to
+	// the owned leaves; the container stays for its remaining
+	// sibling.
+	r := newResolver(t)
+	profile := config.Profile{
+		Name: "clear-owned-keep-sibling",
+		Core: config.CoreConfig{APIKey: "sk-current"},
+	}
+	current := []byte(`{"tokens":{"access_token":"a","other_unowned":"keep"}}`)
+	plans := runPlan(t, r, profile)
+	authPlan := findPlanByTarget(t, plans, codex.AuthPath(r))
+	out := transform(t, authPlan, current)
+
+	got := mustUnmarshal(t, out)
+	if v, ok := getPath(got, "tokens.access_token"); ok {
+		t.Errorf("tokens.access_token = %v, want deleted (owned)", v)
+	}
+	if v, ok := getPath(got, "tokens.other_unowned"); !ok || v != "keep" {
+		t.Errorf("tokens.other_unowned = %v, want keep (unowned sibling survives)", v)
+	}
+	// The `tokens` object must still exist because a non-owned sibling
+	// remained. Assert on both the parsed shape and the raw bytes.
+	if _, ok := got["tokens"]; !ok {
+		t.Errorf("got[tokens] missing; want present because unowned sibling remains")
+	}
+	if !strings.Contains(string(out), `"tokens"`) {
+		t.Errorf("output missing \"tokens\" key; want preserved. bytes=%s", string(out))
 	}
 }
 
@@ -762,24 +807,23 @@ func TestPlan_ConfigWarningsSurfaceToStderr(t *testing.T) {
 	plans := runPlan(t, r, profile)
 	configPlan := findPlanByTarget(t, plans, codex.ConfigPath(r))
 
-	// Redirect stderr.
+	// Redirect stderr. Close the writer BEFORE io.ReadAll so the
+	// reader sees EOF instead of blocking; no fixed-size buffer, no
+	// goroutine race.
 	origStderr := os.Stderr
 	rPipe, wPipe, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
 	os.Stderr = wPipe
-	done := make(chan []byte)
-	go func() {
-		buf := make([]byte, 4096)
-		n, _ := rPipe.Read(buf)
-		done <- buf[:n]
-	}()
 
 	out, terr := configPlan.Transform([]byte(""))
 	_ = wPipe.Close()
 	os.Stderr = origStderr
-	stderrBytes := <-done
+	stderrBytes, rerr := io.ReadAll(rPipe)
+	if rerr != nil {
+		t.Fatalf("read stderr pipe: %v", rerr)
+	}
 
 	if terr != nil {
 		t.Fatalf("Transform error: %v", terr)
@@ -978,7 +1022,14 @@ func TestPlan_ThroughApply_HappyBothFiles(t *testing.T) {
 	}
 }
 
-func TestPlan_ThroughApply_TouchesUnownedFailsWithoutOptIn(t *testing.T) {
+func TestPlan_ThroughApply_MergePreservesUnownedAuthKeys(t *testing.T) {
+	// Renamed from TestPlan_ThroughApply_TouchesUnownedFailsWithoutOptIn.
+	// The original name promised a TouchesUnowned refusal scenario
+	// which — as the comment block below explains at length — cannot
+	// be constructed cleanly with only the codex Plan surface in v1.
+	// The new name reflects what the test actually verifies: that
+	// Plan → writepath.Apply preserves a pre-existing unowned key
+	// verbatim while updating an owned one.
 	// The pre-write diff guard fires when the render would change
 	// unowned keys and AllowUnowned is false. For the config plan,
 	// engineering this requires an unowned key that Plan itself
