@@ -29,10 +29,15 @@ func init() {
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
-	// Create storage and manager
+	// Create storage and manager. Bootstrap is an explicit action here (not
+	// inside storage.Default) so construction stays pure per coding-standards
+	// rule 12; see internal/storage/bootstrap.go for the invariants.
 	resolver, err := storage.Default()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
+	}
+	if err := storage.Bootstrap(resolver); err != nil {
+		return fmt.Errorf("failed to bootstrap ~/.claudecm layout: %w", err)
 	}
 	store := storage.NewFileStorage(resolver)
 	validator := config.NewValidator()

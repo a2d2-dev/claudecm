@@ -245,19 +245,6 @@ func (r *Resolver) LexicalToolConfigPath(homeRelative string) (string, error) {
 	return ensureUnderHome(filepath.Join(r.home, homeRelative), r.home)
 }
 
-// EnsureConfigDir creates the configuration directory structure if it does
-// not exist, with the strict permissions declared in the architecture (dir
-// 0700, files 0600).
-func (r *Resolver) EnsureConfigDir() error {
-	if err := os.MkdirAll(r.ConfigDir(), 0700); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(r.ProfilesDir(), 0700); err != nil {
-		return err
-	}
-	return nil
-}
-
 // validatePathSegment rejects empty, reserved, or unsafe path components
 // before they are joined into an absolute path.
 func validatePathSegment(seg, kind string) error {

@@ -12,14 +12,15 @@ import (
 )
 
 // retentionHome is the retention-test analog of backupHome / atomicHome.
-// It builds a Resolver rooted at t.TempDir with ConfigDir ensured so
-// Prune can EnsureDir the audit-log parent without hitting a missing HOME.
+// It builds a Resolver rooted at t.TempDir with the .claudecm/ tree
+// bootstrapped so Prune can write the audit log without hitting a missing
+// parent.
 func retentionHome(t *testing.T) (*Resolver, string) {
 	t.Helper()
 	home := t.TempDir()
 	r := mustResolver(t, home)
-	if err := r.EnsureConfigDir(); err != nil {
-		t.Fatalf("EnsureConfigDir: %v", err)
+	if err := Bootstrap(r); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
 	}
 	return r, home
 }
