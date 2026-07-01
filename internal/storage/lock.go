@@ -214,6 +214,9 @@ func (h *Handle) Path() string {
 // Release drops the flock and closes the underlying fd. Idempotent: a
 // second Release returns nil without touching the fd. Does NOT remove the
 // sidecar file — see the file-level comment for the reasoning.
+//
+// Not safe for concurrent Release from multiple goroutines; call once
+// (typically via defer).
 func (h *Handle) Release() error {
 	if h == nil || h.released {
 		return nil
@@ -224,30 +227,35 @@ func (h *Handle) Release() error {
 	}
 	unlockErr := h.fl.Unlock()
 	closeErr := h.fl.Close()
-	if unlockErr != nil {
-		return fmt.Errorf("lock release %q: %w", h.path, unlockErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("lock close %q: %w", h.path, closeErr)
+	// errors.Join is nil-safe: returns nil when both args are nil, and a
+	// single non-nil arg when only one errored. This ensures a closeErr is
+	// never silently dropped just because unlockErr fired first.
+	if joined := errors.Join(unlockErr, closeErr); joined != nil {
+		return fmt.Errorf("lock release %q: %w", h.path, joined)
 	}
 	return nil
 }
 
-// WithLock is a convenience: Acquire → fn → Release. Any error from
-// Acquire or fn is returned directly; a Release error is only surfaced
-// when fn succeeded, so an fn error is never masked by a Release failure.
-func WithLock(r *Resolver, target string, opts LockOptions, fn func() error) error {
+// WithLock is a convenience: Acquire → fn → Release. Release is deferred
+// so a panic inside fn still drops the lock (AC3 panic safety). The
+// returned error is fn's error if fn failed; a Release error is joined
+// onto it via errors.Join when both fire, and returned alone when only
+// Release failed.
+func WithLock(r *Resolver, target string, opts LockOptions, fn func() error) (err error) {
 	if fn == nil {
 		return errors.New("lock: WithLock fn is nil")
 	}
-	h, err := Acquire(r, target, opts)
-	if err != nil {
-		return err
+	h, acqErr := Acquire(r, target, opts)
+	if acqErr != nil {
+		return acqErr
 	}
-	fnErr := fn()
-	relErr := h.Release()
-	if fnErr != nil {
-		return fnErr
-	}
-	return relErr
+	defer func() {
+		relErr := h.Release()
+		if err == nil {
+			err = relErr
+		} else if relErr != nil {
+			err = errors.Join(err, relErr)
+		}
+	}()
+	return fn()
 }

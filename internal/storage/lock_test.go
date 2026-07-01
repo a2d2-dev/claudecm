@@ -288,6 +288,46 @@ func TestWithLock_NilFn(t *testing.T) {
 	}
 }
 
+// TestWithLock_PanicReleasesLock covers AC3 (panic safety): if fn panics,
+// the deferred Release must still fire, so a subsequent Acquire on the
+// same target succeeds quickly instead of timing out. We also assert the
+// panic propagates (WithLock does NOT swallow it) and that the sidecar
+// path resolved by the second Acquire matches — proving no path
+// collision or renamed sidecar.
+func TestWithLock_PanicReleasesLock(t *testing.T) {
+	r, home := lockHome(t)
+	target := "profiles/withlock-panic.yaml"
+	panicMsg := "boom-in-fn"
+
+	func() {
+		defer func() {
+			rec := recover()
+			if rec == nil {
+				t.Fatal("expected panic to propagate out of WithLock")
+			}
+			if got, ok := rec.(string); !ok || got != panicMsg {
+				t.Fatalf("recovered %v; want %q", rec, panicMsg)
+			}
+		}()
+		_ = WithLock(r, target, LockOptions{}, func() error {
+			panic(panicMsg)
+		})
+	}()
+
+	// If Release fired mid-panic, this Acquire returns almost immediately.
+	// If it didn't, we time out at 500 ms.
+	h, err := Acquire(r, target, LockOptions{Timeout: 500 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("Acquire after panicking WithLock: %v", err)
+	}
+	if got, want := h.Path(), expectedSidecar(home, target); got != want {
+		t.Fatalf("sidecar path after re-Acquire = %q; want %q", got, want)
+	}
+	if err := h.Release(); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+}
+
 // TestWithLock_ConcurrencyStress: 8 goroutines increment a shared counter
 // under WithLock on the same target. Serialization is the whole point — if
 // the lock ever fails to serialize, the counter drops below 8 (race on the
