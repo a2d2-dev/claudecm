@@ -616,6 +616,211 @@ func TestSet_RepeatedDelete(t *testing.T) {
 	}
 }
 
+// ---------- F1: array-of-tables mutation refused ----------
+
+func TestSet_InArrayOfTablesRefused(t *testing.T) {
+	in := "[[servers]]\nname = \"a\"\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	err = d.Set("servers.host", "example.com")
+	if err == nil {
+		t.Fatalf("Set into [[array-of-tables]] expected error, got nil")
+	}
+	if !errors.Is(err, ErrArrayOfTablesMutation) {
+		t.Fatalf("Set error = %v, want ErrArrayOfTablesMutation wrap", err)
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != in {
+		t.Fatalf("Marshal after refused Set:\ngot %q\nwant %q", string(out), in)
+	}
+}
+
+func TestDelete_InArrayOfTablesReturnsFalse(t *testing.T) {
+	in := "[[servers]]\nname = \"a\"\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if d.Delete("servers.name") {
+		t.Fatalf("Delete into [[array-of-tables]] returned true, want false")
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(out) != in {
+		t.Fatalf("Marshal after refused Delete:\ngot %q\nwant %q", string(out), in)
+	}
+}
+
+// ---------- F2: inline comments preserved on mutated keys ----------
+
+func TestSet_PreservesInlineComment(t *testing.T) {
+	in := "model = \"old\" # important note\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := d.Set("model", "new"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := "model = \"new\" # important note\n"
+	if string(out) != want {
+		t.Fatalf("Marshal = %q, want %q", string(out), want)
+	}
+	if len(d.Warnings()) != 0 {
+		t.Fatalf("expected no warnings, got %v", d.Warnings())
+	}
+}
+
+func TestSet_ComplexInlineCommentWithHashInString(t *testing.T) {
+	// A "#" inside the quoted value must NOT terminate the value; the real
+	// trailing "# ..." after the closing quote must be preserved.
+	in := "s = \"tag#42\" # keep me\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := d.Set("s", "other"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := "s = \"other\" # keep me\n"
+	if string(out) != want {
+		t.Fatalf("Marshal = %q, want %q", string(out), want)
+	}
+}
+
+// ---------- F3: CRLF preserved through mutations ----------
+
+func TestSet_PreservesCRLF(t *testing.T) {
+	in := "a = 1\r\nb = 2\r\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := d.Set("a", 99); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := "a = 99\r\nb = 2\r\n"
+	if string(out) != want {
+		t.Fatalf("Marshal = %q, want %q", string(out), want)
+	}
+	// Cross-check: no bare LF lines snuck in.
+	if strings.Contains(strings.ReplaceAll(string(out), "\r\n", ""), "\n") {
+		t.Fatalf("Marshal produced mixed line endings: %q", string(out))
+	}
+}
+
+// ---------- F4: shape-conflict Set refused ----------
+
+func TestSet_ShapeConflictScalarUnderTable(t *testing.T) {
+	in := "[a]\nb = 1\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	err = d.Set("a", 5)
+	if err == nil {
+		t.Fatalf("Set scalar-under-table expected error, got nil")
+	}
+	if !errors.Is(err, ErrShapeConflict) {
+		t.Fatalf("Set error = %v, want ErrShapeConflict wrap", err)
+	}
+	out, _ := d.Marshal()
+	if string(out) != in {
+		t.Fatalf("Marshal after refused Set:\ngot %q\nwant %q", string(out), in)
+	}
+}
+
+func TestSet_ShapeConflictTableUnderScalar(t *testing.T) {
+	in := "a = 5\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	err = d.Set("a.b", 1)
+	if err == nil {
+		t.Fatalf("Set table-under-scalar expected error, got nil")
+	}
+	if !errors.Is(err, ErrShapeConflict) {
+		t.Fatalf("Set error = %v, want ErrShapeConflict wrap", err)
+	}
+	out, _ := d.Marshal()
+	if string(out) != in {
+		t.Fatalf("Marshal after refused Set:\ngot %q\nwant %q", string(out), in)
+	}
+}
+
+// ---------- F5: multi-line value collapse emits warning ----------
+
+func TestSet_MultiLineArrayEmitsWarning(t *testing.T) {
+	in := "nums = [\n  1,\n  2,\n]\n"
+	d, err := Load([]byte(in))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := d.Set("nums", []any{int64(9), int64(8)}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	out, err := d.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	// Result must be valid TOML with the new inline value.
+	if !strings.Contains(string(out), "nums = ") {
+		t.Fatalf("expected nums = ..., got %q", string(out))
+	}
+	if strings.Contains(string(out), "\n  1,") {
+		t.Fatalf("expected multi-line value collapsed to inline, got %q", string(out))
+	}
+	// Warning surfaced.
+	ws := d.Warnings()
+	found := false
+	for _, w := range ws {
+		if strings.Contains(w, "multi-line") && strings.Contains(w, "nums") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected multi-line warning for nums, got %v", ws)
+	}
+	// And it re-parses cleanly.
+	if _, err := Load(out); err != nil {
+		t.Fatalf("Marshal output failed to re-parse: %v\nout=%q", err, string(out))
+	}
+}
+
+// ---------- F8: trailing-dot header rejected ----------
+
+func TestLoad_TrailingDotHeaderRejected(t *testing.T) {
+	in := "[a.b.]\nx = 1\n"
+	_, err := Load([]byte(in))
+	if err == nil {
+		t.Fatalf("Load(%q) expected error, got nil", in)
+	}
+	if !errors.Is(err, ErrParseFailed) {
+		t.Fatalf("Load(%q) error = %v, want ErrParseFailed wrap", in, err)
+	}
+}
+
 func TestLoad_InlineTableValue_RoundTrip(t *testing.T) {
 	// Inline tables round-trip verbatim when unchanged.
 	in := "point = { x = 1, y = 2 }\n"

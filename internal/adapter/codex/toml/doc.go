@@ -64,10 +64,26 @@ import (
 // Callers must treat this as a hard refusal (NFR-S1).
 var ErrParseFailed = errors.New("claudecm/codex/toml: parse failed")
 
+// ErrArrayOfTablesMutation is returned by Doc.Set when the target path lives
+// inside an [[array-of-tables]] block. Mutating array-of-tables content is not
+// supported by this wrapper (see package doc). Delete returns false rather
+// than this error, matching the idempotent-delete contract.
+var ErrArrayOfTablesMutation = errors.New("claudecm/codex/toml: set into array-of-tables not supported")
+
+// ErrShapeConflict is returned by Doc.Set when the target path would clash
+// with the existing TOML shape - either writing a scalar where a table
+// already exists, or writing a nested key under a scalar ancestor.
+var ErrShapeConflict = errors.New("claudecm/codex/toml: shape conflict")
+
 // Doc is a mutable TOML document that preserves original comments, key order,
 // and section grouping across Load -> Set/Delete -> Marshal round-trips.
 //
 // The zero value is a valid empty document (equivalent to Load of "").
+//
+// Doc is NOT safe for concurrent Marshal or Set/Delete from multiple
+// goroutines. Callers must serialize access (in production the writepath's
+// flock provides this externally; in-process callers must add their own
+// mutex if they share a Doc across goroutines).
 type Doc struct {
 	sections []*section
 	// warnings accumulate during Marshal when the wrapper had to fall back
@@ -75,6 +91,11 @@ type Doc struct {
 	// created and its layout is synthetic). Callers can inspect them via
 	// Warnings() after Marshal.
 	warnings []string
+	// eol is the dominant line ending detected on Load: "\n" or "\r\n".
+	// Empty means unset (treat as "\n"). Used for all synthesized lines
+	// (rewritten kv values, new headers, blank separators) so a CRLF file
+	// stays CRLF end-to-end after Set/Delete.
+	eol string
 }
 
 // section is a contiguous block of the document with a common table header
@@ -139,6 +160,7 @@ func Load(data []byte) (*Doc, error) {
 func (d *Doc) Marshal() ([]byte, error) {
 	d.warnings = nil
 	var buf bytes.Buffer
+	eol := d.newline()
 
 	for _, s := range d.sections {
 		// Emit section commentRaw + headerLine (or a synthetic header for created sections).
@@ -148,26 +170,26 @@ func (d *Doc) Marshal() ([]byte, error) {
 			d.warnings = append(d.warnings,
 				fmt.Sprintf("comments/order may shift: section [%s] was newly created", s.header))
 			if buf.Len() > 0 && !endsWithBlankLine(buf.Bytes()) {
-				buf.WriteByte('\n')
+				buf.WriteString(eol)
 			}
 			buf.WriteString("[")
 			buf.WriteString(s.header)
-			buf.WriteString("]\n")
+			buf.WriteString("]")
+			buf.WriteString(eol)
 		} else {
 			buf.Write(s.commentRaw)
 			buf.Write(s.headerLine)
 		}
 
-		anyLive := false
 		for _, k := range s.kvs {
 			if k.deleted {
 				continue
 			}
-			anyLive = true
 			if k.created {
 				// Newly inserted key: no original bytes. Emit a fresh
-				// "key = value\n" line with no leading comments.
-				line, err := renderKVLine(k.key, k.value)
+				// "key = value<eol>" line with no leading comments and no
+				// preserved trailing comment.
+				line, err := renderKVLine(k.key, k.value, eol, nil)
 				if err != nil {
 					return nil, err
 				}
@@ -175,9 +197,16 @@ func (d *Doc) Marshal() ([]byte, error) {
 				continue
 			}
 			if k.modified {
-				// Preserve leading comments; regenerate the value line only.
+				// Preserve leading comments; regenerate the value line only,
+				// carrying over any trailing inline comment from the original
+				// bytes so "key = new # note" stays "key = new # note".
 				buf.Write(k.commentRaw)
-				line, err := renderKVLine(k.key, k.value)
+				trailingComment := extractTrailingComment(k.lineRaw)
+				if lineSpansMultiplePhysicalLines(k.lineRaw) {
+					d.warnings = append(d.warnings,
+						fmt.Sprintf("multi-line value on %s re-rendered inline", joinPath(s.header, k.key)))
+				}
+				line, err := renderKVLine(k.key, k.value, eol, trailingComment)
 				if err != nil {
 					return nil, err
 				}
@@ -192,18 +221,25 @@ func (d *Doc) Marshal() ([]byte, error) {
 		// Trailing raw belongs with this section (blank/comment lines after
 		// the last kv, before the next header). Preserve unless the section
 		// itself is created (synthetic sections have no trailing raw).
+		//
+		// Note: when every kv of an existing section is deleted, we keep the
+		// header + trailingRaw on purpose (see Delete godoc): non-owned empty
+		// tables round-trip unchanged.
 		if !s.created {
 			buf.Write(s.trailingRaw)
 		}
-
-		// Suppress trailing runs of a fully-deleted section. If !anyLive AND
-		// the section is not the root and is not created and the header +
-		// trailing are all we have, we still preserved the header line above
-		// (intentional: existing empty tables are preserved per contract).
-		_ = anyLive
 	}
 
 	return buf.Bytes(), nil
+}
+
+// newline returns the document's dominant line ending, defaulting to "\n" for
+// the zero value / empty documents.
+func (d *Doc) newline() string {
+	if d.eol == "" {
+		return "\n"
+	}
+	return d.eol
 }
 
 // Warnings returns any warnings produced by the last Marshal call.
@@ -250,6 +286,15 @@ func (d *Doc) Set(path string, value any) error {
 		d.Delete(path)
 		return nil
 	}
+	// Refuse mutation into [[array-of-tables]] blocks (unsupported shape).
+	if d.isInArrayOfTables(path) {
+		return fmt.Errorf("%w: %s", ErrArrayOfTablesMutation, path)
+	}
+	// Refuse writes that would produce invalid TOML - scalar-under-table or
+	// table-under-scalar shape mismatches.
+	if err := d.checkShapeConflict(path); err != nil {
+		return err
+	}
 	// Normalize numeric widths for round-trip type fidelity.
 	value = normalizeValue(value)
 
@@ -289,6 +334,14 @@ func (d *Doc) Set(path string, value any) error {
 // (no original bytes), the empty section header is also removed. Existing
 // empty tables are preserved to honor NFR-S7 non-owned-key semantics.
 func (d *Doc) Delete(path string) bool {
+	if path == "" {
+		return false
+	}
+	// Deleting into an array-of-tables is not supported (see Set docs). Return
+	// false to keep the idempotent-delete contract; the AOT body remains opaque.
+	if d.isInArrayOfTables(path) {
+		return false
+	}
 	s, i, ok := d.findKV(path)
 	if !ok {
 		return false
@@ -384,6 +437,135 @@ func isWhitespaceOnly(data []byte) bool {
 		}
 	}
 	return true
+}
+
+// arrayOfTablesHeaderPrefix is the sentinel prefix scanStructure uses to
+// distinguish "@array:<name>" opaque sections from real table headers.
+const arrayOfTablesHeaderPrefix = "@array:"
+
+// isInArrayOfTables reports whether path targets a key inside any
+// [[array-of-tables]] block we captured opaquely on Load.
+func (d *Doc) isInArrayOfTables(path string) bool {
+	for _, s := range d.sections {
+		if !strings.HasPrefix(s.header, arrayOfTablesHeaderPrefix) {
+			continue
+		}
+		name := s.header[len(arrayOfTablesHeaderPrefix):]
+		if path == name || strings.HasPrefix(path, name+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkShapeConflict returns ErrShapeConflict if writing a scalar at path
+// would collide with the existing document shape:
+//
+//   - The path (or any prefix of the path) is already a section header
+//     ([a] exists, caller wrote to "a" or "a.x"): scalar-under-table.
+//   - An ancestor prefix of the path is already a scalar kv ("a = 5"
+//     exists, caller wrote to "a.b"): table-under-scalar.
+//
+// Symmetric writes that just replace an existing scalar at path are handled
+// by findKV in Set and never reach this check.
+func (d *Doc) checkShapeConflict(path string) error {
+	for _, s := range d.sections {
+		h := s.header
+		if h == "" || strings.HasPrefix(h, arrayOfTablesHeaderPrefix) {
+			continue
+		}
+		if h == path {
+			return fmt.Errorf("%w: %q is already a table", ErrShapeConflict, path)
+		}
+		if strings.HasPrefix(h, path+".") {
+			return fmt.Errorf("%w: cannot write scalar at %q; table %q already exists", ErrShapeConflict, path, h)
+		}
+	}
+	dots := strings.Split(path, ".")
+	for i := 1; i < len(dots); i++ {
+		prefix := strings.Join(dots[:i], ".")
+		if s, idx, ok := d.findKV(prefix); ok && !s.kvs[idx].deleted {
+			return fmt.Errorf("%w: cannot write %q; ancestor %q is a scalar", ErrShapeConflict, path, prefix)
+		}
+	}
+	return nil
+}
+
+// extractTrailingComment returns the trailing inline comment (leading
+// whitespace + "# ...") from a raw kv line, or nil if none is present. The
+// returned bytes do NOT include the line ending; the caller appends its own.
+//
+// The scanner respects TOML string, bracket, and brace state so a "#" that
+// appears inside a quoted string or an unterminated bracket/brace does not
+// prematurely close the value.
+func extractTrailingComment(lineRaw []byte) []byte {
+	line := stripLineEnding(lineRaw)
+	var inStr byte
+	tripleStr := false
+	depthBracket := 0
+	depthBrace := 0
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inStr != 0 {
+			if tripleStr {
+				if i+2 < len(line) && line[i] == inStr && line[i+1] == inStr && line[i+2] == inStr {
+					inStr = 0
+					tripleStr = false
+					i += 2
+				}
+				continue
+			}
+			if c == '\\' && inStr == '"' {
+				i++
+				continue
+			}
+			if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch c {
+		case '#':
+			if depthBracket == 0 && depthBrace == 0 {
+				start := i
+				for start > 0 && (line[start-1] == ' ' || line[start-1] == '\t') {
+					start--
+				}
+				out := make([]byte, len(line)-start)
+				copy(out, line[start:])
+				return out
+			}
+		case '"', '\'':
+			if i+2 < len(line) && line[i+1] == c && line[i+2] == c {
+				inStr = c
+				tripleStr = true
+				i += 2
+				continue
+			}
+			inStr = c
+		case '[':
+			depthBracket++
+		case ']':
+			depthBracket--
+		case '{':
+			depthBrace++
+		case '}':
+			depthBrace--
+		}
+	}
+	return nil
+}
+
+// lineSpansMultiplePhysicalLines reports whether lineRaw carries more than
+// one physical line (i.e., the original value used a multi-line array,
+// inline table, or triple-quoted string continuation). Used to surface a
+// warning when Set forces such a value back onto a single line.
+func lineSpansMultiplePhysicalLines(lineRaw []byte) bool {
+	if len(lineRaw) == 0 {
+		return false
+	}
+	body := stripLineEnding(lineRaw)
+	return bytes.IndexByte(body, '\n') >= 0
 }
 
 func endsWithBlankLine(b []byte) bool {

@@ -24,7 +24,7 @@ func goStrconvQuote(s string) string { return strconv.Quote(s) }
 // strings, arrays, or inline tables that span physical lines are absorbed
 // into the preceding kv via a balance heuristic.
 func scanStructure(data []byte, tree map[string]any) (*Doc, error) {
-	d := &Doc{}
+	d := &Doc{eol: detectEOL(data)}
 	// Root section is always present; not "created" (it's implicit from the
 	// original input and its raw content lives in kv.commentRaw of its
 	// first kv or in trailingRaw).
@@ -60,7 +60,7 @@ func scanStructure(data []byte, tree map[string]any) (*Doc, error) {
 				// trailingRaw. We use a "@array:" header prefix so
 				// findKV cannot collide with a real dotted path.
 				sec := &section{
-					header:     "@array:" + header,
+					header:     arrayOfTablesHeaderPrefix + header,
 					commentRaw: cloneBytes(pending.Bytes()),
 					headerLine: cloneBytes(line),
 				}
@@ -140,6 +140,20 @@ func scanStructure(data []byte, tree map[string]any) (*Doc, error) {
 	return d, nil
 }
 
+// detectEOL inspects the first line ending of data and returns "\r\n" if it
+// is CRLF, otherwise "\n". Empty / newline-free input defaults to "\n".
+func detectEOL(data []byte) string {
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\n' {
+			if i > 0 && data[i-1] == '\r' {
+				return "\r\n"
+			}
+			return "\n"
+		}
+	}
+	return "\n"
+}
+
 // splitLinesKeepEnding returns each line of data including its original line
 // ending ("\n", "\r\n"). The last line may lack a terminator.
 func splitLinesKeepEnding(data []byte) [][]byte {
@@ -210,6 +224,14 @@ func parseHeader(trimmed []byte) (header string, isArrayTable bool, ok bool) {
 			continue
 		}
 		return "", false, false
+	}
+	// Reject empty segments (leading, trailing, or consecutive dots): "[a.b.]"
+	// and "[.a]" are malformed TOML headers even though every rune is a legal
+	// bare-key character.
+	for _, seg := range strings.Split(name, ".") {
+		if seg == "" {
+			return "", false, false
+		}
 	}
 	return name, isArrayTable, true
 }
@@ -313,18 +335,28 @@ func lookupPath(tree map[string]any, path string) (any, bool) {
 	return cur, true
 }
 
-// renderKVLine emits a single "key = value\n" line, using go-toml's marshaller
-// to format the value for maximum correctness.
-func renderKVLine(key string, value any) ([]byte, error) {
+// renderKVLine emits a single "key = value[ trailingComment]<eol>" line, using
+// go-toml's marshaller to format the value for maximum correctness. When
+// trailingComment is non-empty it is appended verbatim (its leading whitespace
+// is expected to be part of the byte slice), preserving inline comments from
+// the original bytes on a mutated line. eol is written last; callers pass
+// the document's dominant line ending so CRLF files stay CRLF end-to-end.
+func renderKVLine(key string, value any, eol string, trailingComment []byte) ([]byte, error) {
 	b, err := marshalScalar(value)
 	if err != nil {
 		return nil, err
+	}
+	if eol == "" {
+		eol = "\n"
 	}
 	var out bytes.Buffer
 	out.WriteString(key)
 	out.WriteString(" = ")
 	out.Write(b)
-	out.WriteByte('\n')
+	if len(trailingComment) > 0 {
+		out.Write(trailingComment)
+	}
+	out.WriteString(eol)
 	return out.Bytes(), nil
 }
 
