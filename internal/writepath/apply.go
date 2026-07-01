@@ -73,10 +73,14 @@
 //        is returned in this state; on-disk state is undefined and the
 //        caller must not retry blindly.
 //      - On a successful rollback, Apply returns a WriteReport whose
-//        RolledBack=true and PostFingerprint mirrors PreFingerprint
-//        (state restored), plus errors.Join(ErrPostWriteReparse,
-//        ErrRollback, originalErr) so callers can errors.Is against
-//        any of the three.
+//        RolledBack=true. PostFingerprint reflects the file as it
+//        exists on disk after Apply returns: for the overwrite case
+//        it is a fresh Stat of the restored file (same SHA256 as
+//        PreFingerprint, refreshed ModTime); for the first-write
+//        case the target was removed and PostFingerprint is the zero
+//        Fingerprint. The error joins ErrPostWriteReparse,
+//        ErrRollback, and originalErr so callers can errors.Is
+//        against any of the three.
 //      Rollback runs INSIDE the flock held by WithLock; it does NOT
 //      trigger a fresh Backup (we already have the one we need).
 //
@@ -315,11 +319,17 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 // reparseTarget re-reads plan.Target from disk and runs plan.Parser
 // against the fresh bytes. A read failure or a parse failure both wrap
 // ErrPostWriteReparse so the caller can errors.Is on the single sentinel.
-// Called only when plan.Parser != nil.
+// Called only when plan.Parser != nil. Uses the local readAll helper so
+// the read shape (existence signal vs I/O error) stays consistent with
+// step 3; a post-write !exists is anomalous — AtomicWrite succeeded
+// microseconds earlier — and surfaces as its own reparse failure.
 func reparseTarget(plan WritePlan) error {
-	b, err := os.ReadFile(plan.Target)
+	b, exists, err := readAll(plan.Target)
 	if err != nil {
 		return fmt.Errorf("%w: reread %q: %v", ErrPostWriteReparse, plan.Target, err)
+	}
+	if !exists {
+		return fmt.Errorf("%w: target %q vanished after atomic write", ErrPostWriteReparse, plan.Target)
 	}
 	if _, err := plan.Parser.Parse(b); err != nil {
 		return fmt.Errorf("%w: parse %q: %v", ErrPostWriteReparse, plan.Target, err)
@@ -332,16 +342,19 @@ func reparseTarget(plan WritePlan) error {
 //
 //   - First-write case (backup zero-value): remove the target. The
 //     step-3 read reported the file did not exist, so removing brings
-//     the tree back to that state.
+//     the tree back to that state. PostFingerprint is intentionally
+//     zero — no file exists on disk after rollback.
 //   - Overwrite case: restore the pre-write bytes over the target via
 //     AtomicWrite (mode 0600, MustNotExist=false). currentBytes was
 //     captured under the same lock in step 3, so it's the authoritative
 //     pre-write payload; we prefer it over re-reading the backup file
 //     (fewer failure modes, and the backup path is retained on the
-//     WriteReport regardless).
+//     WriteReport regardless). PostFingerprint reflects the file as it
+//     exists on disk after Apply returns (may be zero for removed /
+//     dry-run) — we re-Stat the restored file rather than copying
+//     PreFingerprint so the report tracks the actual post-Apply state.
 //
-// On success returns a WriteReport with RolledBack=true and
-// PostFingerprint == PreFingerprint plus
+// On success returns a WriteReport with RolledBack=true plus
 // errors.Join(ErrPostWriteReparse, ErrRollback, reparseErr). On failure
 // returns a zero WriteReport plus errors.Join(ErrPostWriteReparse,
 // ErrRollbackFailed, reparseErr).
@@ -365,12 +378,21 @@ func rollback(
 				fmt.Errorf("%w: remove %q: %v", ErrRollbackFailed, plan.Target, err),
 			)
 		}
+		// Parent-dir fsync so os.Remove is durable across a crash mid-
+		// rollback. Best-effort: rollback-failure is already "state
+		// undefined", so an fsync-dir failure here does not escalate.
+		if f, ferr := os.Open(filepath.Dir(plan.Target)); ferr == nil {
+			_ = f.Sync()
+			_ = f.Close()
+		}
 		return WriteReport{
-			Tool:            plan.Tool,
-			Target:          plan.Target,
-			Backup:          backup,
+			Tool:   plan.Tool,
+			Target: plan.Target,
+			Backup: backup,
+			// target removed on first-write rollback; PostFingerprint
+			// intentionally zero.
+			PostFingerprint: storage.Fingerprint{},
 			PreFingerprint:  preFP,
-			PostFingerprint: preFP,
 			Diff:            diff,
 			AppliedAt:       appliedAt,
 			RolledBack:      true,
@@ -385,12 +407,25 @@ func rollback(
 			fmt.Errorf("%w: restore %q: %v", ErrRollbackFailed, plan.Target, err),
 		)
 	}
+	// Re-Stat the target so PostFingerprint reflects the file as it now
+	// exists on disk (fresh mtime, hash of the restored bytes). We rely
+	// on Stat's own error surface rather than reusing preFP; a Stat
+	// failure here is unexpected — we just wrote the file microseconds
+	// ago — and is surfaced as ErrRollbackFailed since post-rollback
+	// on-disk state is unknown.
+	postFP, _, statErr := storage.Stat(plan.Target)
+	if statErr != nil {
+		return WriteReport{}, errors.Join(
+			reparseErr,
+			fmt.Errorf("%w: post-rollback stat %q: %v", ErrRollbackFailed, plan.Target, statErr),
+		)
+	}
 	return WriteReport{
 		Tool:            plan.Tool,
 		Target:          plan.Target,
 		Backup:          backup,
 		PreFingerprint:  preFP,
-		PostFingerprint: preFP,
+		PostFingerprint: postFP,
 		Diff:            diff,
 		AppliedAt:       appliedAt,
 		RolledBack:      true,

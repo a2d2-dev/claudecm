@@ -861,9 +861,20 @@ func TestApply_ReparseFailureRollsBack_HadBackup(t *testing.T) {
 	if !report.RolledBack {
 		t.Fatalf("RolledBack = false; want true")
 	}
-	if report.PreFingerprint != report.PostFingerprint {
-		t.Fatalf("PreFingerprint %+v != PostFingerprint %+v; want equal on rollback",
-			report.PreFingerprint, report.PostFingerprint)
+	// After F3, PostFingerprint is a fresh Stat of the restored file
+	// (not a copy of PreFingerprint). Bytes match pre-write, so SHA256
+	// must equal; ModTime will differ because the rollback rewrote the
+	// file microseconds after the original stat.
+	if report.PostFingerprint.SHA256 == "" {
+		t.Fatalf("PostFingerprint.SHA256 empty; want hash of restored bytes")
+	}
+	if report.PreFingerprint.SHA256 != report.PostFingerprint.SHA256 {
+		t.Fatalf("PreFingerprint.SHA256 %q != PostFingerprint.SHA256 %q; want equal on rollback",
+			report.PreFingerprint.SHA256, report.PostFingerprint.SHA256)
+	}
+	if report.PreFingerprint.Size != report.PostFingerprint.Size {
+		t.Fatalf("PreFingerprint.Size %d != PostFingerprint.Size %d; want equal on rollback",
+			report.PreFingerprint.Size, report.PostFingerprint.Size)
 	}
 	// On-disk bytes must match the pre-write payload byte-for-byte.
 	got, _ := os.ReadFile(target)
@@ -989,6 +1000,15 @@ func TestApply_ReparseFailureRollbackFails(t *testing.T) {
 	}
 	if !reflect.DeepEqual(report, WriteReport{}) {
 		t.Fatalf("report = %+v; want zero on failed rollback (state undefined)", report)
+	}
+	// Pin the parser-call ordering so a future rearrangement (e.g.
+	// reparseTarget parsing twice, or rollback re-parsing the restored
+	// bytes) can't silently sail past by never reaching the sabotage
+	// branch. Pre-write parses current (#1) + new (#2); reparse is (#3)
+	// which sabotages the target and returns the error; rollback does
+	// not invoke the parser. Total: 3.
+	if parser.calls != 3 {
+		t.Fatalf("sabotageParser.calls = %d; want 3 (pre-write current, pre-write new, reparse-that-sabotages)", parser.calls)
 	}
 }
 
