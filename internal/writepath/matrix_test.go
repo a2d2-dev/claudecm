@@ -32,6 +32,9 @@
 //	E10 LockTimeout                   goroutine holds lock → ErrLockTimeout
 //	E11 ExpiredContext                pre-expired ctx → ErrLockTimeout
 //	E12 InvalidPlan                   empty Target → ErrPlanInvalid
+//	E13 ReparseFailureRollbackFails   reparse fails + rollback fails →
+//	                                   ErrPostWriteReparse + ErrRollbackFailed,
+//	                                   zero WriteReport (state undefined)
 //
 // Each row must be self-contained: no cross-row state, no shared
 // t.TempDir. matrixRow.run receives a fresh Resolver+HOME per t.Run so
@@ -44,12 +47,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
+
+// errE6Transform is the row-scoped sentinel returned by the E6
+// TransformError row's Transform closure. Declared at package scope so
+// the row's assert closure can errors.Is against it, pinning that
+// writepath.Apply wraps the Transform error with %w. Kept unexported
+// because no other row (or non-test caller) should ever see it.
+var errE6Transform = errors.New("matrix E6: synthetic transform failure")
 
 // statefulJSONParser wraps NewJSONParser() with a call counter and a
 // "fail on Nth call" switch. Used only by row E8: the reparse-failure
@@ -364,7 +375,7 @@ func testMatrix() []matrixRow {
 					Parser:    NewJSONParser(),
 					OwnedKeys: []string{"a"},
 					Transform: func(cur []byte) ([]byte, error) {
-						return nil, errors.New("synthetic transform failure")
+						return nil, errE6Transform
 					},
 					// NewContent set to prove Transform-wins-over-NewContent
 					// (should NEVER land on disk).
@@ -374,6 +385,14 @@ func testMatrix() []matrixRow {
 			assert: func(t *testing.T, home string, rep WriteReport, err error, _ func(t *testing.T, home string)) {
 				if err == nil {
 					t.Fatalf("Apply err = nil; want transform-failure surfaced")
+				}
+				// Pin the sentinel: Apply must wrap the row-scoped Transform
+				// error with %w so errors.Is walks the chain to it.
+				if !errors.Is(err, errE6Transform) {
+					t.Fatalf("err = %v; want wraps errE6Transform", err)
+				}
+				if !reflect.DeepEqual(rep, WriteReport{}) {
+					t.Fatalf("rep = %+v; want zero WriteReport on transform failure", rep)
 				}
 				got, _ := os.ReadFile(filepath.Join(home, rel))
 				if string(got) != `{"a":1}` {
@@ -404,6 +423,9 @@ func testMatrix() []matrixRow {
 				if string(got) != `not valid json {{{` {
 					t.Fatalf("file mutated under parse-fail: %q", got)
 				}
+				// Parse failure fires at FR-5 step 3, well before the
+				// step-6 Backup. No backup file may exist.
+				assertToolBackupCount(t, filepath.Join(home, storage.ConfigDirName, storage.BackupsDirName, "tool"), 0)
 			},
 		},
 		{
@@ -476,6 +498,22 @@ func testMatrix() []matrixRow {
 						if _, statErr := os.Lstat(filepath.Join(outside, "config.json")); !os.IsNotExist(statErr) {
 							t.Fatalf("file leaked into outside HOME: %v", statErr)
 						}
+						// Nothing may have landed inside HOME via the
+						// symlink either. The symlink resolves to `outside`,
+						// so reading HOME/escape/ walks through the link;
+						// enumerate its dirents and refuse any residue
+						// (partial .tmp*, backup fragments, ...).
+						entries, readErr := os.ReadDir(filepath.Join(home, "escape"))
+						if readErr != nil {
+							t.Fatalf("read HOME/escape via symlink: %v", readErr)
+						}
+						if len(entries) != 0 {
+							names := make([]string, 0, len(entries))
+							for _, e := range entries {
+								names = append(names, e.Name())
+							}
+							t.Fatalf("HOME/escape not empty after refuse: %v (want zero residue)", names)
+						}
 					}
 			},
 			assert: func(t *testing.T, home string, rep WriteReport, err error, extra func(t *testing.T, home string)) {
@@ -525,6 +563,13 @@ func testMatrix() []matrixRow {
 				if !errors.Is(err, ErrLockTimeout) {
 					t.Fatalf("err = %v; want wraps ErrLockTimeout", err)
 				}
+				// Lock acquisition fails at FR-5 step 2, before any
+				// report field is populated. Report must be zero and no
+				// backup may have been taken.
+				if !reflect.DeepEqual(rep, WriteReport{}) {
+					t.Fatalf("rep = %+v; want zero WriteReport on lock timeout", rep)
+				}
+				assertToolBackupCount(t, filepath.Join(home, storage.ConfigDirName, storage.BackupsDirName, "tool"), 0)
 				// Target must not have been created (primer only touched
 				// the sidecar).
 				if _, statErr := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(statErr) {
@@ -579,9 +624,111 @@ func testMatrix() []matrixRow {
 				if !errors.Is(err, ErrPlanInvalid) {
 					t.Fatalf("err = %v; want wraps ErrPlanInvalid", err)
 				}
+				// ValidatePlan fires at FR-5 step 1, before any I/O.
+				// Report must be zero and no file may have been created
+				// at the plan's (empty) target path — which the runner
+				// passes literally, so the on-disk check covers the
+				// intended-target path plus a defensive check that HOME
+				// itself gained no new tool/ residue.
+				if !reflect.DeepEqual(rep, WriteReport{}) {
+					t.Fatalf("rep = %+v; want zero WriteReport on invalid plan", rep)
+				}
+				if _, statErr := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(statErr) {
+					t.Fatalf("stray file at rel target despite invalid plan: %v", statErr)
+				}
+			},
+		},
+		{
+			name: "E13_ReparseFailureRollbackFails",
+			setup: func(t *testing.T, r *storage.Resolver, home string) (*SyntheticAdapter, func(t *testing.T, home string)) {
+				// Seed a valid JSON file so pre-write parses succeed. On
+				// the reparse call (#3) the sabotage parser removes the
+				// just-written target and creates a non-empty directory
+				// in its place, so writepath.Apply's rollback AtomicWrite
+				// fails at os.Rename with EISDIR. The kernel refuses
+				// rename(file → existing-non-empty-dir) regardless of uid,
+				// so this fires reliably even under root — the proven
+				// pattern from apply_test.go's TestApply_ReparseFailureRollbackFails.
+				original := []byte(`{"a":1}`)
+				absTarget := filepath.Join(home, rel)
+				seedFile(t, absTarget, original)
+				parser := &matrixSabotageParser{failOn: 3, target: absTarget, inner: NewJSONParser(), t: t}
+				return &SyntheticAdapter{
+					Tool:       "tool",
+					Target:     rel,
+					Parser:     parser,
+					OwnedKeys:  []string{"a"},
+					NewContent: []byte(`{"a":2}`),
+				}, nil
+			},
+			assert: func(t *testing.T, home string, rep WriteReport, err error, _ func(t *testing.T, home string)) {
+				if err == nil {
+					t.Fatalf("Apply err = nil; want ErrPostWriteReparse + ErrRollbackFailed")
+				}
+				if !errors.Is(err, ErrPostWriteReparse) {
+					t.Fatalf("err = %v; want wraps ErrPostWriteReparse", err)
+				}
+				if !errors.Is(err, ErrRollbackFailed) {
+					t.Fatalf("err = %v; want wraps ErrRollbackFailed", err)
+				}
+				if errors.Is(err, ErrRollback) {
+					t.Fatalf("err = %v; must NOT wrap ErrRollback on failed rollback", err)
+				}
+				if rep.RolledBack {
+					t.Fatalf("RolledBack = true; want false when rollback itself failed")
+				}
+				// Per E2-S3 contract, a failed rollback returns the zero
+				// WriteReport — on-disk state is undefined and the caller
+				// must not read any report field.
+				if !reflect.DeepEqual(rep, WriteReport{}) {
+					t.Fatalf("rep = %+v; want zero WriteReport on failed rollback (state undefined)", rep)
+				}
 			},
 		},
 	}
+}
+
+// matrixSabotageParser is the E13-scoped stand-in for apply_test.go's
+// sabotageParser. Duplicated here (rather than sharing the apply_test
+// helper) so a future refactor of apply_test.go cannot silently break
+// the E13 matrix row's contract — matches the same isolation rationale
+// used for statefulJSONParser vs countingParser.
+//
+// It succeeds on the first (failOn-1) calls (pre-write parse of current
+// bytes + pre-write parse of new bytes) and, on the failOn-th call
+// (post-write reparse), swaps the just-written target file for a
+// non-empty directory before returning an error. The kernel-level
+// rename(file → non-empty-dir) refusal is the load-bearing property:
+// it makes AtomicWrite's rollback fail with EISDIR under any uid,
+// including root, so the row exercises the "state is undefined" branch
+// of writepath.Apply deterministically.
+type matrixSabotageParser struct {
+	calls  int
+	failOn int
+	target string
+	inner  Parser
+	t      *testing.T
+	sabbed bool
+}
+
+func (p *matrixSabotageParser) Parse(data []byte) (any, error) {
+	p.calls++
+	if p.calls < p.failOn {
+		return p.inner.Parse(data)
+	}
+	if !p.sabbed {
+		p.sabbed = true
+		if err := os.Remove(p.target); err != nil {
+			p.t.Fatalf("matrix E13 sabotage: remove %q: %v", p.target, err)
+		}
+		if err := os.Mkdir(p.target, 0o700); err != nil {
+			p.t.Fatalf("matrix E13 sabotage: mkdir %q: %v", p.target, err)
+		}
+		if err := os.WriteFile(filepath.Join(p.target, "keeper"), []byte("x"), 0o600); err != nil {
+			p.t.Fatalf("matrix E13 sabotage: seed keeper: %v", err)
+		}
+	}
+	return nil, errors.New("matrixSabotageParser: reparse rejected")
 }
 
 // assertToolBackupCount counts .bak. entries under
