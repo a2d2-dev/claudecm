@@ -740,6 +740,95 @@ func TestImport_UnreadableFilePermission(t *testing.T) {
 	}
 }
 
+func TestImport_NullOwnedKeysDropped(t *testing.T) {
+	// v1 null-owned-key policy: JSON null at owned auth.json keys
+	// other than OPENAI_API_KEY is DROPPED during Import (not mirrored
+	// into Overlay.Raw). Rationale in import.go's godoc:
+	// codex/toml.Doc.Set(k, nil) DELETES the key on re-render, so
+	// preserving nil would round-trip as a delete. Owned string
+	// siblings on the same object still land in Overlay.Raw so this
+	// is a per-key filter, not a whole-object skip.
+	r := newResolver(t)
+	writeAuthJSON(t, r, `{
+  "OPENAI_API_KEY": "sk-x",
+  "last_refresh": null,
+  "tokens": {
+    "access_token": "at",
+    "refresh_token": null
+  }
+}`)
+
+	core, overlay, err := runImport(t, r)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if core.APIKey != "sk-x" {
+		t.Errorf("core.APIKey = %q, want %q", core.APIKey, "sk-x")
+	}
+	if got := overlay.Raw["tokens.access_token"]; got != "at" {
+		t.Errorf("overlay.Raw[tokens.access_token] = %v, want %q (non-null sibling preserved)", got, "at")
+	}
+	if _, present := overlay.Raw["last_refresh"]; present {
+		t.Errorf("overlay.Raw carries last_refresh = %v; want absent (null owned key dropped)", overlay.Raw["last_refresh"])
+	}
+	if _, present := overlay.Raw["tokens.refresh_token"]; present {
+		t.Errorf("overlay.Raw carries tokens.refresh_token = %v; want absent (null owned key dropped)", overlay.Raw["tokens.refresh_token"])
+	}
+}
+
+func TestImport_ValidConfigMalformedAuth(t *testing.T) {
+	// Cross-file malformed coordination (A): config.toml is valid and
+	// carries owned content; auth.json is unterminated JSON. Import
+	// MUST refuse with ErrParseFailed and return zero Core + zero
+	// Overlay — none of the valid config.toml owned content may leak
+	// out through a half-completed import. Symmetric with the
+	// refuse-on-malformed policy documented in import.go.
+	r := newResolver(t)
+	writeConfigTOML(t, r, `model = "gpt-5"
+model_provider = "openai"
+`)
+	writeAuthJSON(t, r, `{"OPENAI_API_KEY":`) // unterminated
+
+	core, overlay, err := runImport(t, r)
+	if !errors.Is(err, codex.ErrParseFailed) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrParseFailed)", err)
+	}
+	if !errors.Is(err, writepath.ErrParseFailed) {
+		t.Errorf("err = %v, want errors.Is(err, writepath.ErrParseFailed) (shared sentinel)", err)
+	}
+	if !isZeroCore(core) {
+		t.Errorf("core = %+v, want zero (malformed auth must not let config leak out)", core)
+	}
+	if !isZeroOverlay(overlay) {
+		t.Errorf("overlay = %+v, want zero (malformed auth must not let config leak out)", overlay)
+	}
+}
+
+func TestImport_ValidAuthMalformedConfig(t *testing.T) {
+	// Cross-file malformed coordination (B): auth.json is valid and
+	// carries an API key; config.toml is unterminated TOML. Import
+	// MUST refuse with ErrParseFailed and return zero Core + zero
+	// Overlay — none of the valid auth.json owned content may leak
+	// out. Symmetric with the (A) direction above.
+	r := newResolver(t)
+	writeConfigTOML(t, r, `model = `) // unterminated: bare = with no rhs
+	writeAuthJSON(t, r, `{"OPENAI_API_KEY":"sk-should-not-leak"}`)
+
+	core, overlay, err := runImport(t, r)
+	if !errors.Is(err, codex.ErrParseFailed) {
+		t.Fatalf("err = %v, want errors.Is(err, ErrParseFailed)", err)
+	}
+	if !errors.Is(err, writepath.ErrParseFailed) {
+		t.Errorf("err = %v, want errors.Is(err, writepath.ErrParseFailed) (shared sentinel)", err)
+	}
+	if !isZeroCore(core) {
+		t.Errorf("core = %+v, want zero (malformed config must not let auth leak out)", core)
+	}
+	if !isZeroOverlay(overlay) {
+		t.Errorf("overlay = %+v, want zero (malformed config must not let auth leak out)", overlay)
+	}
+}
+
 func TestImport_NonStringTOMLValuePreserved(t *testing.T) {
 	// TOML permits non-string owned-key values in a couple of the
 	// slot shapes claudecm names (bool, integer). None of the v1

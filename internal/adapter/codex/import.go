@@ -41,6 +41,19 @@
 // claudecode/emptycheck.go so any future policy tweak (BOM handling,
 // etc.) is applied to both.
 //
+// Empty-of-owned-content policy. A file that PARSES successfully but
+// contributes zero owned keys (e.g. an auth.json = `{}` after a fresh
+// `codex login` has not yet completed; a config.toml holding only
+// comments and unowned sections) is treated as "present-with-nothing-
+// owned", NOT as an error. It is a legitimate operational state:
+// promoting it to an ErrNoOwnedContent sentinel would false-positive
+// on real Codex installs that keep OAuth tokens under nested keys
+// claudecm may not yet own. Callers wanting to distinguish "nothing
+// owned" from "file missing" can compare against zero-value Core and
+// Overlay themselves; the file-presence signal is separately exposed
+// through Detect / Presence. This matches the treatAsEmpty policy at
+// the byte level: empty parsed content is normal, not exceptional.
+//
 // Unknown-key policy. Anything outside OwnedKeysConfigTOML /
 // OwnedKeysAuthJSON is NOT copied into the returned Profile
 // candidate: OverlayFromTool.Raw only carries owned keys. Byte-
@@ -74,7 +87,27 @@
 // the value without deleting the key) MUST NOT populate Core.APIKey.
 // Empty string ("") is a valid non-null value and IS preserved
 // verbatim into Core.APIKey — same policy as claudecode. Only null
-// skips the slot entirely.
+// skips the slot entirely. The OPENAI_API_KEY null-vs-empty-vs-string
+// decision reads from the unflattened root map rather than from
+// writepath.Flatten output: OPENAI_API_KEY is top-level and
+// unambiguously scalar, so decoupling from Flatten's contract keeps
+// the null-safety invariant local to this file. Flatten is still used
+// for the nested tokens.* lookups where the flat dotted-path shape is
+// exactly what OwnedKeysAuthJSON encodes.
+//
+// Null-owned-key policy (auth.json). For OWNED keys other than
+// OPENAI_API_KEY (auth_mode, last_refresh, tokens.*), a JSON null is
+// DROPPED during Import v1 rather than mirrored into Overlay.Raw.
+// Rationale: on the write side, codex/toml.Doc.Set(k, nil) deletes
+// the key. If Import preserved nil into Overlay.Raw, the same value
+// would DELETE the key on re-render — the opposite of preserving it.
+// Cross-format "null sentinel" plumbing (TOML has no natural null;
+// JSON does) is not worth the v1 complexity for the sole realistic
+// case (`last_refresh: null` between token refreshes). Legitimate
+// unowned nulls in the operator's on-disk config are still preserved
+// end-to-end by merge-preserve at Apply time (PRD §4.7). If a
+// legitimate owned-key null needs preservation, that is a post-v1
+// feature requiring a null-sentinel design + migration.
 //
 // Core mapping conservatism. config.toml keys are NOT mapped into
 // Core in v1. Codex's model / model_provider / approval_mode /
@@ -162,7 +195,7 @@ func (a *Adapter) importFromCodex(ctx context.Context, r *storage.Resolver) (ada
 		return emptyCore, emptyOverlay, err
 	}
 
-	authPresent, authFlat, err := readCodexAuth(authPath, r)
+	authPresent, authRoot, authFlat, err := readCodexAuth(authPath, r)
 	if err != nil {
 		return emptyCore, emptyOverlay, err
 	}
@@ -174,7 +207,7 @@ func (a *Adapter) importFromCodex(ctx context.Context, r *storage.Resolver) (ada
 		return emptyCore, emptyOverlay, fmt.Errorf("%w: %s, %s", ErrNoConfig, configPath, authPath)
 	}
 
-	core, overlay := extractOwnedCodex(tomlDoc, authFlat)
+	core, overlay := extractOwnedCodex(tomlDoc, authRoot, authFlat)
 	return core, overlay, nil
 }
 
@@ -228,46 +261,49 @@ func readCodexTOML(configPath string, r *storage.Resolver) (bool, *codextoml.Doc
 // loads + flattens the JSON when present. Same tri-state return
 // contract as readCodexTOML.
 //
-// The flattened map is what extractOwnedCodex consumes so that
-// OPENAI_API_KEY (top-level) and tokens.* (nested) can be looked up
-// against OwnedKeysAuthJSON entries by exact-string match on the
-// same shape writepath.Flatten produces.
-func readCodexAuth(authPath string, r *storage.Resolver) (bool, map[string]any, error) {
+// Returns the unflattened root map alongside the flattened view so
+// extractOwnedCodex can read OPENAI_API_KEY directly from the root
+// (decoupling the null-vs-empty-vs-string decision from any future
+// change to writepath.Flatten's nil-handling contract — OPENAI_API_KEY
+// is top-level and unambiguously scalar). tokens.* lookups still go
+// through the flat view where the flat dotted-path shape is exactly
+// what OwnedKeysAuthJSON encodes.
+func readCodexAuth(authPath string, r *storage.Resolver) (bool, map[string]any, map[string]any, error) {
 	if err := verifyReadTargetInHomeCodex(authPath, r); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
+			return false, nil, nil, nil
 		}
-		return false, nil, err
+		return false, nil, nil, err
 	}
 
 	data, err := os.ReadFile(authPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return false, nil, nil
+			return false, nil, nil, nil
 		}
-		return false, nil, fmt.Errorf("codex import: read %q: %w", authPath, err)
+		return false, nil, nil, fmt.Errorf("codex import: read %q: %w", authPath, err)
 	}
 
 	if treatAsEmpty(data) {
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 
 	var root map[string]any
 	if err := json.Unmarshal(data, &root); err != nil {
-		return false, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
+		return false, nil, nil, fmt.Errorf("%w: %s: %v", ErrParseFailed, authPath, err)
 	}
 	if root == nil {
 		// json.Unmarshal into map[string]any accepts `null` and
 		// leaves the map nil. auth.json is documented as an object;
 		// a null root is not a shape we should silently accept.
-		return false, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
+		return false, nil, nil, fmt.Errorf("%w: %s: top-level value is null, want JSON object", ErrParseFailed, authPath)
 	}
 
 	flat, err := writepath.Flatten(root)
 	if err != nil {
-		return false, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
+		return false, nil, nil, fmt.Errorf("%w: %s: flatten: %v", ErrParseFailed, authPath, err)
 	}
-	return true, flat, nil
+	return true, root, flat, nil
 }
 
 // extractOwnedCodex distributes owned-key values from the two source
@@ -276,12 +312,17 @@ func readCodexAuth(authPath string, r *storage.Resolver) (bool, map[string]any, 
 //
 //   - config.toml values → Overlay.Raw at the flat dotted key.
 //   - auth.json OPENAI_API_KEY → Core.APIKey (null skips; empty
-//     string preserved).
+//     string preserved). Read from the unflattened root map so the
+//     null-vs-empty-vs-string decision does not depend on
+//     writepath.Flatten's nil-handling contract.
 //   - auth.json auth_mode, last_refresh, tokens.* → Overlay.Raw at
-//     the flat dotted key.
+//     the flat dotted key. JSON null values are DROPPED (see the
+//     file-level Null-owned-key policy note) — Doc.Set(k, nil)
+//     deletes on re-render, so preserving nil into Overlay.Raw
+//     would be a lie.
 //
 // Pure — no I/O.
-func extractOwnedCodex(doc *codextoml.Doc, authFlat map[string]any) (adapter.CoreFromTool, adapter.OverlayFromTool) {
+func extractOwnedCodex(doc *codextoml.Doc, authRoot, authFlat map[string]any) (adapter.CoreFromTool, adapter.OverlayFromTool) {
 	var (
 		core    adapter.CoreFromTool
 		overlay adapter.OverlayFromTool
@@ -300,30 +341,36 @@ func extractOwnedCodex(doc *codextoml.Doc, authFlat map[string]any) (adapter.Cor
 		}
 	}
 
-	// auth.json → Core.APIKey + Overlay.Raw. OPENAI_API_KEY is the
-	// only key that lands in Core; everything else in the auth
-	// allowlist is Overlay-only.
+	// auth.json → Core.APIKey + Overlay.Raw. OPENAI_API_KEY reads
+	// from the unflattened root so we do not depend on Flatten's
+	// nil handling for the null-vs-empty-vs-string decision. Every
+	// other owned auth key goes through the flat view where the
+	// flat dotted-path shape is exactly what OwnedKeysAuthJSON
+	// encodes.
+	if authRoot != nil {
+		if v, ok := authRoot["OPENAI_API_KEY"]; ok && v != nil {
+			// null → skipped by the ok/nil guard (do NOT zero
+			// Core.APIKey); non-null (including "") → wins into
+			// Core.APIKey verbatim as a string.
+			core.APIKey = coerceToStringCodex(v)
+		}
+	}
 	if authFlat != nil {
 		for _, key := range OwnedKeysAuthJSON {
+			if key == "OPENAI_API_KEY" {
+				// Handled above via the root map. Skip here so
+				// we do not double-book into Overlay.Raw.
+				continue
+			}
 			v, ok := authFlat[key]
 			if !ok {
 				continue
 			}
-			if key == "OPENAI_API_KEY" {
-				// null → skip (do not zero Core.APIKey);
-				// non-null (including "") → wins into Core.APIKey
-				// verbatim as a string.
-				if v == nil {
-					continue
-				}
-				core.APIKey = coerceToStringCodex(v)
+			if v == nil {
+				// v1 policy: null owned auth keys are DROPPED.
+				// See the file-level Null-owned-key policy note.
 				continue
 			}
-			// Everything else in OwnedKeysAuthJSON (auth_mode,
-			// last_refresh, tokens.*) → Overlay.Raw. Keep the
-			// nil sentinel too so a round-trip that saw a JSON
-			// null re-emits it (Codex may legitimately carry
-			// `"last_refresh": null` between token refreshes).
 			putOverlayRaw(&overlay, key, v)
 		}
 	}
