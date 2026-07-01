@@ -36,6 +36,11 @@ const (
 	// StateFileName is the state file name.
 	StateFileName = "state.yaml"
 
+	// AuditLogFileName is the retention audit log filename. Docs and code
+	// agree on `~/.claudecm/audit.log` — see docs/architecture.md §retention
+	// and docs/architecture/coding-standards.md rule 10.
+	AuditLogFileName = "audit.log"
+
 	// ProfileFileExt is the on-disk extension for profile files.
 	ProfileFileExt = ".yaml"
 
@@ -182,6 +187,16 @@ func (r *Resolver) ProfilePath(name string) (string, error) {
 // deferred to writepath (FR-5 / NFR-S2).
 func (r *Resolver) StatePath() (string, error) {
 	return ensureUnderHome(filepath.Join(r.ConfigDir(), StateFileName), r.home)
+}
+
+// AuditLogPath returns the absolute path to `<HOME>/.claudecm/audit.log`.
+// This is the retention pruning audit log (mode 0600, append-only, one line
+// per pruned backup) documented in docs/architecture.md §retention and
+// docs/architecture/coding-standards.md rule 10. The path is lexically under
+// HOME after filepath.Clean; symlink resolution is deferred to the caller
+// (see internal/storage/retention.go), symmetric with StatePath / ProfilePath.
+func (r *Resolver) AuditLogPath() string {
+	return filepath.Join(r.ConfigDir(), AuditLogFileName)
 }
 
 // BackupsRoot returns the absolute path to `<HOME>/.claudecm/backups/`,
