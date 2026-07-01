@@ -1,7 +1,7 @@
 // apply.go implements FR-5 steps 1-10 of the locked write-path pipeline
-// (Story E2-S2 steps 1-7 + Story E2-S3 steps 8-10; E2-S4 concurrent-edit
-// drift detection still deferred). It is the single legal path to disk
-// for any tool-owned config file claudecm mutates.
+// (Story E2-S2 steps 1-7 + Story E2-S3 steps 8-10 + Story E2-S4 step 9).
+// It is the single legal path to disk for any tool-owned config file
+// claudecm mutates. The FR-5 pipeline is now landed end-to-end.
 //
 // OS-Rename discipline: only internal/storage/atomic.go and this file
 // may call os.Rename on tool-owned paths. Enforced by
@@ -45,13 +45,51 @@
 //  7. storage.Backup snapshots the pre-write bytes. ErrNothingToBackup
 //     means "first write, no prior state" and produces a zero
 //     BackupRecord. Any other backup failure wraps ErrBackupFailed and
-//     aborts before touching the target. Then storage.AtomicWrite
-//     publishes the new bytes at mode 0600, honoring MustNotExist.
-//     AtomicWrite's own ErrTargetExists propagates unwrapped so callers
-//     can errors.Is against storage.ErrTargetExists. storage.Stat
-//     captures the post-write Fingerprint for the report.
+//     aborts before touching the target. Step 9 (drift check, below)
+//     runs between backup and the atomic publish, then
+//     storage.AtomicWrite publishes the new bytes at mode 0600, honoring
+//     MustNotExist. AtomicWrite's own ErrTargetExists propagates
+//     unwrapped so callers can errors.Is against storage.ErrTargetExists.
+//     storage.Stat captures the post-write Fingerprint for the report.
 //
-// Story E2-S3 steps 8-10 (implemented here):
+// Story E2-S4 step 9 (implemented here):
+//
+//  9. Concurrent-edit fingerprint drift check. Under the flock, another
+//     claudecm invocation cannot race us — the advisory lock is honored
+//     process-wide. But nothing prevents a NON-claudecm actor (the
+//     Claude Code app itself, a user editor, an unrelated script) from
+//     writing the target between our step-3 read (which captured
+//     PreFingerprint) and the step-7 AtomicWrite. Immediately before
+//     AtomicWrite we re-Stat the target and compare against
+//     PreFingerprint (Size, SHA256, ModTime). Policy is strict — any
+//     Fingerprint mismatch aborts; ModTime-only drift still aborts
+//     (rare in practice; users who hit spurious drift can rerun). Rules:
+//
+//       - PreFingerprint said exists=false AND current Stat says
+//         !exists: first-write path, nothing to drift against — skip
+//         the check and proceed to AtomicWrite.
+//       - PreFingerprint said exists=false AND current Stat says exists:
+//         someone created the file under our lock — refuse via
+//         ErrConcurrentEdit. NFR-C3 guarantee.
+//       - PreFingerprint said exists=true AND current Stat says
+//         !exists: target vanished under our lock — refuse via
+//         ErrConcurrentEdit.
+//       - Both exist AND (Size|SHA256|ModTime differ): drift — refuse
+//         via ErrConcurrentEdit.
+//
+//     On drift: DO NOT AtomicWrite (our newBytes were derived from stale
+//     current bytes), DO NOT roll back the backup (the pre-write bytes
+//     the backup captured are now stale, but they are still the last
+//     known clean state — the file on disk is whatever the external
+//     writer put there). The step-7 backup file, if any, is retained on
+//     disk (retention policy will eventually reap it) so operators can
+//     inspect what state we thought we had at read time. The returned
+//     WriteReport is partial: Backup populated (may be zero for first-
+//     write drift), PreFingerprint is the stale snapshot, PostFingerprint
+//     is the zero Fingerprint (we never wrote). The error wraps
+//     ErrConcurrentEdit with both fingerprints embedded for audit.
+//
+// Story E2-S3 steps 8, 10 (implemented here):
 //
 //  8. Post-write reparse: re-read the target bytes from disk via
 //     os.ReadFile, then feed them through plan.Parser. Skipped entirely
@@ -60,7 +98,6 @@
 //     Skipped=true (no write happened) and when DryRun=true (nothing
 //     was written). Any reparse failure — read error or parse error —
 //     joins into ErrPostWriteReparse and triggers step 10.
-//  9. (E2-S4, deferred) Concurrent-edit fingerprint drift check.
 //  10. Auto-rollback from the step-7 backup on any step-8 failure:
 //      - When Backup is zero-value (first-write case), rollback =
 //        os.Remove(plan.Target). A Remove failure surfaces as
@@ -160,10 +197,14 @@ func Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (WriteRepor
 	if fnErr != nil {
 		// Preserve the report on a successful rollback so callers can
 		// see RolledBack=true and read PreFingerprint/Backup metadata.
-		// A failed rollback (or any non-rollback error) returns a zero
-		// report — callers must not confuse "state restored" with
-		// "state undefined".
-		if report.RolledBack {
+		// Also preserve on ErrConcurrentEdit: the write never happened
+		// but Backup + PreFingerprint carry audit value (operators want
+		// to know what pre-write state we captured, and that the backup
+		// file exists on disk). PostFingerprint stays zero in this case
+		// — we did not write. A failed rollback (or any other error)
+		// returns a zero report — callers must not confuse "state
+		// restored" or "drift aborted" with "state undefined".
+		if report.RolledBack || errors.Is(fnErr, ErrConcurrentEdit) {
 			return report, mapStorageError(fnErr)
 		}
 		return WriteReport{}, mapStorageError(fnErr)
@@ -281,6 +322,33 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		// Zero-value BackupRecord left in place.
 	default:
 		return WriteReport{}, fmt.Errorf("%w: %v", ErrBackupFailed, berr)
+	}
+
+	// Step 9 (concurrent-edit drift detection): between step 3 and now,
+	// nothing else claudecm-owned raced us (the flock is held), but a
+	// non-claudecm process may have written the target. Re-Stat and
+	// compare against preFP; abort BEFORE AtomicWrite on any mismatch so
+	// our stale-derived newBytes never land on disk. The backup file
+	// stays on disk for audit (see file header). postReadHookForTest is
+	// a build-tag seam — a no-op in production, swap-able only under
+	// -tags=test to let unit tests inject a between-read-and-Stat
+	// mutation. Kept ahead of Stat so the hook fires while the pre-Stat
+	// state is still whatever the test wants it to be.
+	postReadHookForTest()
+	curFP, curExists, cerr := storage.Stat(plan.Target)
+	if cerr != nil {
+		return WriteReport{}, cerr
+	}
+	if driftErr := detectDrift(plan.Target, exists, preFP, curExists, curFP); driftErr != nil {
+		return WriteReport{
+			Tool:           plan.Tool,
+			Target:         plan.Target,
+			Backup:         backup,
+			PreFingerprint: preFP,
+			// PostFingerprint intentionally zero: we did NOT write.
+			Diff:      diff,
+			AppliedAt: now,
+		}, driftErr
 	}
 
 	// Step 7 (atomic publish): mode 0600 is re-asserted regardless of
@@ -446,6 +514,42 @@ func mapStorageError(err error) error {
 	default:
 		return err
 	}
+}
+
+// detectDrift compares the pre-write existence+Fingerprint captured in
+// step 3 against a fresh Stat taken immediately before the atomic
+// publish. Any divergence surfaces as an ErrConcurrentEdit-wrapped
+// error carrying both fingerprints for the audit log; returns nil on a
+// clean first-write (both sides !exists) or a byte-identical match.
+// See file header (Story E2-S4 step 9) for the policy narrative.
+func detectDrift(target string, prevExists bool, preFP storage.Fingerprint, curExists bool, curFP storage.Fingerprint) error {
+	if !prevExists && !curExists {
+		// First write; nothing to drift against. Proceed to AtomicWrite.
+		return nil
+	}
+	if !prevExists && curExists {
+		return fmt.Errorf(
+			"%w: target %q appeared under lock (pre-write did not exist; current size=%d sha256=%s mtime=%s)",
+			ErrConcurrentEdit, target,
+			curFP.Size, curFP.SHA256, curFP.ModTime.Format(time.RFC3339Nano),
+		)
+	}
+	if prevExists && !curExists {
+		return fmt.Errorf(
+			"%w: target %q vanished under lock (pre-write size=%d sha256=%s mtime=%s)",
+			ErrConcurrentEdit, target,
+			preFP.Size, preFP.SHA256, preFP.ModTime.Format(time.RFC3339Nano),
+		)
+	}
+	if preFP.Size != curFP.Size || preFP.SHA256 != curFP.SHA256 || !preFP.ModTime.Equal(curFP.ModTime) {
+		return fmt.Errorf(
+			"%w: target %q fingerprint drift under lock: pre=(size=%d sha256=%s mtime=%s) current=(size=%d sha256=%s mtime=%s)",
+			ErrConcurrentEdit, target,
+			preFP.Size, preFP.SHA256, preFP.ModTime.Format(time.RFC3339Nano),
+			curFP.Size, curFP.SHA256, curFP.ModTime.Format(time.RFC3339Nano),
+		)
+	}
+	return nil
 }
 
 // readAll reads the file at path. exists=false iff the file is absent;
