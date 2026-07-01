@@ -14,14 +14,27 @@ import (
 // lockHome mirrors atomicHome/backupHome: fresh HOME, .claudecm/ layout
 // created, Resolver returned. Every lock test funnels through here so no
 // two tests share disk state.
+//
+// The tempdir is EvalSymlinks-canonicalized before it is handed to the
+// Resolver. On macOS t.TempDir() returns "/var/folders/..." while the real
+// path is "/private/var/folders/..." (/var is a symlink to /private/var).
+// Production code paths (checkUnderHome) resolve symlinks, so a sidecar
+// path returned by Acquire lives under "/private/var/..."; the test-side
+// expectedSidecar composition would otherwise stay under "/var/..." and
+// the assertion would false-fail on macOS while passing on Linux. This is
+// a test-setup concern only: the production symlink guard is unchanged.
 func lockHome(t *testing.T) (*Resolver, string) {
 	t.Helper()
 	home := t.TempDir()
-	r := mustResolver(t, home)
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", home, err)
+	}
+	r := mustResolver(t, resolved)
 	if err := Bootstrap(r); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	return r, home
+	return r, resolved
 }
 
 func expectedSidecar(home, rel string) string {
