@@ -12,8 +12,16 @@
 // walks the prepared files in canonical order, re-checks the
 // concurrency fingerprint under lock, then AtomicWrites each target
 // via storage.AtomicWrite (writepath's underlying primitive). On any
-// mid-commit failure it rolls back already-committed files from their
-// backups in reverse canonical order and returns a *PartialFailure.
+// mid-commit failure it rolls back already-committed files in reverse
+// canonical order and returns a *PartialFailure.
+//
+// Rollback source of truth. Rollback restores from the in-memory
+// pre-Stage bytes captured under the flock (PreparedFile.CurrentBytes),
+// NOT from the on-disk backup file. The backup file is retained for
+// audit / operator recovery only. This keeps rollback insensitive to
+// any post-Stage tampering with the backup directory and avoids the
+// extra open/read syscalls the on-disk path would require. See
+// rollbackFile for the mechanism and F1 in PR #44 for the rationale.
 //
 // Authority. This package is subordinate to:
 //  1. docs/decisions/0001-direction-lock.md (ADR-0001).
@@ -111,6 +119,24 @@ type Committer interface {
 	// StagedTxn (zero PreparedFile / zero LockHandle slice) and a nil
 	// error. This is what makes cmd/switch --dry-run against a
 	// no-change profile a stable, cheap operation.
+	//
+	// Duplicate targets. Passing multiple plans for the same Target is
+	// legal but produces confusing behavior: the second plan for that
+	// target will trip drift detection during Commit (its
+	// PreFingerprint was captured before the first plan wrote, and the
+	// first plan's write invalidated it). Callers SHOULD merge or
+	// dedupe plans by Target before calling Stage. Stage does not
+	// refuse duplicate-target plans up front so callers can still
+	// experiment; TestStage_DuplicateTargetPlansCauseCommitFailure
+	// pins the resulting Commit-time failure.
+	//
+	// Backup-vs-CurrentBytes drift. The backup file on disk may drift
+	// from PreparedFile.CurrentBytes if a non-claudecm process mutates
+	// the target between the initial read and the storage.Backup step
+	// (both happen under our flock, but the flock is advisory).
+	// Rollback uses the in-memory CurrentBytes and is unaffected;
+	// operators inspecting the backup file for audit should be aware.
+	// A future story may add a post-Backup fingerprint check.
 	Stage(ctx context.Context, r *storage.Resolver, plans []writepath.WritePlan) (StagedTxn, error)
 
 	// Commit executes the ordered rename phase. It walks StagedTxn's
@@ -256,11 +282,23 @@ type CommitReport struct {
 	// called).
 	CommittedAt time.Time
 
-	// RolledBack is true when Commit hit a mid-phase-2 failure and
-	// rolled back at least one already-committed file from its
-	// backup. Aggregate signal: the per-file detail lives in each
-	// PerFileReport.Status.
+	// RolledBack is true when Commit rolled back at least one
+	// PREVIOUSLY-COMMITTED file after a mid-phase-2 failure. It does
+	// NOT reflect the failing file's own post-write-reparse rollback —
+	// that lives in FailingFileRolledBack. Aggregate signal only; the
+	// per-file detail lives in each PerFileReport.Status.
 	RolledBack bool
+
+	// FailingFileRolledBack is true when the failing file's own
+	// post-write reparse rollback ran successfully (i.e. the file was
+	// AtomicWritten, reparse rejected it, and rollbackFile restored
+	// the pre-Stage bytes). False on all other failure modes:
+	// concurrent-edit detected before any write, storage.Stat failure,
+	// AtomicWrite failure (nothing to unwind), or post-write reparse
+	// rollback that itself failed. Callers distinguish "failing file
+	// is now at pre-Stage bytes" from "failing file's on-disk state is
+	// undefined" via this flag.
+	FailingFileRolledBack bool
 }
 
 // PerFileReport carries the outcome for one WritePlan.
@@ -616,6 +654,18 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 		// the real Stage always populates the resolver. Refuse loudly.
 		return CommitReport{}, fmt.Errorf("commit: staged txn has no resolver (was Stage bypassed?)")
 	}
+	// Shape check: hand-crafted StagedTxns (e.g. from tests) can carry
+	// mismatched Plans/Prepared lengths, which would panic later at
+	// txn.Prepared[idx]. Reject loudly instead. Real Stage always
+	// produces len(Plans) == len(Prepared).
+	if len(txn.Prepared) != len(txn.Plans) {
+		return CommitReport{}, fmt.Errorf("commit: staged txn shape mismatch: %d plans vs %d prepared", len(txn.Plans), len(txn.Prepared))
+	}
+
+	// One clock read for the whole commit — every per-file AppliedAt
+	// and the aggregate CommittedAt share this instant so timestamps
+	// are monotonic within a single Commit call (F6).
+	now := c.cfg.now()
 
 	orderIdx := canonicalCommitOrder(txn.Plans)
 	perFile := make([]PerFileReport, len(txn.Plans))
@@ -629,6 +679,27 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 		plan := pf.Plan
 
 		if pf.Skipped || pf.DryRun {
+			// F8: for Skipped files, re-Stat the target and verify the
+			// pre-Stage fingerprint. A non-claudecm actor could have
+			// mutated the target between Stage and Commit even though
+			// we will not write it — the operator deserves to see that
+			// drift promoted to StatusFailed rather than a silent
+			// StatusUntouched. DryRun keeps the fast path: we are not
+			// writing, so drift does not compromise the report's
+			// honesty (the diff shown was against the Stage-time
+			// bytes; a DryRun over a since-modified file is still a
+			// truthful "here is what we WOULD have done, from that
+			// pre-Stage baseline").
+			if pf.Skipped {
+				curFP, curExists, cerr := storage.Stat(plan.Target)
+				if cerr != nil {
+					return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, cerr, now, false)
+				}
+				if driftErr := detectDrift(plan.Target, pf.Exists, pf.PreFingerprint, curExists, curFP); driftErr != nil {
+					wrapped := fmt.Errorf("external drift on skipped file: %w", driftErr)
+					return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, wrapped, now, false)
+				}
+			}
 			perFile[idx] = PerFileReport{
 				Target: plan.Target,
 				Status: StatusUntouched,
@@ -642,7 +713,7 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 					PreFingerprint:  pf.PreFingerprint,
 					PostFingerprint: pf.PreFingerprint,
 					Diff:            pf.Diff,
-					AppliedAt:       c.cfg.now(),
+					AppliedAt:       now,
 				},
 			}
 			continue
@@ -654,10 +725,10 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 		// and Commit.
 		curFP, curExists, cerr := storage.Stat(plan.Target)
 		if cerr != nil {
-			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, cerr)
+			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, cerr, now, false)
 		}
 		if driftErr := detectDrift(plan.Target, pf.Exists, pf.PreFingerprint, curExists, curFP); driftErr != nil {
-			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, driftErr)
+			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, driftErr, now, false)
 		}
 
 		// Publish. storage.AtomicWrite is the primitive writepath.Apply
@@ -668,7 +739,7 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 			MustNotExist: plan.MustNotExist,
 		})
 		if werr != nil {
-			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, werr)
+			return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, werr, now, false)
 		}
 
 		// Post-write reparse when Parser is present. Reparse failure
@@ -685,7 +756,9 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 		if plan.Parser != nil {
 			if rerr := reparseTarget(plan); rerr != nil {
 				errMsg := rerr.Error()
-				if rbErr := rollbackFile(txn.resolver, pf); rbErr != nil {
+				rbErr := rollbackFile(txn.resolver, pf)
+				failingRolledBack := rbErr == nil
+				if rbErr != nil {
 					errMsg = fmt.Sprintf("%v; rollback also failed: %v", rerr, rbErr)
 				}
 				perFile[idx] = PerFileReport{
@@ -694,7 +767,7 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 					Backup: pf.Backup,
 					Error:  errMsg,
 				}
-				return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, rerr)
+				return c.failCommit(canonPos, idx, orderIdx, txn, perFile, committedOrderPositions, rerr, now, failingRolledBack)
 			}
 		}
 
@@ -709,7 +782,7 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 				PreFingerprint:  pf.PreFingerprint,
 				PostFingerprint: postFP,
 				Diff:            pf.Diff,
-				AppliedAt:       c.cfg.now(),
+				AppliedAt:       now,
 			},
 		}
 		committedOrderPositions = append(committedOrderPositions, canonPos)
@@ -717,7 +790,7 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 
 	return CommitReport{
 		PerFile:     perFile,
-		CommittedAt: c.cfg.now(),
+		CommittedAt: now,
 	}, nil
 }
 
@@ -727,6 +800,18 @@ func (c *committer) Commit(ctx context.Context, txn StagedTxn) (CommitReport, er
 // every previously-committed file in reverse canonical order, marks
 // every not-yet-visited file as StatusUntouched, and returns a
 // *PartialFailure wrapping the CommitReport.
+//
+// The now parameter is captured once at the top of Commit and reused
+// for CommittedAt so a failed-commit report shares its parent's clock
+// read (F6). failingRolledBack signals whether the failing file's own
+// unwind ran (only true on the post-write reparse path where the file
+// was AtomicWritten and rollbackFile succeeded); it drives the
+// CommitReport.FailingFileRolledBack UX flag (F4).
+//
+// Rollback source: each per-file rollback restores from
+// PreparedFile.CurrentBytes captured under the flock at Stage time —
+// NOT from the on-disk backup file. See the package godoc "Rollback
+// source of truth" paragraph (F1).
 func (c *committer) failCommit(
 	canonPos int,
 	failedIdx int,
@@ -735,6 +820,8 @@ func (c *committer) failCommit(
 	perFile []PerFileReport,
 	committedOrderPositions []int,
 	cause error,
+	now time.Time,
+	failingRolledBack bool,
 ) (CommitReport, error) {
 	// Ensure the failed file has a row. Callers that pre-populated
 	// (post-write reparse path already set StatusFailed with the
@@ -752,9 +839,10 @@ func (c *committer) failCommit(
 	rolled := make([]string, 0, len(committedOrderPositions))
 
 	// Roll back previously-committed files in reverse canonical
-	// order. Each rollback restores from the backup this file
-	// captured during Stage; on the first-write case (Backup zero,
-	// Exists=false) rollback removes the target.
+	// order. Each rollback restores from the in-memory
+	// PreparedFile.CurrentBytes captured under the flock at Stage
+	// time; on the first-write case (Exists=false) rollback removes
+	// the target. The on-disk backup file is audit-only (F1).
 	for i := len(committedOrderPositions) - 1; i >= 0; i-- {
 		pos := committedOrderPositions[i]
 		idx := orderIdx[pos]
@@ -791,9 +879,10 @@ func (c *committer) failCommit(
 	}
 
 	report := CommitReport{
-		PerFile:     perFile,
-		CommittedAt: c.cfg.now(),
-		RolledBack:  len(rolled) > 0,
+		PerFile:               perFile,
+		CommittedAt:           now,
+		RolledBack:            len(rolled) > 0,
+		FailingFileRolledBack: failingRolledBack,
 	}
 	return report, &PartialFailure{
 		Report:     report,

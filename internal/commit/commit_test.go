@@ -10,6 +10,7 @@ package commit
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -319,6 +320,45 @@ func TestCommitPriority_TracksAdapterConstants(t *testing.T) {
 	}
 	if got := commitPriority(unknown); got != 3 {
 		t.Errorf("unknown tool: want priority 3, got %d", got)
+	}
+}
+
+// TestCommit_RefusesShapeMismatch pins the F2 defensive check: a
+// hand-crafted StagedTxn whose Plans and Prepared slices disagree on
+// length would previously panic at txn.Prepared[idx]. Commit now
+// refuses loudly with a "shape mismatch" error before indexing.
+func TestCommit_RefusesShapeMismatch(t *testing.T) {
+	// Real resolver required — the nil-resolver check runs first and
+	// would preempt the shape check otherwise.
+	// Build a Resolver bound to a fresh tempdir HOME. The commit
+	// never actually walks these paths; the shape check bails first.
+	r, err := storage.NewResolverWithHome(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	c := NewCommitter()
+	txn := StagedTxn{
+		Plans: []writepath.WritePlan{
+			{Tool: string(adapter.ToolClaudeCode), Target: "/tmp/x", NewContent: []byte("x")},
+			{Tool: string(adapter.ToolClaudeCode), Target: "/tmp/y", NewContent: []byte("y")},
+		},
+		// Only one PreparedFile → shape mismatch (2 plans vs 1
+		// prepared). Uses the exported hand-build path to force the
+		// check; real Stage always keeps these two slices aligned.
+		Prepared: []PreparedFile{
+			{Plan: writepath.WritePlan{Tool: string(adapter.ToolClaudeCode), Target: "/tmp/x"}},
+		},
+	}
+	// Peek into the shape-check via the unexported resolver field:
+	// hand-writing the resolver in an *_test.go file inside the same
+	// package is legal because commit_test.go is package commit.
+	txn.resolver = r
+	_, err = c.Commit(context.Background(), txn)
+	if err == nil {
+		t.Fatalf("Commit(shape mismatch): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "shape mismatch") {
+		t.Errorf("Commit err = %q, want to contain %q", err.Error(), "shape mismatch")
 	}
 }
 

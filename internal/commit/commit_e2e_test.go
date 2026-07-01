@@ -481,8 +481,12 @@ func TestCommit_DryRunNoWrites(t *testing.T) {
 
 func TestCommit_PartialFailureRollback(t *testing.T) {
 	// Setup two plans: codex auth.json (commits first, first-write)
-	// + claude settings.json (which we'll wire to fail post-write
-	// reparse via a Parser that rejects the new bytes).
+	// + claude settings.json (wired to fail post-write reparse via a
+	// content-based Parser that rejects specifically when it sees the
+	// plan's new bytes actually landed on disk — i.e. after
+	// AtomicWrite finishes. This avoids the earlier fragile call-count
+	// parser: reparse rejection now keys off deterministic content,
+	// not "third invocation" (F5).
 	r, home := newTestHome(t)
 	authPath := filepath.Join(home, ".codex", "auth.json")
 	settingsPath := filepath.Join(home, ".claude", "settings.json")
@@ -494,15 +498,33 @@ func TestCommit_PartialFailureRollback(t *testing.T) {
 		t.Fatalf("seed settings: %v", err)
 	}
 
-	// Parser that fails on the 3rd call: 1=parse current, 2=parse new
-	// (both during Stage), 3=post-write reparse (during Commit). This
-	// simulates a target whose bytes look valid to Stage's diff logic
-	// but that Claude Code's post-write reparse rejects for a reason
-	// the pre-write Parser could not have detected.
-	settingsParser := rejectOnNthCallParser(3)
+	newSettings := []byte(`{"env":{"K":"fresh"}}`)
+	// Content-based Parser: rejects only when the argument matches
+	// newSettings AND the on-disk target already equals newSettings.
+	// Stage's parse-new sees newSettings but disk still holds the
+	// seed → accept. Commit AtomicWrite lands newSettings on disk;
+	// the post-write reparse re-reads the target (= newSettings) and
+	// re-Parses it — now the disk-check matches, so the Parser
+	// rejects, forcing rollback. Deterministic and independent of
+	// how many times Stage happens to call the Parser.
+	settingsParser := writepath.ParserFunc(func(data []byte) (any, error) {
+		if bytes.Equal(data, newSettings) {
+			if onDisk, err := os.ReadFile(settingsPath); err == nil && bytes.Equal(onDisk, newSettings) {
+				return nil, errors.New("reject NEW content on post-write reparse")
+			}
+		}
+		if len(data) == 0 {
+			return map[string]any{}, nil
+		}
+		var v any
+		if err := json.Unmarshal(data, &v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	})
 
 	authPlan := codexAuthPlan(home, []byte(`{"OPENAI_API_KEY":"sk"}`), []string{"OPENAI_API_KEY"})
-	settingsPlan := claudeSettingsPlan(home, []byte(`{"env":{"K":"fresh"}}`), []string{"env.K"})
+	settingsPlan := claudeSettingsPlan(home, newSettings, []string{"env.K"})
 	settingsPlan.Parser = settingsParser
 
 	c := NewCommitter()
@@ -524,6 +546,11 @@ func TestCommit_PartialFailureRollback(t *testing.T) {
 	if !report.RolledBack {
 		t.Errorf("report.RolledBack = false, want true")
 	}
+	// F4: the failing file was AtomicWritten and then rolled back
+	// from CurrentBytes — FailingFileRolledBack must be true.
+	if !report.FailingFileRolledBack {
+		t.Errorf("report.FailingFileRolledBack = false, want true (post-write reparse rollback succeeded)")
+	}
 	// auth.json was committed first → rollback restored it (first-
 	// write case: file removed).
 	if _, err := os.Stat(authPath); !errors.Is(err, os.ErrNotExist) {
@@ -541,6 +568,116 @@ func TestCommit_PartialFailureRollback(t *testing.T) {
 	}
 	if settingsRow.Status != StatusFailed {
 		t.Errorf("settings row status = %q, want Failed", settingsRow.Status)
+	}
+}
+
+// TestStage_DuplicateTargetPlansCauseCommitFailure pins the documented
+// behavior for callers who pass multiple plans against the same target
+// (F3). Stage accepts them; Commit trips concurrent-edit drift on the
+// second plan because the first plan's write invalidated the second
+// plan's PreFingerprint.
+func TestStage_DuplicateTargetPlansCauseCommitFailure(t *testing.T) {
+	r, home := newTestHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	mkdirParent(t, settingsPath)
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"K":"seed"}}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Two plans on the SAME target with different NewContent — a
+	// caller who forgot to dedupe.
+	plan1 := claudeSettingsPlan(home, []byte(`{"env":{"K":"first"}}`), []string{"env.K"})
+	plan2 := claudeSettingsPlan(home, []byte(`{"env":{"K":"second"}}`), []string{"env.K"})
+
+	c := NewCommitter()
+	txn, err := c.Stage(context.Background(), r, []writepath.WritePlan{plan1, plan2})
+	if err != nil {
+		t.Fatalf("Stage(dup targets): unexpected error %v", err)
+	}
+	report, cerr := c.Commit(context.Background(), txn)
+	if cerr == nil {
+		t.Fatalf("Commit(dup targets): expected *PartialFailure, got nil")
+	}
+	var pf *PartialFailure
+	if !errors.As(cerr, &pf) {
+		t.Fatalf("Commit err type = %T; want *PartialFailure", cerr)
+	}
+	// Cause must be ErrConcurrentEdit — the first plan's write drove
+	// the second plan's PreFingerprint out of sync.
+	if !errors.Is(cerr, writepath.ErrConcurrentEdit) {
+		t.Errorf("cause = %v, want ErrConcurrentEdit", cerr)
+	}
+	// The SECOND plan's target is the failing file (the first plan
+	// committed successfully before drift was detected on the second
+	// pass against the same target). Both share the same Target so
+	// FailedFile == settingsPath.
+	if pf.FailedFile != settingsPath {
+		t.Errorf("FailedFile = %q, want %q", pf.FailedFile, settingsPath)
+	}
+	// The FIRST plan (index 0) was committed then rolled back.
+	if report.PerFile[0].Status != StatusRolledBack {
+		t.Errorf("first plan status = %q, want RolledBack", report.PerFile[0].Status)
+	}
+	// The SECOND plan (index 1) is the one that failed.
+	if report.PerFile[1].Status != StatusFailed {
+		t.Errorf("second plan status = %q, want Failed", report.PerFile[1].Status)
+	}
+}
+
+// TestCommit_SkippedFileDriftDetected verifies F8: a Skipped file
+// whose target is mutated externally between Stage and Commit is
+// promoted to StatusFailed rather than silently reported as Untouched.
+func TestCommit_SkippedFileDriftDetected(t *testing.T) {
+	r, home := newTestHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	mkdirParent(t, settingsPath)
+	body := []byte(`{"env":{"K":"seed"}}`)
+	if err := os.WriteFile(settingsPath, body, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Stage a plan whose NewContent equals the seed bytes → Skipped.
+	plan := claudeSettingsPlan(home, body, []string{"env.K"})
+	c := NewCommitter()
+	txn, err := c.Stage(context.Background(), r, []writepath.WritePlan{plan})
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if !txn.Prepared[0].Skipped {
+		t.Fatalf("expected Prepared[0].Skipped = true (byte-identical)")
+	}
+
+	// Simulate a non-claudecm actor mutating the target (bypasses the
+	// advisory flock). Sleep briefly so ModTime advances measurably
+	// even on filesystems with coarse mtime resolution.
+	time.Sleep(20 * time.Millisecond)
+	external := []byte(`{"env":{"K":"external"}}`)
+	if err := os.WriteFile(settingsPath, external, 0o600); err != nil {
+		t.Fatalf("external mutate: %v", err)
+	}
+
+	report, cerr := c.Commit(context.Background(), txn)
+	if cerr == nil {
+		t.Fatalf("Commit: expected *PartialFailure on skipped-file drift, got nil")
+	}
+	if !errors.Is(cerr, writepath.ErrConcurrentEdit) {
+		t.Errorf("cause = %v, want ErrConcurrentEdit", cerr)
+	}
+	if report.PerFile[0].Status != StatusFailed {
+		t.Errorf("skipped-drift status = %q, want Failed", report.PerFile[0].Status)
+	}
+	if !bytes.Contains([]byte(report.PerFile[0].Error), []byte("external drift on skipped file")) {
+		t.Errorf("Error = %q, want to contain %q", report.PerFile[0].Error, "external drift on skipped file")
+	}
+	// Skipped-drift failure did not write anything, so no rollback
+	// of the failing file — FailingFileRolledBack must be false.
+	if report.FailingFileRolledBack {
+		t.Errorf("FailingFileRolledBack = true, want false (skipped file was never written)")
+	}
+	// The external bytes remain on disk — commit did not touch them.
+	got, _ := os.ReadFile(settingsPath)
+	if !bytes.Equal(got, external) {
+		t.Errorf("target bytes = %q, want external %q (Skipped path must not write)", got, external)
 	}
 }
 
@@ -818,12 +955,19 @@ func TestCommit_ConcurrentEditAborts(t *testing.T) {
 		t.Fatalf("external mutate: %v", err)
 	}
 
-	_, cerr := c.Commit(context.Background(), txn)
+	report, cerr := c.Commit(context.Background(), txn)
 	if cerr == nil {
 		t.Fatalf("Commit: want *PartialFailure, got nil")
 	}
 	if !errors.Is(cerr, writepath.ErrConcurrentEdit) {
 		t.Fatalf("Commit err = %v, want ErrConcurrentEdit", cerr)
+	}
+	// F4: concurrent-edit is detected before AtomicWrite, so no
+	// rollback of the failing file was needed — FailingFileRolledBack
+	// stays false. Distinguishes this case from the post-write-reparse
+	// path where the failing file gets AtomicWritten then restored.
+	if report.FailingFileRolledBack {
+		t.Errorf("report.FailingFileRolledBack = true, want false (nothing was written)")
 	}
 }
 
@@ -893,6 +1037,10 @@ func TestCommit_PartialFailureWithUntouched(t *testing.T) {
 	}
 	if len(pf.RolledBack) != 1 || pf.RolledBack[0] != authPath {
 		t.Errorf("RolledBack = %v, want [%q]", pf.RolledBack, authPath)
+	}
+	// F4: config.toml's own post-write reparse rollback ran → true.
+	if !report.FailingFileRolledBack {
+		t.Errorf("report.FailingFileRolledBack = false, want true")
 	}
 	// PerFile lookup (Plans-order): [0]=auth, [1]=config, [2]=settings.
 	if report.PerFile[0].Status != StatusRolledBack {
