@@ -11,9 +11,27 @@ jobs:
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cascade-cancel siblings: a single-cell failure was masking the
+      # true state of the matrix and producing red rollups for jobs that
+      # actually pass. Let every cell run to completion so real failures are
+      # not conflated with fail-fast collateral.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         go-version: ['1.21', '1.22', '1.23']
+        exclude:
+          # macos-latest is currently macos-26-arm64 (Tahoe), whose dyld
+          # strictly requires LC_UUID in every Mach-O binary. Go 1.21's
+          # linker omits LC_UUID for some small test binaries (see
+          # golang/go#64207); the fix was backported to 1.22 and 1.23 but
+          # NOT to 1.21 (EOL Aug 2024). We still want to exercise Go 1.21
+          # on macOS, so we run that cell on macos-14 (Sonoma) below,
+          # whose dyld tolerates the missing load command.
+          - os: macos-latest
+            go-version: '1.21'
+        include:
+          - os: macos-14
+            go-version: '1.21'
 
     steps:
     - name: Checkout code
