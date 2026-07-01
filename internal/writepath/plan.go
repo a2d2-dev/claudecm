@@ -159,14 +159,34 @@ type KeyDelta struct {
 // WriteReport describes what Apply actually did on a single file.
 // Corresponds to the story's ApplyReport; renamed for clarity relative
 // to the two-phase CommitReport that wraps a slice of these.
+//
+// Behaviour of the fingerprint/backup fields under the error return
+// paths that DO preserve a partial report:
+//
+//   - RolledBack=true (E2-S3, post-write reparse failure with successful
+//     rollback): PostFingerprint reflects the on-disk state after
+//     rollback (fresh Stat of the restored file, or the zero
+//     Fingerprint if a first-write rollback removed the target). Backup
+//     is populated for the overwrite case and zero for the first-write
+//     case; PreFingerprint carries the pre-write snapshot for audit.
+//
+//   - ErrConcurrentEdit (E2-S4, step-9 drift detection): the write was
+//     refused before AtomicWrite fired. Backup is populated (the
+//     backup file remains on disk under ~/.claudecm/backups so
+//     operators can inspect what pre-write state we captured);
+//     PreFingerprint is the now-stale snapshot; PostFingerprint is the
+//     zero Fingerprint — nothing was written. On the first-write drift
+//     variant (pre-write !exists, current exists) Backup is also zero
+//     because storage.Backup returned ErrNothingToBackup in step 7.
+//     RolledBack stays false — there is nothing to roll back.
 type WriteReport struct {
 	Tool            string
 	Target          string
 	DryRun          bool
 	Skipped         bool                 // no-op: current bytes already match intent
-	Backup          storage.BackupRecord // zero value on skipped/dry-run/first-write
+	Backup          storage.BackupRecord // zero value on skipped/dry-run/first-write; retained on ErrConcurrentEdit for audit
 	PreFingerprint  storage.Fingerprint  // captured under lock before write
-	PostFingerprint storage.Fingerprint  // reflects the file as it exists on disk after Apply returns (may be zero for removed / dry-run)
+	PostFingerprint storage.Fingerprint  // reflects the file as it exists on disk after Apply returns (may be zero for removed / dry-run / drift-aborted)
 	Diff            DiffResult
 	AppliedAt       time.Time
 

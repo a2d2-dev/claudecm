@@ -1130,6 +1130,47 @@ func TestApply_SkipsIdenticalReparseNotAttempted(t *testing.T) {
 	}
 }
 
+// TestApply_DriftDetection_NoExternalWrite pins the E2-S4 happy path:
+// when nothing mutates the target between the step-3 read and the
+// step-9 drift-check Stat, Apply proceeds through AtomicWrite as
+// normal and returns no ErrConcurrentEdit. Regression baseline for the
+// drift check — a stray Stat-comparison bug (e.g. always-different
+// ModTime because Lstat's tv_nsec was truncated) would fail here on
+// every write, not just the concurrent-edit tests. Runs in the untagged
+// build so the drift-check path is exercised without the test-only
+// mutation hook.
+func TestApply_DriftDetection_NoExternalWrite(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	if err := os.WriteFile(target, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	newBytes := []byte(`{"model":"opus"}`)
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: newBytes,
+		Parser:     jsonParser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v; want nil (no external mutation)", err)
+	}
+	if errors.Is(err, ErrConcurrentEdit) {
+		t.Fatalf("err wraps ErrConcurrentEdit; want no drift on clean run")
+	}
+	if report.PostFingerprint.SHA256 == "" {
+		t.Fatalf("PostFingerprint.SHA256 empty; want hash of new bytes")
+	}
+	got, _ := os.ReadFile(target)
+	if !reflect.DeepEqual(got, newBytes) {
+		t.Fatalf("bytes = %q; want %q", got, newBytes)
+	}
+}
+
 // TestApply_ConcurrentSerialization pins that WithLock serializes two
 // Apply calls against the same target: both succeed, the winner's
 // bytes are on disk, and exactly one backup exists (the second call
