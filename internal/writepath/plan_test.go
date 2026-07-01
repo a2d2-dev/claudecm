@@ -1,9 +1,9 @@
 package writepath
 
 import (
-	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -30,12 +30,29 @@ func TestValidatePlan_NonAbsoluteTarget(t *testing.T) {
 
 func TestValidatePlan_OwnedKeysEmptyString(t *testing.T) {
 	err := ValidatePlan(WritePlan{
-		Tool:      "codex",
-		Target:    "/tmp/x",
-		OwnedKeys: []string{"model", ""},
+		Tool:       "codex",
+		Target:     "/tmp/x",
+		NewContent: []byte("{}"),
+		OwnedKeys:  []string{"model", ""},
 	})
 	if !errors.Is(err, ErrPlanInvalid) {
 		t.Fatalf("want ErrPlanInvalid, got %v", err)
+	}
+}
+
+func TestValidatePlan_NoTransformNoNewContent(t *testing.T) {
+	// A plan with neither Transform nor NewContent would silently
+	// truncate the target on Apply. ValidatePlan must refuse. Names
+	// both fields in the error message so the caller knows to set one.
+	err := ValidatePlan(WritePlan{
+		Tool:   "codex",
+		Target: "/tmp/x",
+	})
+	if !errors.Is(err, ErrPlanInvalid) {
+		t.Fatalf("want ErrPlanInvalid, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Transform") || !strings.Contains(err.Error(), "NewContent") {
+		t.Fatalf("error message = %q; want it to name both Transform and NewContent", err.Error())
 	}
 }
 
@@ -55,9 +72,10 @@ func TestValidatePlan_TransformAndNewContentBothSetIsAccepted(t *testing.T) {
 
 func TestValidatePlan_Valid(t *testing.T) {
 	err := ValidatePlan(WritePlan{
-		Tool:      "codex",
-		Target:    "/home/user/.codex/config.toml",
-		OwnedKeys: []string{"model", "model_provider"},
+		Tool:       "codex",
+		Target:     "/home/user/.codex/config.toml",
+		NewContent: []byte("model = \"opus\"\n"),
+		OwnedKeys:  []string{"model", "model_provider"},
 	})
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
@@ -66,9 +84,11 @@ func TestValidatePlan_Valid(t *testing.T) {
 
 func TestValidatePlan_MinimalValid(t *testing.T) {
 	// Empty OwnedKeys is legal — some rare adapters may own nothing.
+	// NewContent is required to escape the F3 no-content guard.
 	err := ValidatePlan(WritePlan{
-		Tool:   "claudecode",
-		Target: "/home/user/.claude/settings.json",
+		Tool:       "claudecode",
+		Target:     "/home/user/.claude/settings.json",
+		NewContent: []byte("{}"),
 	})
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
@@ -92,51 +112,59 @@ func TestValidatePlan_Hardening(t *testing.T) {
 			// against future refactors that might loosen the absolute-path
 			// invariant. This case pins the accepted behavior.
 			name:    "dotdot_collapsed_by_clean_is_accepted",
-			plan:    WritePlan{Tool: "codex", Target: "/home/user/../etc/passwd"},
+			plan:    WritePlan{Tool: "codex", Target: "/home/user/../etc/passwd", NewContent: []byte("{}")},
 			wantErr: false,
 		},
 		{
 			name:    "leading_dotdot_collapsed_at_root_is_accepted",
-			plan:    WritePlan{Tool: "codex", Target: "/../etc/passwd"},
+			plan:    WritePlan{Tool: "codex", Target: "/../etc/passwd", NewContent: []byte("{}")},
 			wantErr: false,
 		},
 		{
 			name:    "target_contains_nul",
-			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\x00bar"},
+			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\x00bar", NewContent: []byte("{}")},
 			wantErr: true,
 		},
 		{
 			name:    "target_contains_newline",
-			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\nbar"},
+			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\nbar", NewContent: []byte("{}")},
 			wantErr: true,
 		},
 		{
 			name:    "target_contains_cr",
-			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\rbar"},
+			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\rbar", NewContent: []byte("{}")},
 			wantErr: true,
 		},
 		{
 			name:    "target_contains_tab",
-			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\tbar"},
+			plan:    WritePlan{Tool: "codex", Target: "/tmp/foo\tbar", NewContent: []byte("{}")},
 			wantErr: true,
 		},
 		{
 			name: "duplicate_owned_keys",
 			plan: WritePlan{
-				Tool:      "codex",
-				Target:    "/tmp/x",
-				OwnedKeys: []string{"model", "provider", "model"},
+				Tool:       "codex",
+				Target:     "/tmp/x",
+				NewContent: []byte("{}"),
+				OwnedKeys:  []string{"model", "provider", "model"},
 			},
 			wantErr: true,
 		},
 		{
 			name: "case_sensitive_duplicate_is_not_duplicate",
 			plan: WritePlan{
-				Tool:      "codex",
-				Target:    "/tmp/x",
-				OwnedKeys: []string{"Model", "model"},
+				Tool:       "codex",
+				Target:     "/tmp/x",
+				NewContent: []byte("{}"),
+				OwnedKeys:  []string{"Model", "model"},
 			},
 			wantErr: false,
+		},
+		{
+			// F3: both nil means silent zero-byte truncation. Refuse.
+			name:    "no_transform_and_no_newcontent",
+			plan:    WritePlan{Tool: "codex", Target: "/tmp/x"},
+			wantErr: true,
 		},
 	}
 	for _, tc := range cases {
@@ -445,22 +473,6 @@ func TestDiff_DeterministicOrdering(t *testing.T) {
 	}
 }
 
-func TestApply_StubReturnsNotImplemented(t *testing.T) {
-	// E2-S1 ships only the signature. The stub must return a typed
-	// sentinel so callers can compile against Apply without accidentally
-	// treating a nil error as success. E2-S2 replaces this test.
-	report, err := Apply(context.Background(), nil, WritePlan{
-		Tool:   "codex",
-		Target: "/tmp/does-not-matter",
-	})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("Apply err = %v; want wraps ErrNotImplemented", err)
-	}
-	if !reflect.DeepEqual(report, WriteReport{}) {
-		t.Fatalf("Apply report = %+v; want zero WriteReport", report)
-	}
-}
-
 func TestParserFunc_ImplementsParser(t *testing.T) {
 	// Guard against accidental interface drift.
 	var p Parser = ParserFunc(func(data []byte) (any, error) {
@@ -491,7 +503,6 @@ func TestSentinels_AllDistinct(t *testing.T) {
 		ErrRollbackFailed,
 		ErrDryRunUnownedTouched,
 		ErrFlattenInvalidKey,
-		ErrNotImplemented,
 	}
 	for i, a := range sentinels {
 		for j, b := range sentinels {

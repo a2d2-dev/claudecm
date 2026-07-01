@@ -59,6 +59,9 @@ jobs:
       with:
         go-version: '1.21'
 
+    - name: os.Rename discipline
+      run: bash scripts/lint-osrename.sh
+
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v4
       with:
