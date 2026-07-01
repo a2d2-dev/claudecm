@@ -4,8 +4,8 @@ package envextract_test
 // ExtractCurrentEnv / ToProfile / HasAuthToken / getEnvWithDefault
 // helpers. Those helpers exist because cmd/add still calls
 // ExtractCurrentEnv for the brownfield bootstrap (see cmd/add.go);
-// they are not part of the new Lookup/Snapshot/AllExtantMatching
-// API but must stay covered so the package meets the ≥90%
+// they are not part of the new Lookup API but must stay covered so
+// the package meets the ≥90%
 // coverage bar E5-S3 sets on internal/envextract.
 
 import (

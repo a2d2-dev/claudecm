@@ -10,10 +10,10 @@ import "os"
 // split (symmetric with storage.atomic_syncfunc_testhook.go).
 var lookupFunc = os.LookupEnv
 
-// SetLookupForTest replaces the lookupFunc used by Lookup / Snapshot /
-// AllExtantMatching for the duration of a test. It returns a restore
-// closure the test must defer to put the production function back.
-// Only compiled with `-tags=test`.
+// SetLookupForTest replaces the lookupFunc used by Lookup for the
+// duration of a test. It returns a restore closure the test must
+// defer to put the production function back. Only compiled with
+// `-tags=test`.
 //
 // Substitution is process-global for the duration of the swap — parallel
 // tests that share the seam must coordinate through this restore

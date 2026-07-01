@@ -24,8 +24,7 @@ func TestSetLookupForTest_SubstitutesAndRestores(t *testing.T) {
 	}
 
 	// Substitute a fake universe that resolves the baseline name to
-	// a known value, and confirm Lookup / Snapshot both route through
-	// the fake.
+	// a known value, and confirm Lookup routes through the fake.
 	called := 0
 	restore := envextract.SetLookupForTest(func(name string) (string, bool) {
 		called++
@@ -42,16 +41,8 @@ func TestSetLookupForTest_SubstitutesAndRestores(t *testing.T) {
 	if _, ok := envextract.Lookup("SOMETHING_ELSE"); ok {
 		t.Fatalf("under seam: fake resolved SOMETHING_ELSE; want absent")
 	}
-	// Snapshot also routes through the seam.
-	snap := envextract.Snapshot([]string{baselineName, "SOMETHING_ELSE"})
-	if snap[baselineName] != "seamed" {
-		t.Fatalf("under seam: Snapshot missing seamed entry; got=%v", snap)
-	}
-	if _, present := snap["SOMETHING_ELSE"]; present {
-		t.Fatalf("under seam: Snapshot wrongly included absent entry")
-	}
-	if called < 3 {
-		t.Fatalf("under seam: fake lookup call count=%d, want >=3", called)
+	if called < 2 {
+		t.Fatalf("under seam: fake lookup call count=%d, want >=2", called)
 	}
 
 	// Restore and confirm the baseline behaviour returns.

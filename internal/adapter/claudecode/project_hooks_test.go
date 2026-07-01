@@ -2,7 +2,7 @@
 
 package claudecode_test
 
-// project_test_hooks.go — E3-S6, migrated to the shared envextract
+// project_hooks_test.go — E3-S6, migrated to the shared envextract
 // seam in E5-S3. Tests here exercise layer-precedence paths that
 // require injecting a synthetic env-var universe via the build-tag
 // seam (envextract.SetLookupForTest). Compiled only under `-tags=test`;
