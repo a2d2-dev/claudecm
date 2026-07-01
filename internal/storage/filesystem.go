@@ -77,15 +77,10 @@ func (fs *FileStorage) SaveProfile(profile *config.Profile) error {
 		return fmt.Errorf("failed to marshal profile: %w", err)
 	}
 
-	// Atomic write: write to temp file then rename
-	tmpPath := profilePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, profilePath); err != nil {
-		os.Remove(tmpPath) // Clean up temp file on error
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	// Route through the single atomic-write primitive (E1-S3). All fsync +
+	// rename + mode re-assertion logic lives there.
+	if _, err := AtomicWrite(fs.r, profilePath, data, AtomicWriteOptions{Mode: 0600}); err != nil {
+		return fmt.Errorf("failed to write profile: %w", err)
 	}
 
 	return nil
@@ -219,15 +214,9 @@ func (fs *FileStorage) SaveState(state *config.State) error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Atomic write
-	tmpPath := statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, statePath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename temp file: %w", err)
+	// Route through the atomic-write primitive (E1-S3).
+	if _, err := AtomicWrite(fs.r, statePath, data, AtomicWriteOptions{Mode: 0600}); err != nil {
+		return fmt.Errorf("failed to write state: %w", err)
 	}
 
 	return nil
