@@ -286,23 +286,3 @@ func TestResolver_LexicalToolConfigPath(t *testing.T) {
 	}
 }
 
-func TestResolver_EnsureConfigDir_CreatesLayout(t *testing.T) {
-	home := t.TempDir()
-	r := mustResolver(t, home)
-
-	if err := r.EnsureConfigDir(); err != nil {
-		t.Fatalf("EnsureConfigDir = %v", err)
-	}
-	for _, sub := range []string{ConfigDirName, filepath.Join(ConfigDirName, ProfilesDirName)} {
-		info, err := os.Stat(filepath.Join(home, sub))
-		if err != nil {
-			t.Fatalf("stat %s: %v", sub, err)
-		}
-		if !info.IsDir() {
-			t.Fatalf("%s is not a directory", sub)
-		}
-		if perm := info.Mode().Perm(); perm != 0700 {
-			t.Fatalf("%s mode = %o; want 0700", sub, perm)
-		}
-	}
-}

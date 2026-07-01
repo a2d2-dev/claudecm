@@ -11,15 +11,15 @@ import (
 	"time"
 )
 
-// backupHome mirrors atomicHome: t.TempDir HOME, EnsureConfigDir'd, ready
+// backupHome mirrors atomicHome: t.TempDir HOME, Bootstrap'd, ready
 // for Backup to write into backups/<tool>/. Kept small so each test can
 // build its own sandbox without touching a real user HOME.
 func backupHome(t *testing.T) (*Resolver, string) {
 	t.Helper()
 	home := t.TempDir()
 	r := mustResolver(t, home)
-	if err := r.EnsureConfigDir(); err != nil {
-		t.Fatalf("EnsureConfigDir: %v", err)
+	if err := Bootstrap(r); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
 	}
 	return r, home
 }

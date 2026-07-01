@@ -1,13 +1,24 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrNotBootstrapped is returned by SaveProfile / SaveState when the
+// `~/.claudecm/` tree does not yet exist. The write path deliberately does
+// NOT lazily create the dir — Bootstrap owns that responsibility (and owns
+// the mode-0700 enforcement). A lazy mkdir here would silently produce a
+// dir at whatever the process umask allows, violating NFR-S4. Refusing
+// loudly makes a forgotten Bootstrap a fast failure at the cmd/* wiring
+// layer instead of a mode drift in production.
+var ErrNotBootstrapped = errors.New("claudecm: storage not bootstrapped; call storage.Bootstrap first")
 
 // All filesystem paths in this file are constructed through *Resolver
 // (paths.go). Do NOT reintroduce inline filepath.Join over user input here —
@@ -51,15 +62,11 @@ func NewFileStorage(r *Resolver) *FileStorage {
 	return &FileStorage{r: r}
 }
 
-// SaveProfile writes a profile to disk atomically
+// SaveProfile writes a profile to disk atomically. It requires Bootstrap to
+// have been called; the write path does not lazily create `~/.claudecm/`.
 func (fs *FileStorage) SaveProfile(profile *config.Profile) error {
 	if profile == nil {
 		return fmt.Errorf("profile cannot be nil")
-	}
-
-	// Ensure config directory exists
-	if err := fs.r.EnsureConfigDir(); err != nil {
-		return fmt.Errorf("failed to ensure config directory: %w", err)
 	}
 
 	// ProfilePath validates the profile name (NFR-S5), refuses traversal,
@@ -68,6 +75,14 @@ func (fs *FileStorage) SaveProfile(profile *config.Profile) error {
 	profilePath, err := fs.r.ProfilePath(profile.Name)
 	if err != nil {
 		return fmt.Errorf("failed to get profile path: %w", err)
+	}
+
+	// Assert the Bootstrap invariant instead of repairing it. A missing
+	// parent means someone forgot to call storage.Bootstrap at the cmd/*
+	// entry point — repair silently would swallow the bug and produce a
+	// dir at the process umask instead of 0700.
+	if _, err := os.Stat(filepath.Dir(profilePath)); errors.Is(err, os.ErrNotExist) {
+		return ErrNotBootstrapped
 	}
 
 	// Marshal to YAML through the schema gateway so schema_version is always
@@ -192,20 +207,21 @@ func (fs *FileStorage) ProfileExists(name string) (bool, error) {
 	return false, err
 }
 
-// SaveState writes the state file atomically
+// SaveState writes the state file atomically. It requires Bootstrap to have
+// been called; the write path does not lazily create `~/.claudecm/`.
 func (fs *FileStorage) SaveState(state *config.State) error {
 	if state == nil {
 		return fmt.Errorf("state cannot be nil")
 	}
 
-	// Ensure config directory exists
-	if err := fs.r.EnsureConfigDir(); err != nil {
-		return fmt.Errorf("failed to ensure config directory: %w", err)
-	}
-
 	statePath, err := fs.r.StatePath()
 	if err != nil {
 		return fmt.Errorf("failed to get state path: %w", err)
+	}
+
+	// Assert the Bootstrap invariant instead of repairing it (see SaveProfile).
+	if _, err := os.Stat(filepath.Dir(statePath)); errors.Is(err, os.ErrNotExist) {
+		return ErrNotBootstrapped
 	}
 
 	// Marshal to YAML

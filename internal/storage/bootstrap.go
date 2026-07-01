@@ -12,9 +12,16 @@
 // call Bootstrap(r) after constructing the Resolver and before any
 // FileStorage operation. Tests that only exercise path resolution do not
 // touch the filesystem.
+//
+// Bootstrap contract: SaveProfile / SaveState require Bootstrap to have been
+// called; they refuse to write into a non-existent .claudecm/ tree. There is
+// no lazy dir creation on the write path — the invariant "Bootstrap ran" is
+// asserted, not repaired, so a forgotten Bootstrap fails loudly instead of
+// silently creating a dir with the wrong mode.
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -24,6 +31,13 @@ import (
 // pre-existing at a looser mode gets chmod'd down to it. NFR-S4 declares the
 // invariant; this constant makes it grep-able.
 const bootstrapDirMode os.FileMode = 0700
+
+// ErrSymlinkedSubdir is returned by Bootstrap when a would-be layout
+// subdirectory (e.g. `~/.claudecm/profiles`) already exists as a symlink.
+// A chmod on a symlink follows the link and would tighten permissions on
+// whatever the attacker aimed the symlink at — potentially outside HOME.
+// Refusing is the only safe move.
+var ErrSymlinkedSubdir = errors.New("claudecm: layout subdir is a symlink; refusing to chmod")
 
 // Bootstrap ensures the on-disk layout under ~/.claudecm/ exists at the modes
 // the architecture requires. It is idempotent: two consecutive calls produce
@@ -45,10 +59,9 @@ const bootstrapDirMode os.FileMode = 0700
 // threat vector (see TestBootstrap_ExistingDirsWithLooseMode); ignoring it
 // would silently violate NFR-S4.
 //
-// Bootstrap does not re-validate HOME — the Resolver constructor
-// (NewResolver / NewResolverWithHome) already refuses HOME=/, missing dirs,
-// non-directory targets, and root-owned dirs when running non-root. Anything
-// that made it into a *Resolver is safe to write into.
+// Bootstrap does not re-validate HOME; the Resolver constructor already
+// validates HOME. Bootstrap validates and creates the .claudecm/ subdirs
+// with mode 0700, refusing on symlinked subdirs.
 func Bootstrap(r *Resolver) error {
 	if r == nil {
 		return fmt.Errorf("storage.Bootstrap: nil resolver")
@@ -66,18 +79,25 @@ func Bootstrap(r *Resolver) error {
 }
 
 // ensureDirMode is the shared mkdir-then-chmod primitive. It creates dir if
-// missing, then re-asserts mode regardless of pre-existing state. The chmod
-// is unconditional so a pre-existing 0755 directory is tightened to the
-// requested mode on every call; on the happy path where the directory is
-// already at mode, chmod is a no-op syscall and the second call is
-// idempotent in observable behavior.
+// missing, then re-asserts mode. To defeat a symlink attack where an attacker
+// pre-plants `~/.claudecm/profiles -> /etc` and MkdirAll happily follows it,
+// ensureDirMode uses os.Lstat (not os.Stat) after MkdirAll and refuses when
+// the entry is a symlink — chmod on a symlink would follow the link and
+// tighten permissions on whatever the attacker aimed at, potentially outside
+// HOME. chmod is applied only when the observed mode differs from the target,
+// preserving mtime on the happy path.
 func ensureDirMode(dir string, mode os.FileMode) error {
 	if err := os.MkdirAll(dir, mode); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	info, err := os.Stat(dir)
+	// os.Lstat (not os.Stat) so a symlink is reported as a symlink instead of
+	// silently followed to its target's stat.
+	info, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", dir, err)
+		return fmt.Errorf("lstat %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", ErrSymlinkedSubdir, dir)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("%s exists but is not a directory", dir)

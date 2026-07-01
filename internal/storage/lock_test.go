@@ -18,8 +18,8 @@ func lockHome(t *testing.T) (*Resolver, string) {
 	t.Helper()
 	home := t.TempDir()
 	r := mustResolver(t, home)
-	if err := r.EnsureConfigDir(); err != nil {
-		t.Fatalf("EnsureConfigDir: %v", err)
+	if err := Bootstrap(r); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
 	}
 	return r, home
 }

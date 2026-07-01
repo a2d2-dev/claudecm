@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -179,5 +180,54 @@ func TestBootstrap_RefusesOutsideHome(t *testing.T) {
 	}
 	if _, err := NewResolverWithHome("relative"); err == nil {
 		t.Fatal(`NewResolverWithHome("relative") = nil; want refuse before Bootstrap`)
+	}
+}
+
+// TestBootstrap_RefusesSymlinkedSubdir covers the symlink-attack vector: an
+// attacker pre-plants `~/.claudecm/profiles` as a symlink pointing outside
+// HOME (e.g. at /etc). If Bootstrap naively os.Chmod'd the entry, chmod
+// would follow the symlink and tighten permissions on the attacker's target
+// — potentially escalating access outside HOME. Bootstrap must refuse and
+// must NOT chmod the outside target.
+func TestBootstrap_RefusesSymlinkedSubdir(t *testing.T) {
+	home := t.TempDir()
+	r := mustResolver(t, home)
+
+	// Pre-create ~/.claudecm/ (0700), then plant profiles/ as a symlink
+	// pointing to a directory outside HOME. We record that target's mode so
+	// we can assert Bootstrap did not touch it.
+	if err := os.MkdirAll(r.ConfigDir(), 0o700); err != nil {
+		t.Fatalf("pre-mkdir ConfigDir: %v", err)
+	}
+	outside := t.TempDir() // separate from HOME
+	if err := os.Chmod(outside, 0o755); err != nil {
+		t.Fatalf("pre-chmod outside: %v", err)
+	}
+	beforeInfo, err := os.Stat(outside)
+	if err != nil {
+		t.Fatalf("stat outside: %v", err)
+	}
+	beforeMode := beforeInfo.Mode().Perm()
+
+	if err := os.Symlink(outside, r.ProfilesDir()); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", r.ProfilesDir(), outside, err)
+	}
+
+	err = Bootstrap(r)
+	if err == nil {
+		t.Fatal("Bootstrap(symlinked profiles) = nil; want refusal")
+	}
+	if !errors.Is(err, ErrSymlinkedSubdir) {
+		t.Fatalf("Bootstrap error = %v; want ErrSymlinkedSubdir", err)
+	}
+
+	// The critical safety property: the outside target must NOT have been
+	// chmod'd. If chmod had followed the symlink it would now be 0700.
+	afterInfo, err := os.Stat(outside)
+	if err != nil {
+		t.Fatalf("stat outside (after): %v", err)
+	}
+	if got := afterInfo.Mode().Perm(); got != beforeMode {
+		t.Fatalf("outside %s mode changed: before=%#o after=%#o; symlink was followed", outside, beforeMode, got)
 	}
 }
