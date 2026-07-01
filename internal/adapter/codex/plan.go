@@ -121,6 +121,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/tidwall/gjson"
@@ -508,21 +509,32 @@ func jsonParser() writepath.Parser {
 }
 
 // tomlParser returns a writepath.Parser that Loads TOML bytes into
-// a flat map[string]any keyed by codextoml.Doc.Keys() with values
-// pulled through Doc.Get. Used by the config.toml WritePlan so
-// writepath.Apply's Diff (flat-key semantics) and reparse steps
-// work.
+// a NESTED map[string]any built from codextoml.Doc.Keys() + Doc.Get.
+// Used by the config.toml WritePlan so writepath.Apply's Diff
+// (flat-key semantics) and reparse steps work.
 //
-// Design note. writepath.Apply flattens the parser's return value
-// via writepath.Flatten before diffing. Returning a nested
-// map[string]any would let Flatten do the walking, but the Doc
-// wrapper already exposes exactly the flat-key view we need via
-// Doc.Keys() + Doc.Get(), and re-nesting keys like
-// "model_providers.openai.base_url" back into a map[string]any
-// tree would either (a) duplicate the flatten/unflatten dance or
-// (b) trip Flatten's escape rules for a dot inside a key name.
-// Returning the flat map directly is simpler and lets Diff operate
-// on the exact key shape OwnedKeysConfigTOML lists.
+// Design note. writepath.Apply feeds the parser's return value to
+// writepath.Flatten before diffing against plan.OwnedKeys. Flatten
+// expects a nested map[string]any tree and walks it, joining path
+// segments with '.' and escaping any literal '.' or '\' inside a
+// single segment. OwnedKeysConfigTOML lists dotted paths as their
+// UNESCAPED nested form (e.g. "model_providers.openai.base_url"),
+// so the parser MUST hand Flatten a nested tree — a flat
+// map[string]any keyed by "model_providers.openai.base_url" would
+// be re-escaped by Flatten to "model_providers\.openai\.base_url"
+// and miss the allowlist entirely, tripping TouchesUnowned=true on
+// every legitimate nested-key change. That was the E4-S7 bug this
+// hotfix repairs.
+//
+// The Doc's own Keys() returns flat dotted paths (Doc's package
+// contract), so we unflatten them here into the nested shape
+// Flatten expects. Non-dotted top-level keys (e.g. "model") land
+// as leaves at the root; dotted keys grow intermediate
+// map[string]any tables. Codex config.toml keys never contain
+// literal dots or backslashes in a single segment (owned or
+// unowned) — the Doc wrapper splits on '.' unconditionally
+// (codex/toml/doc.go Set/Get docs) — so no escape handling is
+// needed on the unflatten side.
 //
 // Symmetric with the auth-side parser: empty or whitespace-only
 // input returns (nil, nil) so writepath.Apply's first-write path
@@ -542,10 +554,53 @@ func tomlParser() writepath.Parser {
 			if !ok {
 				continue
 			}
-			out[k] = v
+			if err := assignNested(out, k, v); err != nil {
+				return nil, err
+			}
 		}
 		return out, nil
 	})
+}
+
+// assignNested places value at the dotted path inside root, creating
+// intermediate map[string]any tables as needed. Path segments are
+// split on '.' — matching codextoml.Doc's own path convention. If a
+// prefix collides with a non-map value (i.e. the same segment path
+// was previously assigned a scalar), the assignment returns an
+// error to expose the malformed shape rather than silently
+// overwriting the earlier leaf.
+//
+// This is only used by tomlParser; it is intentionally NOT exported
+// or shared with writepath.Flatten. Its contract is narrow: undo
+// the Doc's Keys() flat view so writepath.Flatten can re-flatten
+// back to the same dotted keys that OwnedKeysConfigTOML lists.
+func assignNested(root map[string]any, path string, value any) error {
+	if path == "" {
+		return fmt.Errorf("codex plan: assignNested: empty path")
+	}
+	segs := strings.Split(path, ".")
+	cur := root
+	for i, seg := range segs[:len(segs)-1] {
+		next, ok := cur[seg]
+		if !ok {
+			nm := make(map[string]any)
+			cur[seg] = nm
+			cur = nm
+			continue
+		}
+		nm, ok := next.(map[string]any)
+		if !ok {
+			return fmt.Errorf("codex plan: assignNested: path %q collides with non-map value at prefix %q",
+				path, strings.Join(segs[:i+1], "."))
+		}
+		cur = nm
+	}
+	leaf := segs[len(segs)-1]
+	if _, exists := cur[leaf]; exists {
+		return fmt.Errorf("codex plan: assignNested: duplicate leaf %q at path %q", leaf, path)
+	}
+	cur[leaf] = value
+	return nil
 }
 
 // copyStrings returns a fresh copy of s so the returned WritePlan
