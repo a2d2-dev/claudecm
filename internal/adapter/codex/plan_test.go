@@ -904,8 +904,11 @@ func TestPlan_JSONParserDirectBehaviour(t *testing.T) {
 func TestPlan_TOMLParserDirectBehaviour(t *testing.T) {
 	// Direct exercise of tomlParser via a Plan-produced
 	// WritePlan.Parser. Covers empty short-circuit, parse-error
-	// path, and Keys/Get round-trip. Also lets us confirm the
-	// flat-key shape the Diff pipeline consumes.
+	// path, and the nested-map shape produced by the fixed
+	// parser. The nested output is what writepath.Flatten walks
+	// to produce the flat-key form OwnedKeysConfigTOML lists;
+	// see plan.go tomlParser godoc for why nested (not flat) is
+	// the correct contract.
 	r := newResolver(t)
 	plans := runPlan(t, r, config.Profile{Name: "p", Core: config.CoreConfig{APIKey: "sk"}})
 	configPlan := findPlanByTarget(t, plans, codex.ConfigPath(r))
@@ -939,8 +942,22 @@ base_url = "https://x"
 	if v := m["model"]; v != "opus" {
 		t.Errorf("model = %v, want opus", v)
 	}
-	if v := m["model_providers.openai.base_url"]; v != "https://x" {
-		t.Errorf("model_providers.openai.base_url = %v (flat form expected)", v)
+	// Nested shape: model_providers → openai → base_url. A flat
+	// "model_providers.openai.base_url" leaf is the OLD contract
+	// (E4-S7 double-escape bug) and MUST NOT be produced.
+	if v, ok := m["model_providers.openai.base_url"]; ok {
+		t.Errorf("flat leaf model_providers.openai.base_url = %v; want nested tree (regression: flat parser returned)", v)
+	}
+	providers, ok := m["model_providers"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_providers: type = %T, want nested map[string]any", m["model_providers"])
+	}
+	openai, ok := providers["openai"].(map[string]any)
+	if !ok {
+		t.Fatalf("model_providers.openai: type = %T, want nested map[string]any", providers["openai"])
+	}
+	if v := openai["base_url"]; v != "https://x" {
+		t.Errorf("model_providers.openai.base_url = %v, want https://x", v)
 	}
 }
 
