@@ -485,18 +485,18 @@ func TestDetect_NoteAccumulatesAcrossProbes(t *testing.T) {
 	}
 }
 
-// TestStubsReturnErrNotImplemented locks in the fact that the
-// remaining non-implemented methods are still stubs. Import lifted
-// its branch in E4-S3; Plan lifted its branch in E4-S4; Apply lifted
-// its branch in E4-S5; Project follows in E4-S6.
-func TestStubsReturnErrNotImplemented(t *testing.T) {
+// TestProjectStub_ReturnsErrNotImplemented locks in the fact that
+// Project is still a stub. Import lifted its branch in E4-S3; Plan
+// lifted its branch in E4-S4; Apply lifted its branch in E4-S5;
+// Project follows in E4-S6. Kept as a single flat test because Project
+// is now the only remaining stub — the earlier table/sub-test shape
+// was scaffolding that no longer earns its keep.
+func TestProjectStub_ReturnsErrNotImplemented(t *testing.T) {
 	r := newResolver(t)
 	a := codex.New()
 	ctx := context.Background()
 
-	t.Run("Project", func(t *testing.T) {
-		if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, codex.ErrNotImplemented) {
-			t.Errorf("Project err = %v, want ErrNotImplemented", err)
-		}
-	})
+	if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, codex.ErrNotImplemented) {
+		t.Errorf("Project err = %v, want ErrNotImplemented", err)
+	}
 }

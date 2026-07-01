@@ -18,6 +18,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -377,8 +378,8 @@ sandbox_mode = "workspace-write"
 	}
 }
 
-// TestApply_ContextCanceled: pre-canceled ctx must abort before any
-// write. Apply must surface writepath.ErrLockTimeout — the sentinel
+// TestApply_ContextCanceled: an expired-deadline ctx must abort before
+// any write. Apply must surface writepath.ErrLockTimeout — the sentinel
 // writepath's zero-deadline short-circuit emits. Adapter wrap must
 // preserve errors.Is. Mirrors E3-S5 approach.
 func TestApply_ContextCanceled(t *testing.T) {
@@ -394,11 +395,8 @@ func TestApply_ContextCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
 	defer cancel()
-	cancelCtx, cancelFunc := context.WithCancel(ctx)
-	cancelFunc()
-	ctx = cancelCtx
 
-	// Apply the first plan on the cancelled ctx. Both plans should
+	// Apply the first plan on the expired-deadline ctx. Both plans should
 	// short-circuit; we only need to prove the first does — the loop
 	// stops on the first error.
 	_, err := codex.New().Apply(ctx, r, plans[0])
@@ -495,12 +493,23 @@ func TestApply_RefusesMalformedCurrentConfig(t *testing.T) {
 	if !errors.Is(err, writepath.ErrParseFailed) {
 		t.Fatalf("Apply err = %v, want ErrParseFailed", err)
 	}
+	// F2: pin the adapter's wrap prefix so a future refactor that drops
+	// the wrap fails loudly rather than silently emitting a bare
+	// writepath sentinel.
+	if !strings.Contains(err.Error(), "codex apply") {
+		t.Errorf("Apply err = %q, want mention of \"codex apply\" wrap prefix", err.Error())
+	}
 	after, readErr := os.ReadFile(codex.ConfigPath(r))
 	if readErr != nil {
 		t.Fatalf("read after refused Apply: %v", readErr)
 	}
 	if !bytes.Equal(after, malformed) {
 		t.Errorf("config.toml bytes = %q, want %q (must not be rewritten on parse failure)", after, malformed)
+	}
+	// F5: the OTHER owned file must not have been created as a
+	// side-effect of the refused config write.
+	if _, statErr := os.Lstat(codex.AuthPath(r)); !os.IsNotExist(statErr) {
+		t.Errorf("auth.json exists after refused config Apply; want no cross-file write (stat=%v)", statErr)
 	}
 }
 
@@ -529,6 +538,11 @@ func TestApply_RefusesMalformedCurrentAuth(t *testing.T) {
 	if !bytes.Equal(after, malformed) {
 		t.Errorf("auth.json bytes = %q, want %q (must not be rewritten on parse failure)", after, malformed)
 	}
+	// F5: the OTHER owned file must not have been created as a
+	// side-effect of the refused auth write.
+	if _, statErr := os.Lstat(codex.ConfigPath(r)); !os.IsNotExist(statErr) {
+		t.Errorf("config.toml exists after refused auth Apply; want no cross-file write (stat=%v)", statErr)
+	}
 }
 
 // TestApply_LinksToWritepathReport: the WriteReport that flows back
@@ -552,6 +566,12 @@ func TestApply_LinksToWritepathReport(t *testing.T) {
 		}),
 	}
 	plans := plansFor(t, r, profile)
+	// F3: pin the wire value of ToolCodex. If someone renames the
+	// constant without also updating the string literal on-disk state
+	// & audit-log tooling depend on, this positive check breaks loudly.
+	if plans[0].Tool != "codex" {
+		t.Fatalf("plans[0].Tool = %q, want %q (wire value of ToolCodex)", plans[0].Tool, "codex")
+	}
 	reports, err := applyAll(context.Background(), r, plans)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
