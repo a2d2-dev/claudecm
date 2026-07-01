@@ -236,10 +236,21 @@ func (a *Adapter) Plan(ctx context.Context, r *storage.Resolver, p config.Profil
 // upstream, and returning ErrPlanMismatch surfaces it loudly rather
 // than silently claiming ownership of any target the caller supplied.
 //
-// Errors from writepath.Apply pass through unwrapped so callers can
-// errors.Is against the writepath sentinels (ErrLockTimeout,
-// ErrConcurrentEdit, ErrParseFailed, ErrOutsideHome, etc.) without
-// having to unwrap a claudecode-adapter layer.
+// Errors from writepath.Apply are wrapped with %w preserving errors.Is
+// against all writepath sentinels. Any sentinel documented on
+// writepath.Apply may surface here wrapped with claudecode context; the
+// wrap preserves errors.Is. Including but not limited to:
+//
+//   - writepath.ErrLockTimeout
+//   - writepath.ErrConcurrentEdit
+//   - writepath.ErrParseFailed
+//   - writepath.ErrOutsideHome
+//   - writepath.ErrPostWriteReparse
+//   - writepath.ErrRollback
+//   - writepath.ErrRollbackFailed
+//   - writepath.ErrDryRunUnownedTouched
+//   - writepath.ErrBackupFailed
+//   - writepath.ErrTargetExists
 func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath.WritePlan) (writepath.WriteReport, error) {
 	// Refuse a Tool that does not identify this adapter. The empty
 	// string is refused too — Plan always sets Tool; an empty Tool at
@@ -252,7 +263,11 @@ func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath
 	if plan.Target != SettingsPath(r) {
 		return writepath.WriteReport{}, fmt.Errorf("%w: plan.Target = %q, want %q", ErrPlanMismatch, plan.Target, SettingsPath(r))
 	}
-	return writepath.Apply(ctx, r, plan)
+	report, err := writepath.Apply(ctx, r, plan)
+	if err != nil {
+		return report, fmt.Errorf("claudecode apply %q: %w", plan.Target, err)
+	}
+	return report, nil
 }
 
 // Project is a stub — E3-S6 ships the layered resolver projection.

@@ -287,8 +287,14 @@ func TestApply_OverlayAsTruthClearsOwnedKeys(t *testing.T) {
 
 func TestApply_ContextCanceled(t *testing.T) {
 	// AC: a pre-canceled ctx aborts before any write lands. Apply must
-	// surface ctx.Err() (or an ErrLockTimeout wrapping it — writepath's
-	// zero-deadline short-circuit joins both sentinels).
+	// surface writepath.ErrLockTimeout — that is the sentinel the
+	// writepath's zero-deadline short-circuit emits, and the wrap
+	// contract on adapter.Apply preserves errors.Is through the layer.
+	// Do NOT accept context.Canceled / DeadlineExceeded directly here:
+	// writepath already owns the ctx-plumbing tests, and this adapter
+	// row is what pins the wrapped-sentinel contract so a future
+	// regression that stops wrapping (or stops joining the sentinels)
+	// fails loudly.
 	r := bootstrappedResolver(t)
 	profile := config.Profile{
 		Name: "canceled",
@@ -298,9 +304,8 @@ func TestApply_ContextCanceled(t *testing.T) {
 
 	// Give the context a deadline that has already passed so writepath's
 	// deadline-based short-circuit fires deterministically. Also cancel
-	// so ctx.Err() surfaces context.Canceled joined with ErrLockTimeout —
-	// cancellation is not propagated deeper than lock acquisition in v1
-	// (see writepath/apply.go godoc), so we lean on the deadline path.
+	// so ctx.Err() is non-nil on entry — writepath still short-circuits
+	// on the expired deadline and returns ErrLockTimeout.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Hour))
 	defer cancel()
 	cancelCtx, cancelFunc := context.WithCancel(ctx)
@@ -311,8 +316,8 @@ func TestApply_ContextCanceled(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Apply on canceled ctx returned nil error")
 	}
-	if !errors.Is(err, writepath.ErrLockTimeout) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Apply err = %v; want ErrLockTimeout or ctx.Err()", err)
+	if !errors.Is(err, writepath.ErrLockTimeout) {
+		t.Fatalf("Apply err = %v; want errors.Is(err, writepath.ErrLockTimeout)", err)
 	}
 	if report.PostFingerprint.SHA256 != "" {
 		t.Errorf("PostFingerprint populated on canceled ctx; want zero (no write)")
@@ -369,6 +374,13 @@ func TestApply_RefusesPlanMismatchTarget(t *testing.T) {
 	}
 	if _, statErr := os.Lstat(bad.Target); !os.IsNotExist(statErr) {
 		t.Errorf("not-settings.json exists after refused Apply; want no write")
+	}
+	// The real settings.json path this adapter owns must ALSO stay
+	// untouched. Refusing the mismatched plan must not accidentally
+	// piggy-back on the owned file — that would be a silent stomp
+	// even scarier than the redirect itself.
+	if _, statErr := os.Lstat(claudecode.SettingsPath(r)); !os.IsNotExist(statErr) {
+		t.Errorf("owned settings.json exists after refused Apply; want no write")
 	}
 }
 
