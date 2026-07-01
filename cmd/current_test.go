@@ -447,6 +447,49 @@ func TestSelectHighlightFields_AllMissing(t *testing.T) {
 	}
 }
 
+// TestCurrent_RevealOnNoActiveProfileNoWarning verifies F1: when there
+// is no active profile, --reveal must NOT emit the stderr warning.
+// Rationale: on a fresh install the "no active profile" body carries
+// zero secret values, so firing the loud "WARNING: --reveal exposes
+// secret values..." line is confusing UI (users would think a secret
+// was about to be revealed). Symmetric assertion for --output json —
+// the informational branch must be quiet in both wire formats.
+func TestCurrent_RevealOnNoActiveProfileNoWarning(t *testing.T) {
+	newCurrentHarness(t)
+
+	// Text branch.
+	currentRevealFlag = true
+	stdout, stderr, err := runCurrentCmd(t)
+	if err != nil {
+		t.Fatalf("runCurrent err = %v", err)
+	}
+	if !strings.Contains(stdout, "no active profile") {
+		t.Errorf("stdout missing 'no active profile':\n%s", stdout)
+	}
+	if strings.Contains(stderr, "WARNING: --reveal") {
+		t.Errorf("--reveal warning fired on empty state; got stderr=%q", stderr)
+	}
+
+	// JSON branch — same rule.
+	resetCurrentFlags()
+	currentRevealFlag = true
+	currentOutputFlag = "json"
+	stdout, stderr, err = runCurrentCmd(t)
+	if err != nil {
+		t.Fatalf("runCurrent(json) err = %v", err)
+	}
+	var doc jsonCurrent
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout)
+	}
+	if doc.Profile.Name != "" {
+		t.Errorf("json profile.name = %q, want empty", doc.Profile.Name)
+	}
+	if strings.Contains(stderr, "WARNING: --reveal") {
+		t.Errorf("--reveal warning fired on empty JSON state; got stderr=%q", stderr)
+	}
+}
+
 // TestCurrent_UnknownToolInFilterEmptyBlock: filtering on an unknown
 // tool ID produces the "(no tools resolved)" banner without erroring.
 func TestCurrent_UnknownToolInFilterEmptyBlock(t *testing.T) {
@@ -518,6 +561,13 @@ func TestDisplayHighlight_Cases(t *testing.T) {
 		{"plain-bool", true, false, false, "true"},
 		{"secret-hidden", "sk-longsecretvalue123", true, false, "sk-l***e123"},
 		{"secret-revealed", "sk-longsecretvalue123", true, true, "sk-longsecretvalue123"},
+		// Empty-string secret must render as "(not set)" rather than
+		// the redacted sentinel — an operator seeing "***" would
+		// wrongly conclude a value is configured. Symmetric with the
+		// nil branch above (both are "absent" from the user's POV).
+		{"empty-secret", "", true, false, "(not set)"},
+		{"empty-secret-revealed", "", true, true, "(not set)"},
+		{"empty-nonsecret", "", false, false, "(not set)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -546,6 +596,13 @@ func TestJSONCurrentValue_Cases(t *testing.T) {
 		{"plain-bool", true, false, false, true},
 		{"secret-hidden", "sk-longsecretvalue123", true, false, "sk-l***e123"},
 		{"secret-revealed", "sk-longsecretvalue123", true, true, "sk-longsecretvalue123"},
+		// Empty-string secret is normalised to "" on the JSON wire —
+		// matches the missing-value shape so shell pipelines don't
+		// have to special-case a redacted-empty value. Symmetric with
+		// displayHighlight's empty-string branch.
+		{"empty-secret", "", true, false, ""},
+		{"empty-secret-revealed", "", true, true, ""},
+		{"empty-nonsecret", "", false, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

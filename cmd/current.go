@@ -8,7 +8,7 @@
 // operator actually checks before starting a coding session:
 //
 //	claude_code: Model + Base URL + API Key
-//	codex:       Model + Model Provider + API Key
+//	codex:       Model + Model Provider + Base URL + API Key
 //
 // Design pillars:
 //
@@ -136,17 +136,24 @@ func runCurrent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to read active profile: %w", err)
 	}
 
+	if activeName == "" {
+		// Story AC: no active profile is informational (exit 0). The
+		// --reveal warning is intentionally NOT emitted here: on a
+		// fresh install there is nothing to reveal, and firing the
+		// scary "WARNING: --reveal exposes secret values..." line
+		// against a "no active profile" body is confusing UI. The
+		// warning gate is placed AFTER this branch so it is loud only
+		// when there is actually a resolved value to surface.
+		return renderNoActive(cmd.OutOrStdout(), format)
+	}
+
 	// NFR-S8: --reveal must be loud. Emit the notice BEFORE any stdout
 	// output so a piped consumer that reads only stdout does not miss
 	// it, and so a user watching the terminal sees the warning next to
-	// the plaintext they asked for. Symmetric with cmd/explain.
+	// the plaintext they asked for. Gated on activeName != "" per the
+	// comment above. Symmetric with cmd/explain.
 	if currentRevealFlag {
 		fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: --reveal exposes secret values on your terminal and in scrollback.")
-	}
-
-	if activeName == "" {
-		// Story AC: no active profile is informational (exit 0).
-		return renderNoActive(cmd.OutOrStdout(), format)
 	}
 
 	profile, err := mgr.GetProfile(activeName)
@@ -240,7 +247,9 @@ type highlightSpec struct {
 //     falling back to env.ANTHROPIC_API_KEY when the former is unset).
 //     The two API key candidates cover both the Auth Token and the
 //     legacy API key paths — see internal/adapter/claudecode/project.go.
-//   - codex: Model, Model Provider, API Key (OPENAI_API_KEY). Symmetric
+//   - codex: Model, Model Provider, Base URL
+//     (model_providers.openai.base_url — shadowable by the
+//     OPENAI_BASE_URL env var), API Key (OPENAI_API_KEY). Symmetric
 //     with the codex adapter's owned-key allowlist.
 var highlightSpecs = map[adapter.ToolID][]highlightSpec{
 	adapter.ToolClaudeCode: {
@@ -254,6 +263,12 @@ var highlightSpecs = map[adapter.ToolID][]highlightSpec{
 	adapter.ToolCodex: {
 		{FieldKey: "model", TextLabel: "Model", JSONKey: "model", Secret: false},
 		{FieldKey: "model_provider", TextLabel: "Model Provider", JSONKey: "model_provider", Secret: false},
+		// Base URL is sourced from the OPENAI_BASE_URL env override or
+		// the underlying config.toml owned key. EffectiveField.Key uses
+		// the flat owned-key form (matching internal/adapter/codex's
+		// allowlist), so the highlight FieldKey is the dotted path, not
+		// the env var name.
+		{FieldKey: "model_providers.openai.base_url", TextLabel: "Base URL", JSONKey: "base_url", Secret: false},
 		{FieldKey: "OPENAI_API_KEY", TextLabel: "API Key", JSONKey: "api_key", Secret: true},
 	},
 }
@@ -341,8 +356,19 @@ func selectHighlightFields(tv resolver.ToolView, reveal bool) []highlightRender 
 // missing values become "(not set)"; secret values pass through the
 // shared redactValue helper unless reveal is on; everything else
 // stringifies via fmt.Sprint.
+//
+// Empty-string guard: an empty string is treated as "not set" for both
+// secret and non-secret fields. Without this guard, an empty-string
+// secret would render as the redacted sentinel (`***`) instead of the
+// intended "(not set)" — misleading operators into believing a value is
+// configured when it is in fact absent. The nil branch above already
+// covers the "no field emitted" case; this branch covers the "field
+// emitted but empty" case (e.g. a Raw overlay entry carrying "").
 func displayHighlight(v any, secret, reveal bool) string {
 	if v == nil {
+		return "(not set)"
+	}
+	if s, ok := v.(string); ok && s == "" {
 		return "(not set)"
 	}
 	if secret && !reveal {
@@ -500,8 +526,19 @@ func renderCurrentJSON(w io.Writer, view resolver.View, reveal bool) error {
 // present and the shell consumer never has to distinguish null-vs-absent;
 // secret values pass through redactValue unless reveal is on; everything
 // else preserves the underlying Go type via jsonValue (from explain.go).
+//
+// Empty-string guard: an empty-string secret is normalised to "" here
+// (matching the missing-value shape) instead of passing through
+// redactValue and rendering as "***". Symmetric with displayHighlight's
+// empty-string branch — a shell consumer sees the same "absent" shape
+// whether the field was omitted upstream or emitted with an empty
+// value. The chosen shape ("" rather than nil/null) keeps JSON key
+// presence stable so pipelines never have to null-check.
 func jsonCurrentValue(v any, secret, reveal bool) any {
 	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok && s == "" {
 		return ""
 	}
 	return jsonValue(v, secret, reveal)
