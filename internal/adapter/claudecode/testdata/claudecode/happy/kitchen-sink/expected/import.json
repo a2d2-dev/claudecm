@@ -1,0 +1,22 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "https://old.example.com",
+    "APIKey": "sk-existing-auth",
+    "Model": "claude-opus-4-5",
+    "SmallFastModel": "claude-haiku-4-5",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": {
+      "ANTHROPIC_API_KEY": "sk-existing-api",
+      "CLAUDE_CODE_USE_BEDROCK": "1",
+      "CLAUDE_CODE_USE_VERTEX": "0"
+    },
+    "Raw": null
+  }
+}

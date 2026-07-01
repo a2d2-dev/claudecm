@@ -1,0 +1,18 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "https://例え.example.com",
+    "APIKey": "",
+    "Model": "claude-🚀",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": null
+  }
+}

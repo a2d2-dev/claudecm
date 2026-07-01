@@ -1,0 +1,18 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "https://sym.example.com",
+    "APIKey": "",
+    "Model": "claude-symlinked",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": null
+  }
+}

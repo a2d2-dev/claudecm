@@ -1,0 +1,12 @@
+{
+  "Added": null,
+  "Removed": null,
+  "Changed": [
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "OldValue": "claude-opus-4-5",
+      "NewValue": "claude-haiku-4-5"
+    }
+  ],
+  "TouchesUnowned": false
+}

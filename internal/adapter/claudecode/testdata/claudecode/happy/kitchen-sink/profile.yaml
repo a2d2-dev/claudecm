@@ -1,0 +1,15 @@
+schema_version: 1
+name: kitchen-sink
+created_at: 2026-01-01T00:00:00Z
+updated_at: 2026-01-01T00:00:00Z
+core:
+  base_url: https://new.example.com
+  api_key: sk-new-auth
+  model: claude-haiku-4-5
+  small_fast_model: claude-tiny-fast
+tools:
+  claude_code:
+    extra_env:
+      ANTHROPIC_API_KEY: sk-new-api
+      CLAUDE_CODE_USE_BEDROCK: "0"
+      CLAUDE_CODE_USE_VERTEX: "1"

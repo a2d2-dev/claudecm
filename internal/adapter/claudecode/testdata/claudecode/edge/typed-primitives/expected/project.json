@@ -1,0 +1,23 @@
+{
+  "Tool": "claude_code",
+  "Fields": [
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "Value": 42,
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_MODEL",
+      "Shadowed": null
+    },
+    {
+      "Key": "env.CLAUDE_CODE_USE_BEDROCK",
+      "Value": true,
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.CLAUDE_CODE_USE_BEDROCK",
+      "Shadowed": null
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

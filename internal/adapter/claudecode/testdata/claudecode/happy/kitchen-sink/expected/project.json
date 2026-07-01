@@ -1,0 +1,112 @@
+{
+  "Tool": "claude_code",
+  "Fields": [
+    {
+      "Key": "env.ANTHROPIC_API_KEY",
+      "Value": "sk-new-api",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_API_KEY",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay",
+          "Value": "sk-new-api",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_AUTH_TOKEN",
+      "Value": "sk-new-auth",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_AUTH_TOKEN",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "sk-new-auth",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_BASE_URL",
+      "Value": "https://new.example.com",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_BASE_URL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "https://new.example.com",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "Value": "claude-haiku-4-5",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_MODEL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "claude-haiku-4-5",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_SMALL_FAST_MODEL",
+      "Value": "claude-tiny-fast",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_SMALL_FAST_MODEL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "claude-tiny-fast",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "env.CLAUDE_CODE_USE_BEDROCK",
+      "Value": "0",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.CLAUDE_CODE_USE_BEDROCK",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay",
+          "Value": "0",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "env.CLAUDE_CODE_USE_VERTEX",
+      "Value": "1",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.CLAUDE_CODE_USE_VERTEX",
+      "Shadowed": [
+        {
+          "Layer": "ProfileOverlay",
+          "Source": "profile.overlay",
+          "Value": "1",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

@@ -1,0 +1,22 @@
+{
+  "Tool": "claude_code",
+  "Fields": [
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "Value": "claude-haiku-4-5",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_MODEL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "claude-haiku-4-5",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}
