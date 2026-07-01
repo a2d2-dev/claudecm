@@ -43,6 +43,11 @@ cd "$repo"
 whitelist=(
   "internal/adapter/claudecode/adapter.go"
   "internal/adapter/claudecode/allowlist.go"
+  # plan.go (E3-S4) renders the sjson merge-preserve transform that
+  # writes ~/.claude/settings.json under the FR-5 write-path. It is
+  # a legitimate owner of the HOME-rooted user-scope path — its
+  # package godoc references settings.json to document scope.
+  "internal/adapter/claudecode/plan.go"
   "internal/adapter/adapter.go"
   "internal/storage/lock.go"
 )
