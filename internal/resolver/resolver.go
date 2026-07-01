@@ -4,10 +4,6 @@
 // (internal/adapter/*, which knows how to Project a single tool's
 // layered chain) and the CLI surface (cmd/*).
 //
-// This story ships TYPES ONLY (E5-S1). Resolve is a stub that returns
-// ErrNotImplemented. E5-S2 fills in the aggregation loop over the
-// adapter Registry, per architecture.md §6 and PRD FR-7.
-//
 // Authority. This package is subordinate to:
 //  1. docs/decisions/0001-direction-lock.md (ADR-0001).
 //  2. docs/prd/prd-v1.md (FR-6, FR-7, SM-4).
@@ -27,10 +23,13 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
+	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
 // View is the aggregate projection cmd/current summarises and
@@ -181,21 +180,56 @@ func (f Filter) Allows(tool adapter.ToolID) bool {
 	return false
 }
 
-// ErrNotImplemented is the sentinel Resolve returns until E5-S2 fills
-// in the aggregation loop. Callers should treat it as "the resolver
-// build stage that E5-S1 shipped does not yet compute a View" and
-// gate their code paths accordingly. Removed in E5-S2 alongside the
-// stub body.
-var ErrNotImplemented = errors.New("claudecm/resolver: Resolve not implemented")
+// filePathRE extracts the first double-quoted absolute path from an
+// error message. Adapter error wraps use the shape
+//
+//	codex apply "<absolute-owned-file-path>": <inner>
+//	claudecode apply "<absolute-owned-file-path>": <inner>
+//	claudecm: parse failed: parse current "<absolute-owned-file-path>": <inner>
+//
+// so a quoted absolute path is the reliable signal. Non-absolute
+// quotes (e.g. dotted key names) are rejected by the leading "/" so
+// the match never returns a non-path string. Best-effort — an empty
+// return means the resolver could not identify a specific file, which
+// is fine because ToolError.Message already carries the full text.
+var filePathRE = regexp.MustCompile(`"(/[^"]+)"`)
+
+// extractFilePath best-effort lifts an absolute file path from an
+// adapter error message. Returns "" when no absolute-path quoted
+// substring is found.
+func extractFilePath(msg string) string {
+	m := filePathRE.FindStringSubmatch(msg)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// classifyProjectError maps a Project error onto the ErrorKind enum.
+// Order matters: context cancellation is checked first because a
+// canceled parse would otherwise be mis-classified as ParseFailed;
+// OutsideHome is checked before ParseFailed because the two writepath
+// sentinels are distinct but adapters may wrap both in the same call
+// site.
+func classifyProjectError(err error) ErrorKind {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return ErrorCanceled
+	case errors.Is(err, storage.ErrOutsideHome), errors.Is(err, writepath.ErrOutsideHome):
+		return ErrorOutsideHome
+	case errors.Is(err, writepath.ErrParseFailed):
+		return ErrorParseFailed
+	default:
+		return ErrorProjectFailed
+	}
+}
 
 // Resolve builds a View for the given Profile by walking the adapter
 // Registry (or, when reg is nil, adapter.DefaultRegistry) and
 // stitching each adapter's EffectiveView into one aggregate. Read-
-// only: never mutates env, files, or the Profile. Returns a zero View
-// plus ErrNotImplemented in this story; E5-S2 replaces the body with
-// the real aggregation.
+// only: never mutates env, files, or the Profile.
 //
-// Contract (locked here, implemented in E5-S2):
+// Contract:
 //   - Walk the Registry (or reg) in deterministic order — the
 //     lexicographic ToolID order adapter.Registry.List already
 //     returns. This makes runs against identical input produce
@@ -206,14 +240,18 @@ var ErrNotImplemented = errors.New("claudecm/resolver: Resolve not implemented")
 //     then Project. Detect errors are captured as ErrorDetectFailed
 //     on the ToolView and the walk continues with a zero Presence.
 //     Project errors are captured as ErrorProjectFailed on the
-//     ToolView and the walk continues with a zero EffectiveView.
+//     ToolView (or one of the more specific ErrorParseFailed /
+//     ErrorOutsideHome / ErrorCanceled kinds when classifiable) and
+//     the walk continues with a zero EffectiveView.
 //   - Parse failures the adapter bubbles up appear as
-//     ErrorParseFailed with the offending file path. External drift
-//     the adapter surfaces on EffectiveView.ExternalDrift* flows
-//     through verbatim — this package never re-hashes files.
+//     ErrorParseFailed with the offending file path when it can be
+//     lifted from the error message. External drift the adapter
+//     surfaces on EffectiveView.ExternalDrift* flows through
+//     verbatim — this package never re-hashes files.
 //   - Top-level error return is reserved for context cancellation
-//     (ctx.Err()) and Registry-wide failure. A single misbehaving
-//     adapter never aborts the whole resolve.
+//     (ctx.Err() before or between tools) and Registry-wide failure
+//     (List returned an id that Get cannot construct). A single
+//     misbehaving adapter never aborts the whole resolve.
 //
 // Parameters:
 //   - ctx: cancellation from cmd/*.
@@ -223,10 +261,82 @@ var ErrNotImplemented = errors.New("claudecm/resolver: Resolve not implemented")
 //   - profile: the Profile to project (copied by value into the View).
 //   - f:   Filter restricting which tools participate.
 func Resolve(ctx context.Context, r *storage.Resolver, reg *adapter.Registry, profile config.Profile, f Filter) (View, error) {
-	_ = ctx
-	_ = r
-	_ = reg
-	_ = profile
-	_ = f
-	return View{}, ErrNotImplemented
+	view := View{Profile: profile}
+
+	// Top-level cancellation check before any work. One of the only
+	// two allowed top-level errors per the E5-S1 contract.
+	if err := ctx.Err(); err != nil {
+		return view, err
+	}
+
+	if reg == nil {
+		reg = adapter.DefaultRegistry
+	}
+
+	ids := reg.List() // already sorted lexicographically by ToolID.
+
+	for _, id := range ids {
+		// Re-check cancellation between tools so a signal that
+		// arrives mid-walk aborts promptly with a coherent partial
+		// View rather than continuing to hammer adapters.
+		if err := ctx.Err(); err != nil {
+			return view, err
+		}
+
+		if !f.Allows(id) {
+			// Filter-excluded tools do not appear in View.Tools at
+			// all — no zero-filled ToolView. Callers relying on
+			// len(View.Tools) as a "which tools participated"
+			// signal see the honest answer.
+			continue
+		}
+
+		adap, ok := reg.Get(id)
+		if !ok || adap == nil {
+			// Registry inconsistency: List returned this id but Get
+			// cannot construct an Adapter for it. The other allowed
+			// top-level error per E5-S1 contract. This is
+			// defensive — Register panics on nil ctor and there is
+			// no Unregister — but it costs nothing to detect and
+			// tells operators the Registry is in an impossible
+			// state rather than silently skipping the tool.
+			return View{}, fmt.Errorf("claudecm/resolver: registry inconsistency: List returned %q but Get failed", id)
+		}
+
+		tv := ToolView{Tool: id}
+
+		presence, derr := adap.Detect(ctx, r)
+		if derr != nil {
+			tv.Errors = append(tv.Errors, ToolError{
+				Kind:    ErrorDetectFailed,
+				Message: derr.Error(),
+			})
+			// Presence carries whatever Detect returned; adapters
+			// may still fill best-effort fields on error, so we do
+			// not force it to the zero value.
+		}
+		tv.Presence = presence
+
+		effective, perr := adap.Project(ctx, r, profile)
+		if perr != nil {
+			kind := classifyProjectError(perr)
+			te := ToolError{
+				Kind:    kind,
+				Message: perr.Error(),
+			}
+			if kind == ErrorParseFailed || kind == ErrorOutsideHome {
+				te.File = extractFilePath(perr.Error())
+			}
+			tv.Errors = append(tv.Errors, te)
+			// Effective is whatever Project returned — usually the
+			// adapter's zero EffectiveView on error; carry it as-is
+			// so renderers do not have to distinguish "no data"
+			// from "cleared data".
+		}
+		tv.Effective = effective
+
+		view.Tools = append(view.Tools, tv)
+	}
+
+	return view, nil
 }
