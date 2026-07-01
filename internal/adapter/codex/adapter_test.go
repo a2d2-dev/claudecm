@@ -17,7 +17,6 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter/codex"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
-	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
 // newResolver builds a Resolver anchored at a per-test HOME. Tests need
@@ -488,18 +487,13 @@ func TestDetect_NoteAccumulatesAcrossProbes(t *testing.T) {
 
 // TestStubsReturnErrNotImplemented locks in the fact that the
 // remaining non-implemented methods are still stubs. Import lifted
-// its branch in E4-S3; Plan lifted its branch in E4-S4;
-// Apply/Project follow in E4-S5/S6.
+// its branch in E4-S3; Plan lifted its branch in E4-S4; Apply lifted
+// its branch in E4-S5; Project follows in E4-S6.
 func TestStubsReturnErrNotImplemented(t *testing.T) {
 	r := newResolver(t)
 	a := codex.New()
 	ctx := context.Background()
 
-	t.Run("Apply", func(t *testing.T) {
-		if _, err := a.Apply(ctx, r, writepath.WritePlan{}); !errors.Is(err, codex.ErrNotImplemented) {
-			t.Errorf("Apply err = %v, want ErrNotImplemented", err)
-		}
-	})
 	t.Run("Project", func(t *testing.T) {
 		if _, err := a.Project(ctx, r, config.Profile{}); !errors.Is(err, codex.ErrNotImplemented) {
 			t.Errorf("Project err = %v, want ErrNotImplemented", err)

@@ -11,6 +11,7 @@ package codex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,15 @@ import (
 // every method has shipped so any downstream errors.Is checks continue
 // to compile through the epic.
 var ErrNotImplemented = errors.New("claudecm: codex adapter method not implemented")
+
+// ErrPlanMismatch is returned by Apply when the WritePlan it was handed
+// does not target one of this adapter's owned files. Defense in depth:
+// Plan always produces WritePlans with Tool=ToolCodex and Target set to
+// AuthPath(r) or ConfigPath(r), but the interface signature does not
+// statically prevent a caller from handing us a Claude Code plan (or a
+// hand-forged plan pointing elsewhere). Refusing loudly beats writing
+// the wrong file. Symmetric with claudecode.ErrPlanMismatch.
+var ErrPlanMismatch = errors.New("claudecm/codex: plan does not target codex config.toml or auth.json")
 
 // binaryName is the CLI executable claudecm looks for on PATH when
 // probing tool presence. Kept as a const so we do not carry
@@ -254,10 +264,68 @@ func (a *Adapter) Plan(ctx context.Context, r *storage.Resolver, p config.Profil
 	return a.planFromProfile(ctx, r, p)
 }
 
-// Apply will hand a single-file WritePlan to writepath.Apply. Stubbed
-// until E4-S5.
+// Apply hands a single-file WritePlan to writepath.Apply so every byte
+// this adapter emits goes through the FR-5 locked write-path. The
+// adapter never opens the owned files for write itself — that would
+// bypass the write-path pipeline (parse guard, backup, drift check,
+// atomic rename, post-write reparse, auto-rollback) and violate
+// coding-standards rule 1.
+//
+// Per-file dispatch. Codex owns TWO files (auth.json, config.toml) and
+// Plan returns a slice of two WritePlans in auth-first order (see
+// plan.go). Apply itself is per-file: it accepts a single WritePlan
+// and hands it straight to writepath.Apply. Cross-file ordering and
+// the two-phase commit that stages auth.json before config.toml is
+// NOT this method's job — that lives in internal/commit (E7). This
+// story deliberately produces the per-file piece only.
+//
+// Defense in depth. Plan always sets plan.Tool=ToolCodex and
+// plan.Target to either AuthPath(r) or ConfigPath(r), but the
+// Adapter interface signature does not statically prevent a caller
+// from handing us a plan authored by another adapter or hand-forged
+// to point elsewhere. Apply refuses any plan whose Tool or Target
+// does not match this adapter's ownership with ErrPlanMismatch — the
+// writepath will never see it.
+//
+// An empty plan.Tool is treated as a mismatch too. Plan sets Tool
+// explicitly; an empty value at this boundary is a programming error
+// upstream, and returning ErrPlanMismatch surfaces it loudly rather
+// than silently claiming ownership of any target the caller supplied.
+//
+// Errors from writepath.Apply are wrapped with %w preserving errors.Is
+// against all writepath sentinels. Any sentinel documented on
+// writepath.Apply may surface here wrapped with codex context; the
+// wrap preserves errors.Is. Including but not limited to:
+//
+//   - writepath.ErrLockTimeout
+//   - writepath.ErrConcurrentEdit
+//   - writepath.ErrParseFailed
+//   - writepath.ErrOutsideHome
+//   - writepath.ErrPostWriteReparse
+//   - writepath.ErrRollback
+//   - writepath.ErrRollbackFailed
+//   - writepath.ErrDryRunUnownedTouched
+//   - writepath.ErrBackupFailed
+//   - writepath.ErrTargetExists
 func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath.WritePlan) (writepath.WriteReport, error) {
-	return writepath.WriteReport{}, ErrNotImplemented
+	// Refuse a Tool that does not identify this adapter. The empty
+	// string is refused too — Plan always sets Tool; an empty Tool at
+	// this boundary is a caller bug we prefer to surface loudly over
+	// accepting the plan and letting writepath's ValidatePlan reject
+	// it with a less specific error.
+	if plan.Tool != string(adapter.ToolCodex) {
+		return writepath.WriteReport{}, fmt.Errorf("%w: plan.Tool = %q, want %q", ErrPlanMismatch, plan.Tool, adapter.ToolCodex)
+	}
+	authPath := AuthPath(r)
+	configPath := ConfigPath(r)
+	if plan.Target != authPath && plan.Target != configPath {
+		return writepath.WriteReport{}, fmt.Errorf("%w: plan.Target = %q, want one of {%q, %q}", ErrPlanMismatch, plan.Target, authPath, configPath)
+	}
+	report, err := writepath.Apply(ctx, r, plan)
+	if err != nil {
+		return report, fmt.Errorf("codex apply %q: %w", plan.Target, err)
+	}
+	return report, nil
 }
 
 // Project will resolve the layered EffectiveView for Codex. Stubbed
