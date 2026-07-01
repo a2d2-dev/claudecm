@@ -1,0 +1,13 @@
+symlink-out-of-home — read-side containment check.
+
+Setup wiring (see fixtures_test.go):
+  1. Write settings.json payload to a per-test outside-HOME path
+     (a second t.TempDir(), which is a sibling of HOME on disk).
+  2. Symlink ~/.claude/settings.json → outside-HOME path.
+
+Expected Import result:
+  errors.Is(err, claudecode.ErrOutsideHome) == true
+
+This case is an error-only fixture: no expected/*.json goldens are
+compared. The error-only.txt marker file records the expected
+error identifier so runFixtureCase asserts errors.Is against it.

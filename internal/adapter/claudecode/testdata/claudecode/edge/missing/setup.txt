@@ -1,0 +1,10 @@
+missing — fresh install with no settings.json on disk.
+
+Setup wiring (see fixtures_test.go):
+  1. No settings.json is created in ~/.claude/ at all.
+  2. Discovery admits this case via the error-only.txt marker so
+     the "settings.json missing" absence itself is what the test
+     exercises.
+
+Expected Import result:
+  errors.Is(err, claudecode.ErrNoConfig) == true

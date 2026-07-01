@@ -1,0 +1,20 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "42",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": {
+      "CLAUDE_CODE_USE_BEDROCK": "true"
+    },
+    "Raw": null
+  }
+}

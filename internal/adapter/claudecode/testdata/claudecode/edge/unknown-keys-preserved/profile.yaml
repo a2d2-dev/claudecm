@@ -1,0 +1,8 @@
+schema_version: 1
+name: unknown-keys-preserved
+created_at: 2026-01-01T00:00:00Z
+updated_at: 2026-01-01T00:00:00Z
+core:
+  base_url: ""
+  api_key: sk-preserved
+  model: claude-haiku-4-5

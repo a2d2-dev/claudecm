@@ -1,0 +1,42 @@
+{
+  "Added": null,
+  "Removed": null,
+  "Changed": [
+    {
+      "Key": "env.ANTHROPIC_API_KEY",
+      "OldValue": "sk-existing-api",
+      "NewValue": "sk-new-api"
+    },
+    {
+      "Key": "env.ANTHROPIC_AUTH_TOKEN",
+      "OldValue": "sk-existing-auth",
+      "NewValue": "sk-new-auth"
+    },
+    {
+      "Key": "env.ANTHROPIC_BASE_URL",
+      "OldValue": "https://old.example.com",
+      "NewValue": "https://new.example.com"
+    },
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "OldValue": "claude-opus-4-5",
+      "NewValue": "claude-haiku-4-5"
+    },
+    {
+      "Key": "env.ANTHROPIC_SMALL_FAST_MODEL",
+      "OldValue": "claude-haiku-4-5",
+      "NewValue": "claude-tiny-fast"
+    },
+    {
+      "Key": "env.CLAUDE_CODE_USE_BEDROCK",
+      "OldValue": "1",
+      "NewValue": "0"
+    },
+    {
+      "Key": "env.CLAUDE_CODE_USE_VERTEX",
+      "OldValue": "0",
+      "NewValue": "1"
+    }
+  ],
+  "TouchesUnowned": false
+}

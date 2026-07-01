@@ -1,0 +1,29 @@
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-existing-api",
+    "ANTHROPIC_AUTH_TOKEN": "sk-existing-auth",
+    "ANTHROPIC_BASE_URL": "https://old.example.com",
+    "ANTHROPIC_MODEL": "claude-opus-4-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-4-5",
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "CLAUDE_CODE_USE_VERTEX": "0",
+    "CUSTOM_UNOWNED": "preserved"
+  },
+  "mcpServers": {
+    "example": {
+      "command": "node",
+      "args": ["mcp.js"]
+    }
+  },
+  "hooks": {
+    "pre_apply": ["echo hi"]
+  },
+  "custom": {
+    "nested": {
+      "value": 42
+    }
+  },
+  "permissions": {
+    "allowed": ["fs", "net"]
+  }
+}

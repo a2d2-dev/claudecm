@@ -1,0 +1,52 @@
+{
+  "Tool": "claude_code",
+  "Fields": [
+    {
+      "Key": "env.ANTHROPIC_AUTH_TOKEN",
+      "Value": "sk-🔑-token",
+      "Secret": true,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_AUTH_TOKEN",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "sk-🔑-token",
+          "Secret": true
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_BASE_URL",
+      "Value": "https://中文.example.com",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_BASE_URL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "https://中文.example.com",
+          "Secret": false
+        }
+      ]
+    },
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "Value": "claude-🌙-haiku",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_MODEL",
+      "Shadowed": [
+        {
+          "Layer": "ProfileCore",
+          "Source": "profile.core",
+          "Value": "claude-🌙-haiku",
+          "Secret": false
+        }
+      ]
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

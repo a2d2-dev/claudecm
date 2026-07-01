@@ -1,0 +1,23 @@
+{
+  "Tool": "claude_code",
+  "Fields": [
+    {
+      "Key": "env.ANTHROPIC_BASE_URL",
+      "Value": "https://sym.example.com",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_BASE_URL",
+      "Shadowed": null
+    },
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "Value": "claude-symlinked",
+      "Secret": false,
+      "WinningLayer": "OnDiskToolConfig",
+      "Source": "<HOME>/.claude/settings.json:env.ANTHROPIC_MODEL",
+      "Shadowed": null
+    }
+  ],
+  "ExternalDriftDetected": false,
+  "ExternalDriftFile": ""
+}

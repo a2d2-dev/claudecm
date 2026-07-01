@@ -1,0 +1,18 @@
+{
+  "core": {
+    "Provider": "",
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "claude-opus-4-5",
+    "SmallFastModel": "",
+    "ExtraEnv": null
+  },
+  "overlay": {
+    "BaseURL": "",
+    "APIKey": "",
+    "Model": "",
+    "SmallFastModel": "",
+    "ExtraEnv": null,
+    "Raw": null
+  }
+}

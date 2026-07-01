@@ -1,0 +1,19 @@
+{
+  "Added": [
+    "env.ANTHROPIC_AUTH_TOKEN"
+  ],
+  "Removed": null,
+  "Changed": [
+    {
+      "Key": "env.ANTHROPIC_BASE_URL",
+      "OldValue": "https://例え.example.com",
+      "NewValue": "https://中文.example.com"
+    },
+    {
+      "Key": "env.ANTHROPIC_MODEL",
+      "OldValue": "claude-🚀",
+      "NewValue": "claude-🌙-haiku"
+    }
+  ],
+  "TouchesUnowned": false
+}
