@@ -145,33 +145,85 @@ func TestPlan_ReturnsExactlyOnePlan(t *testing.T) {
 func TestPlan_FirstWriteFromEmpty(t *testing.T) {
 	// AC: given an empty settings.json (fresh install), Plan's
 	// transform writes owned keys and leaves nothing else behind.
+	//
+	// Two rows: (a) all four Core string slots populated including
+	// SmallFastModel — pins the positive-write path for
+	// env.ANTHROPIC_SMALL_FAST_MODEL (previously covered only by the
+	// "delete when empty" arm); (b) SmallFastModel intentionally empty
+	// — pins the "absent → deleted" arm alongside the other keys.
 	r := newResolver(t)
-	profile := config.Profile{
-		Name: "anthropic-us",
-		Core: config.CoreConfig{
-			BaseURL: "https://api.example.com",
-			APIKey:  "sk-first-write",
-			Model:   "claude-opus-4-5",
+
+	tests := []struct {
+		name               string
+		profile            config.Profile
+		wantBaseURL        string
+		wantAuthToken      string
+		wantModel          string
+		wantSmallFastModel string // "" means the key must be ABSENT
+	}{
+		{
+			name: "all four core slots populated",
+			profile: config.Profile{
+				Name: "anthropic-us",
+				Core: config.CoreConfig{
+					BaseURL:        "https://api.example.com",
+					APIKey:         "sk-first-write",
+					Model:          "claude-opus-4-5",
+					SmallFastModel: "claude-haiku-4-5",
+				},
+			},
+			wantBaseURL:        "https://api.example.com",
+			wantAuthToken:      "sk-first-write",
+			wantModel:          "claude-opus-4-5",
+			wantSmallFastModel: "claude-haiku-4-5",
+		},
+		{
+			name: "small-fast-model intentionally empty is absent",
+			profile: config.Profile{
+				Name: "anthropic-us",
+				Core: config.CoreConfig{
+					BaseURL: "https://api.example.com",
+					APIKey:  "sk-first-write",
+					Model:   "claude-opus-4-5",
+				},
+			},
+			wantBaseURL:        "https://api.example.com",
+			wantAuthToken:      "sk-first-write",
+			wantModel:          "claude-opus-4-5",
+			wantSmallFastModel: "", // absent expected
 		},
 	}
-	plan := runPlan(t, r, profile)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := runPlan(t, r, tc.profile)
 
-	out := transformCurrent(t, plan, []byte(""))
-	got := mustUnmarshal(t, out)
+			out := transformCurrent(t, plan, []byte(""))
+			got := mustUnmarshal(t, out)
 
-	if v, ok := getPath(got, "env.ANTHROPIC_BASE_URL"); !ok || v != "https://api.example.com" {
-		t.Errorf("env.ANTHROPIC_BASE_URL = %v (ok=%v), want %q", v, ok, "https://api.example.com")
-	}
-	if v, ok := getPath(got, "env.ANTHROPIC_AUTH_TOKEN"); !ok || v != "sk-first-write" {
-		t.Errorf("env.ANTHROPIC_AUTH_TOKEN = %v (ok=%v), want %q", v, ok, "sk-first-write")
-	}
-	if v, ok := getPath(got, "env.ANTHROPIC_MODEL"); !ok || v != "claude-opus-4-5" {
-		t.Errorf("env.ANTHROPIC_MODEL = %v (ok=%v), want %q", v, ok, "claude-opus-4-5")
-	}
-	// Empty Core.SmallFastModel must NOT appear (overlay-as-truth
-	// treats empty Core fields as "not owned right now").
-	if _, ok := getPath(got, "env.ANTHROPIC_SMALL_FAST_MODEL"); ok {
-		t.Errorf("env.ANTHROPIC_SMALL_FAST_MODEL present, want absent (Core.SmallFastModel empty)")
+			if v, ok := getPath(got, "env.ANTHROPIC_BASE_URL"); !ok || v != tc.wantBaseURL {
+				t.Errorf("env.ANTHROPIC_BASE_URL = %v (ok=%v), want %q", v, ok, tc.wantBaseURL)
+			}
+			if v, ok := getPath(got, "env.ANTHROPIC_AUTH_TOKEN"); !ok || v != tc.wantAuthToken {
+				t.Errorf("env.ANTHROPIC_AUTH_TOKEN = %v (ok=%v), want %q", v, ok, tc.wantAuthToken)
+			}
+			if v, ok := getPath(got, "env.ANTHROPIC_MODEL"); !ok || v != tc.wantModel {
+				t.Errorf("env.ANTHROPIC_MODEL = %v (ok=%v), want %q", v, ok, tc.wantModel)
+			}
+			if tc.wantSmallFastModel == "" {
+				// Overlay-as-truth: empty Core.SmallFastModel → the key
+				// must NOT appear on disk.
+				if _, ok := getPath(got, "env.ANTHROPIC_SMALL_FAST_MODEL"); ok {
+					t.Errorf("env.ANTHROPIC_SMALL_FAST_MODEL present, want absent (Core.SmallFastModel empty)")
+				}
+				return
+			}
+			// Positive-write assertion: SmallFastModel populated → must
+			// land at env.ANTHROPIC_SMALL_FAST_MODEL verbatim. This is
+			// the arm PR #23 reviewer flagged as missing.
+			if v, ok := getPath(got, "env.ANTHROPIC_SMALL_FAST_MODEL"); !ok || v != tc.wantSmallFastModel {
+				t.Errorf("env.ANTHROPIC_SMALL_FAST_MODEL = %v (ok=%v), want %q", v, ok, tc.wantSmallFastModel)
+			}
+		})
 	}
 }
 
@@ -302,19 +354,64 @@ func TestPlan_APIKeyDualHousing(t *testing.T) {
 
 func TestPlan_MalformedCurrentBytesError(t *testing.T) {
 	// NFR-S1 / FR-5 step 3: refuse on malformed current bytes. No
-	// silent fallback rewrite.
+	// silent fallback rewrite. Cover four shapes so a future
+	// permissive regression (e.g. sjson quietly writing over `null` at
+	// the root, or a bare scalar sneaking past gjson.ValidBytes) is
+	// caught by the exact assertion here rather than by a downstream
+	// mystery. All four rows must produce ErrParseFailed — the
+	// object-root check in renderSettings is the load-bearing invariant
+	// that overlay-as-truth only applies to object-shaped documents.
 	r := newResolver(t)
 	plan := runPlan(t, r, config.Profile{Name: "p", Core: config.CoreConfig{Model: "x"}})
 
 	if plan.Transform == nil {
 		t.Fatalf("Transform is nil")
 	}
-	_, err := plan.Transform([]byte(`{"env":`))
-	if err == nil {
-		t.Fatalf("Transform on malformed JSON returned nil error, want ErrParseFailed")
+
+	tests := []struct {
+		name    string
+		current []byte
+	}{
+		{
+			// Truncated object: gjson.ValidBytes rejects — the
+			// original coverage row, kept as the baseline.
+			name:    "unterminated string",
+			current: []byte(`{"env":`),
+		},
+		{
+			// Bare `null` at root: gjson.ValidBytes ACCEPTS `null` as
+			// a legal JSON value. Without an explicit "root must be
+			// object" check the render would either silently succeed
+			// writing over `null` or wander into a confusing sjson
+			// error path. Refuse loudly with ErrParseFailed.
+			name:    "bare null at root",
+			current: []byte(`null`),
+		},
+		{
+			// Trailing junk after an otherwise valid object.
+			// encoding/json.Valid rejects this shape; gjson may or may
+			// not depending on release. The belt-and-brace json.Valid
+			// check in renderSettings must catch it either way.
+			name:    "trailing junk after object",
+			current: []byte(`{"env":{}} garbage`),
+		},
+		{
+			// Bare scalar (string) at root. Same category as bare
+			// null: legal JSON, illegal settings.json shape.
+			name:    "bare scalar string at root",
+			current: []byte(`"hello"`),
+		},
 	}
-	if !errors.Is(err, writepath.ErrParseFailed) {
-		t.Errorf("Transform err = %v, want errors.Is ErrParseFailed", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := plan.Transform(tc.current)
+			if err == nil {
+				t.Fatalf("Transform on %s returned nil error, want ErrParseFailed", tc.name)
+			}
+			if !errors.Is(err, writepath.ErrParseFailed) {
+				t.Errorf("Transform err = %v, want errors.Is ErrParseFailed", err)
+			}
+		})
 	}
 }
 

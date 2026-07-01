@@ -33,15 +33,23 @@
 // Empty file policy. Claude Code writes a zero-byte settings.json on
 // its first launch before any user setting is recorded. Transform
 // interprets an empty (or whitespace-only) current as `{}` so
-// sjson.SetBytes has something to graft onto. This is the same read
-// policy Import uses; the two must agree or a round-trip Import →
-// Plan → Apply of a fresh install would diverge.
+// sjson.SetBytes has something to graft onto. The predicate lives in
+// treatAsEmpty (emptycheck.go) and is shared with Import so the two
+// paths cannot diverge — a round-trip Import → Plan → Apply of a fresh
+// install would otherwise silently drop through different branches.
 //
 // Malformed current. sjson.SetBytes returns an error when the current
-// bytes are not valid JSON. Transform wraps that error with
-// writepath.ErrParseFailed and returns it. writepath.Apply propagates.
-// This is the FR-5 step-3 refuse-on-malformed guarantee for the
-// Claude Code path — no silent fallback rewrite (NFR-S1).
+// bytes are not valid JSON. Transform gates every render on
+// gjson.ValidBytes first and, additionally, requires the parsed root to
+// be a JSON object — a bare `null`, scalar, array, or trailing-junk
+// document is refused with ErrParseFailed even though gjson.ValidBytes
+// accepts some of those shapes (null, scalars, arrays). Overlay-as-truth
+// is only meaningful over an object-shaped document; letting sjson
+// operate on a root scalar would either silently succeed writing over
+// `null` (masking corruption) or wander into sjson error paths that
+// don't surface the actual shape violation. This is the FR-5 step-3
+// refuse-on-malformed guarantee for the Claude Code path — no silent
+// fallback rewrite (NFR-S1).
 //
 // APIKey dual housing. Import mirrors ANTHROPIC_AUTH_TOKEN into
 // Core.APIKey and, when a real API_KEY was ALSO present, records it
@@ -201,10 +209,9 @@ func collectOwnedValues(profile config.Profile) map[string]ownedValue {
 // error on the first sjson call that hits it.
 func renderSettings(current []byte, values map[string]ownedValue) ([]byte, error) {
 	// Treat empty / whitespace-only bytes as an empty JSON object.
-	// bytes.TrimSpace covers a file that is literally " " or "\n" —
-	// both are legally-empty settings.json shapes on a fresh install.
+	// Shared predicate treatAsEmpty keeps this in lockstep with Import.
 	work := current
-	if len(bytes.TrimSpace(work)) == 0 {
+	if treatAsEmpty(work) {
 		work = []byte("{}")
 	}
 
@@ -219,17 +226,44 @@ func renderSettings(current []byte, values map[string]ownedValue) ([]byte, error
 		return nil, fmt.Errorf("%w: claudecode plan: current settings.json is not valid JSON", writepath.ErrParseFailed)
 	}
 
+	// Additional shape check: gjson.ValidBytes accepts a bare `null`,
+	// scalar, or array at the JSON root, and it also accepts a document
+	// with trailing junk after the first valid value on some releases.
+	// Overlay-as-truth (NFR-S6) only makes sense over an object-shaped
+	// document — a bare `null` root would let sjson silently succeed
+	// writing over it, masking corruption. Require the trimmed root to
+	// start with '{'; refuse anything else with ErrParseFailed. Also
+	// re-validate on the trimmed slice: gjson.ValidBytes tolerates
+	// trailing whitespace but not trailing non-whitespace junk, and
+	// json.Valid is stricter about the "single top-level value" rule
+	// than gjson is, so we belt-and-brace with encoding/json.Valid.
+	trimmed := bytes.TrimSpace(work)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("%w: claudecode plan: settings.json root must be a JSON object, got %s", writepath.ErrParseFailed, describeRoot(trimmed))
+	}
+	if !json.Valid(work) {
+		return nil, fmt.Errorf("%w: claudecode plan: settings.json has trailing content after root object", writepath.ErrParseFailed)
+	}
+
 	// Iterate OwnedKeysSettingsJSON (NOT the values map) so iteration
 	// order is deterministic — the allowlist is sorted at package
 	// init. Deterministic output makes goldens reviewable in PRs.
 	for _, key := range OwnedKeysSettingsJSON {
 		v, ok := values[key]
 		if !ok {
-			// Should not happen — collectOwnedValues populates every
-			// allowlist entry — but if a future refactor forgets to
-			// seed a slot, treat it as "absent" (delete) rather than
-			// leaving stale bytes untouched.
-			v = ownedValue{present: false}
+			// collectOwnedValues MUST populate every allowlist entry —
+			// that is the E3 invariant that ties Files() / Plan /
+			// Import together. A silent `v = ownedValue{present:
+			// false}` fallback here would mask a future refactor that
+			// forgets to seed a slot: the slot would be quietly
+			// DeleteBytes'd on every write, and the operator would
+			// only notice by grepping settings.json for a missing key.
+			// Panic instead — defense-in-depth symmetric with the
+			// allowlist init() panic in allowlist.go. Callers who
+			// legitimately want "not present" set it via
+			// collectOwnedValues; there is no legitimate path where
+			// the map is missing a key.
+			panic(fmt.Errorf("claudecode plan: allowlist key %q missing from collectOwnedValues — E3 invariant broken", key))
 		}
 
 		if v.present {
@@ -266,7 +300,7 @@ func renderSettings(current []byte, values map[string]ownedValue) ([]byte, error
 // the discipline in synthetic_adapter_test.go.
 func jsonParser() writepath.Parser {
 	return writepath.ParserFunc(func(data []byte) (any, error) {
-		if len(bytes.TrimSpace(data)) == 0 {
+		if treatAsEmpty(data) {
 			return nil, nil
 		}
 		var v any
@@ -275,4 +309,21 @@ func jsonParser() writepath.Parser {
 		}
 		return v, nil
 	})
+}
+
+// describeRoot renders a short, quoted preview of a would-be root value
+// for the "root must be a JSON object" error message. Kept tiny and
+// non-allocating on the hot path: at most 16 bytes of trimmed content
+// are surfaced, plus an ellipsis marker when truncated. Returning
+// "<empty>" for a zero-length slice (rather than an empty quoted string)
+// keeps the operator-facing message unambiguous.
+func describeRoot(trimmed []byte) string {
+	if len(trimmed) == 0 {
+		return "<empty>"
+	}
+	const max = 16
+	if len(trimmed) > max {
+		return fmt.Sprintf("%q...", trimmed[:max])
+	}
+	return fmt.Sprintf("%q", trimmed)
 }

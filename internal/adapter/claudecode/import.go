@@ -8,10 +8,15 @@
 // Design notes
 // ============
 //
-// Empty-file policy. A zero-byte settings.json is a well-defined shape:
-// Claude Code writes an empty file on its very first launch before any
-// user setting has been recorded. Import interprets an empty file as
-// the JSON object `{}` — same result as an actual `{}` on disk. This is
+// Empty-file policy. A zero-byte OR whitespace-only settings.json is a
+// well-defined shape: Claude Code writes an empty file on its very first
+// launch before any user setting has been recorded, and a hand-edited
+// file whose body was cleared but which retains a trailing newline is
+// operationally identical. Import interprets both as the JSON object
+// `{}` — same result as an actual `{}` on disk. The predicate lives in
+// treatAsEmpty (emptycheck.go) and is shared with Plan.Transform so the
+// two paths cannot diverge (Import ErrParseFailed vs Plan silent-merge
+// on the same bytes was a real bug prior to this consolidation). This is
 // NOT a fallback rewrite (Import never writes); it is a documented read
 // policy. NFR-S1's "no silent fallback" rule addresses fallback WRITES
 // on malformed input; a well-defined interpretation of an empty file at
@@ -135,10 +140,11 @@ func (a *Adapter) importFromSettings(ctx context.Context, r *storage.Resolver) (
 		return emptyCore, emptyOverlay, fmt.Errorf("claudecode import: read %q: %w", path, err)
 	}
 
-	// Empty file → interpret as `{}` (see file-level godoc for the
-	// policy rationale). Fall through to the empty flat map below.
+	// Empty (or whitespace-only) file → interpret as `{}` (see
+	// file-level godoc for the policy rationale). Shared predicate
+	// treatAsEmpty keeps Import and Plan.Transform in lockstep.
 	var root map[string]any
-	if len(data) == 0 {
+	if treatAsEmpty(data) {
 		root = map[string]any{}
 	} else {
 		if err := json.Unmarshal(data, &root); err != nil {
