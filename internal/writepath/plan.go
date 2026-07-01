@@ -55,8 +55,10 @@ import (
 // Encodes PRD FR-5 (single locked write-path) and FR-16 (per-file plan
 // unit consumed by the two-phase commit).
 type WritePlan struct {
-	// Tool identifies the producing adapter, e.g. "claudecode", "codex".
-	// Used for backup path routing and audit-log entries. Required.
+	// Tool identifies the producing adapter, e.g. "claude_code", "codex"
+	// (ADR-0001 frozen values; see config.ToolID). Used for backup path
+	// routing and audit-log entries. Required. E3-S2 will retype this as
+	// adapter.ToolID for compile-time enforcement.
 	Tool string
 
 	// Target is the absolute path to the file to write. Required. Must

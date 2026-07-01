@@ -120,38 +120,47 @@ Adapters are the only modules that know a specific tool's file format. They are 
 ```go
 type Adapter interface {
     ID() ToolID
-    Detect() (Presence, error)
+    Detect(ctx context.Context, r *storage.Resolver) (Presence, error)
 
     // Files lists every on-disk file claudecm owns for this tool, with format and
     // the frozen owned-key allowlist for each file. This drives merge-preserve.
-    Files() []OwnedFile
+    // Slice order is the two-phase commit stage/rename order (auth-first, §5).
+    Files(r *storage.Resolver) OwnedFiles
 
-    // Import reads the current on-disk owned files and produces (a) the core
-    // intent the user appears to be running and (b) a candidate overlay capturing
-    // tool-specific deviations.
-    Import(Files) (CoreFromTool, OverlayFromTool, error)
+    // Import reads the current on-disk owned files (via the Resolver) and
+    // produces (a) the core intent the user appears to be running and (b) a
+    // candidate overlay capturing tool-specific deviations.
+    Import(ctx context.Context, r *storage.Resolver) (CoreFromTool, OverlayFromTool, error)
 
     // Plan is pure: read current bytes, parse, diff against the rendered profile,
-    // and produce a per-file WritePlan. NO writes happen here. Plan is what
-    // powers --dry-run and the FR-4 pre-apply diff.
-    Plan(Profile) (WritePlan, error)
+    // and produce one WritePlan per owned file (per-file grain — required because
+    // Codex owns two files). NO writes happen here. Plan is what powers
+    // --dry-run and the FR-4 pre-apply diff.
+    Plan(ctx context.Context, r *storage.Resolver, profile Profile) ([]WritePlan, error)
 
-    // Apply hands each per-file plan to internal/writepath.Apply through the
-    // two-phase commit (internal/commit). The adapter never opens a file for
-    // writing itself.
-    Apply(WritePlan) (ApplyReport, error)
+    // Apply hands ONE per-file plan to internal/writepath.Apply. Batch
+    // orchestration across files lives in internal/commit (§5), which calls
+    // Apply once per WritePlan. The adapter never opens a file for writing
+    // itself.
+    Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (ApplyReport, error)
 
     // Project renders what the tool will effectively see, layered through the
     // resolver. Used by `current` and `explain`.
-    Project(Profile) (EffectiveView, error)
+    Project(ctx context.Context, r *storage.Resolver, profile Profile) (EffectiveView, error)
 }
 
 type OwnedFile struct {
-    Path        string       // e.g. "~/.claude/settings.json" (~/ expanded via storage/paths)
-    Format      FileFormat   // JSON | JSONC | TOML
-    OwnedKeys   []KeyPath    // frozen allowlist (e.g. ["env.ANTHROPIC_API_KEY", ...])
+    Path        string       // absolute path constructed via internal/storage/paths.go
+    Format      Format       // json | jsonc | toml
+    OwnedKeys   []string     // frozen allowlist (e.g. ["env.ANTHROPIC_API_KEY", ...])
+    Optional    bool         // true when Import may proceed with the file missing
 }
+
+// OwnedFiles is []OwnedFile, named to avoid colliding with Adapter.Files().
+type OwnedFiles = []OwnedFile
 ```
+
+Every filesystem-touching method takes `context.Context` (cancellation from cmd/*) and `*storage.Resolver` (dependency injection: the Resolver is the sole legal source of HOME-anchored paths, coding-standards rule 3). `Plan` returns `[]WritePlan` — per-file grain — because Codex owns two files and each is committed in a distinct auth-first order. Import reads via the Resolver rather than accepting a pre-computed Files argument, so the adapter stays the sole authority on owned paths.
 
 ### 3.1 Adapter packages in v1
 
@@ -242,18 +251,37 @@ Layer order, lowest to highest precedence (PRD FR-7):
 
 ```go
 type EffectiveView struct {
-    Tool   ToolID
-    Fields []EffectiveField
+    Tool                  ToolID
+    Fields                []EffectiveField // sort via adapter.SortFields before rendering
+    ExternalDriftDetected bool
+    ExternalDriftFile     string
 }
 
 type EffectiveField struct {
-    Key            string        // e.g. "model", "base_url"
-    Value          string        // redacted by default for `secret: true` fields (NFR-S8)
-    WinningLayer   Layer         // EnvOverride | OnDiskToolConfig | ProfileOverlay | ProfileCore | BuiltInDefault
-    Source         string        // file path or env var name backing the winning layer
-    ShadowedLayers []ShadowEntry // every lower layer that also had a value, in precedence order
+    Key          string   // flat key path (writepath.Flatten shape), e.g. "env.ANTHROPIC_API_KEY"
+    Value        any      // heterogeneous: string | bool | int64 | float64 | []string
+    Secret       bool     // adapter-declared redaction bit; independent of Go type
+    WinningLayer Layer    // EnvOverride | OnDiskToolConfig | ProfileOverlay | ProfileCore | BuiltInDefault
+    Source       string   // file path or env var name backing the winning layer
+    Shadowed     []ShadowedLayer // every lower layer that also had a value, in precedence order
+}
+
+type ShadowedLayer struct {
+    Layer  Layer
+    Source string
+    Value  any
+    Secret bool
 }
 ```
+
+`Value` is `any` because real tool config is not uniformly string-typed: Claude Code's `CLAUDE_CODE_USE_BEDROCK` is a bool, some Codex knobs are numeric, and array-shaped keys deserialize to `[]string`. Widening at the projection boundary preserves type information that `explain` needs to render correctly and keeps import → switch → export round-trips lossless.
+
+Redaction contract (NFR-S8) — because `Value` is `any`, redactors cannot regex over a string. The rule is:
+1. The adapter that populated the field is the authority: if the field is a secret (env vars ending `_KEY` / `_TOKEN` / `_SECRET`, or on the per-adapter explicit secret allowlist), the adapter MUST set `Secret=true` at Project time.
+2. Renderers (`list` / `current` / `explain` / `export`) type-switch on `Value` before formatting; passing a bool or int64 through `%s` is a rendering bug.
+3. `--reveal` disables redaction uniformly regardless of type.
+
+`Fields` is a slice, not a map: `explain` output ordering is a property of the data. Renderers MUST call `adapter.SortFields(view.Fields)` (or otherwise commit to a stable order) before formatting so runs against identical input produce identical output.
 
 ### 6.1 EnvOverride allowlist (NFR-E1)
 

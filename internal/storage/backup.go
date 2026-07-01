@@ -81,7 +81,7 @@ var ErrSourceTooLarge = errors.New("claudecm: backup source exceeds size ceiling
 // a value type: writepath.Apply will pass it by value into the reparse-check
 // step in a later story.
 type BackupRecord struct {
-	Tool       string    // "claudecode" / "codex" / ...
+	Tool       string    // "claude_code" / "codex" / ... (ADR-0001 frozen values; see config.ToolID). E3-S2 will retype this as adapter.ToolID for compile-time enforcement.
 	Basename   string    // basename of the source file (e.g. "settings.json")
 	SourcePath string    // full path to the file that was backed up
 	BackupPath string    // full path to the newly written backup file
