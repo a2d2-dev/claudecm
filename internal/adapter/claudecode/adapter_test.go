@@ -319,10 +319,9 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 	a := claudecode.New()
 	ctx := context.Background()
 
-	// Import
-	if _, _, err := a.Import(ctx, r); !errors.Is(err, claudecode.ErrNotImplemented) {
-		t.Errorf("Import err = %v, want ErrNotImplemented", err)
-	}
+	// Import has landed in E3-S3 with its own dedicated tests in
+	// import_test.go; it is no longer in the stub set.
+
 	// Plan
 	if _, err := a.Plan(ctx, r, config.Profile{}); !errors.Is(err, claudecode.ErrNotImplemented) {
 		t.Errorf("Plan err = %v, want ErrNotImplemented", err)

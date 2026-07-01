@@ -187,10 +187,19 @@ func (a *Adapter) Detect(ctx context.Context, r *storage.Resolver) (adapter.Pres
 	return p, nil
 }
 
-// Import is a stub — E3-S3 replaces this with the real
-// tool-config-to-profile importer.
+// Import reads ~/.claude/settings.json and returns the (CoreFromTool,
+// OverlayFromTool) pair describing the intent the user is currently
+// running. Real implementation lives in import.go; this method is a
+// thin dispatcher so adapter.go stays a grep-friendly index of the
+// public contract.
+//
+// Errors: errors.Is(err, ErrNoConfig) when the file is absent (fresh
+// install); errors.Is(err, ErrParseFailed) (which also matches
+// writepath.ErrParseFailed) when the file exists but does not decode
+// as a JSON object; errors.Is(err, ErrOutsideHome) when a symlink at
+// the file escapes HOME; ctx.Err() when the caller cancelled.
 func (a *Adapter) Import(ctx context.Context, r *storage.Resolver) (adapter.CoreFromTool, adapter.OverlayFromTool, error) {
-	return adapter.CoreFromTool{}, adapter.OverlayFromTool{}, ErrNotImplemented
+	return a.importFromSettings(ctx, r)
 }
 
 // Plan is a stub — E3-S4 replaces this with the real WritePlan
