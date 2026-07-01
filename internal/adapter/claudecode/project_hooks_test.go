@@ -2,10 +2,11 @@
 
 package claudecode_test
 
-// project_test_hooks.go — E3-S6. Tests here exercise layer-precedence
-// paths that require injecting a synthetic env-var universe via the
-// build-tag seam (SetLookupEnvForTest). Compiled only under
-// `-tags=test`; symmetric with storage.atomic_syncfunc's test hook.
+// project_hooks_test.go — E3-S6, migrated to the shared envextract
+// seam in E5-S3. Tests here exercise layer-precedence paths that
+// require injecting a synthetic env-var universe via the build-tag
+// seam (envextract.SetLookupForTest). Compiled only under `-tags=test`;
+// symmetric with storage.atomic_syncfunc's test hook.
 //
 // These tests deliberately do NOT use t.Setenv for the env layer —
 // t.Setenv can only override real process env, and the goal here is
@@ -21,18 +22,24 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/adapter/claudecode"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/envextract"
 )
 
-// envUniverse returns a lookupEnv shim that resolves names from the
-// given map and returns "" for anything else. Passed to
-// claudecode.SetLookupEnvForTest so the process env is fully
-// insulated.
-func envUniverse(m map[string]string) func(string) string {
-	return func(name string) string { return m[name] }
+// envUniverse returns a lookup shim that resolves names from the
+// given map. A name is treated as present iff the map carries the
+// key — this preserves the "empty string is unset" contract Claude
+// Code observes at runtime (adapters call envextract.Lookup and drop
+// keys where the value is ""). Passed to envextract.SetLookupForTest
+// so the process env is fully insulated.
+func envUniverse(m map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		v, ok := m[name]
+		return v, ok
+	}
 }
 
 func TestProject_EnvOverrideWinsOverOnDisk(t *testing.T) {
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"ANTHROPIC_BASE_URL": "https://env.example",
 	}))
 	defer restore()
@@ -84,7 +91,7 @@ func TestProject_EnvOverrideWinsOverOnDisk(t *testing.T) {
 }
 
 func TestProject_OnDiskWinsOverOverlay(t *testing.T) {
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{}))
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{}))
 	defer restore()
 
 	r := projectResolver(t)
@@ -124,7 +131,7 @@ func TestProject_OverlayWinsOverCore(t *testing.T) {
 	// env.ANTHROPIC_AUTH_TOKEN (per Plan mapping), while an overlay
 	// ExtraEnv["ANTHROPIC_API_KEY"] routes into env.ANTHROPIC_API_KEY
 	// and has no Core counterpart.
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{}))
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{}))
 	defer restore()
 
 	r := projectResolver(t)
@@ -175,7 +182,7 @@ func TestProject_AllFiveLayers(t *testing.T) {
 	// contribute env.ANTHROPIC_MODEL, plus an env var wins. Since
 	// v1 has no BuiltInDefault for any owned key, the shadowed set
 	// carries three entries: Core → Overlay → OnDisk (older→newer).
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"ANTHROPIC_MODEL": "env-model",
 	}))
 	defer restore()
@@ -227,7 +234,7 @@ func TestProject_AllFiveLayers(t *testing.T) {
 // "" does not count as an EnvOverride contribution — Claude Code
 // itself would not consume it, and the resolver mirrors that.
 func TestProject_EnvEmptyStringIgnored(t *testing.T) {
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"ANTHROPIC_MODEL": "",
 	}))
 	defer restore()
@@ -257,7 +264,7 @@ func TestProject_EnvEmptyStringIgnored(t *testing.T) {
 // per-tool allowlist are ignored even if set. Sets a bogus var that
 // matches no owned key and confirms the view is unchanged.
 func TestProject_EnvAllowlistOnly(t *testing.T) {
-	restore := claudecode.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"ANTHROPIC_MODEL":       "env-model",
 		"SOME_OTHER_VAR":        "should-not-leak",
 		"CLAUDE_UNRELATED_KNOB": "should-not-leak",

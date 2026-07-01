@@ -55,12 +55,16 @@
 // gjson.Get returns a Result whose Exists() disambiguates "absent"
 // from "present but empty string" — same shape as the ExtraEnv rule.
 //
-// EnvOverride. Read via lookupEnv (build-tag seam — see project_env.go
-// / project_env_testhook.go). A non-empty env-var value wins over all
-// lower layers. Empty string on the process env is treated as "not
-// set" here because Claude Code itself will not consume an empty env
-// var literal to override a settings.json value — matching that
-// runtime behaviour keeps the effective view honest.
+// EnvOverride. Read via envextract.Lookup — the single env-read
+// primitive shared with the Codex adapter (E5-S3). A non-empty
+// env-var value wins over all lower layers. Empty string on the
+// process env is treated as "not set" here because Claude Code
+// itself will not consume an empty env var literal to override a
+// settings.json value — matching that runtime behaviour keeps the
+// effective view honest. The build-tag seam that lets tests inject
+// a synthetic env universe lives in internal/envextract (see
+// SetLookupForTest under `//go:build test`); this adapter carries
+// no per-package seam of its own.
 //
 // BuiltInDefault. No v1 owned key has a built-in default value (the
 // architecture.md §6 default layer is empty for Claude Code today).
@@ -87,6 +91,7 @@ import (
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -402,7 +407,11 @@ func gjsonValueToAny(res gjson.Result) any {
 // Empty string is treated as absent because Claude Code will not use
 // an empty env var literal to override a settings.json value.
 func envOverrideLayer(envName string) *layerValue {
-	v := lookupEnv(envName)
+	// envextract.Lookup is the single env-read primitive for the
+	// resolver (E5-S3). We discard the "set" boolean because Claude
+	// Code treats an empty env-var literal as absent — the effective
+	// view mirrors that runtime behaviour.
+	v, _ := envextract.Lookup(envName)
 	if v == "" {
 		return nil
 	}
