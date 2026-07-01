@@ -2,10 +2,11 @@
 
 package codex_test
 
-// project_hooks_test.go — E4-S6. Tests here exercise layer-precedence
-// paths that require injecting a synthetic env-var universe via the
-// build-tag seam (SetLookupEnvForTest). Compiled only under
-// `-tags=test`; symmetric with claudecode/project_hooks_test.go.
+// project_hooks_test.go — E4-S6, migrated to the shared envextract
+// seam in E5-S3. Tests here exercise layer-precedence paths that
+// require injecting a synthetic env-var universe via the build-tag
+// seam (envextract.SetLookupForTest). Compiled only under `-tags=test`;
+// symmetric with claudecode/project_hooks_test.go.
 
 import (
 	"context"
@@ -14,12 +15,19 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/adapter/codex"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/envextract"
 )
 
-// envUniverse returns a lookupEnv shim that resolves names from the
-// given map and returns "" for anything else.
-func envUniverse(m map[string]string) func(string) string {
-	return func(name string) string { return m[name] }
+// envUniverse returns a lookup shim that resolves names from the
+// given map. Passed to envextract.SetLookupForTest so the process
+// env is fully insulated. Presence in the map = "env var is set"
+// (matches os.LookupEnv semantics; adapters treat empty as absent
+// on top of that).
+func envUniverse(m map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		v, ok := m[name]
+		return v, ok
+	}
 }
 
 // TestProject_EnvOverrideWinsOverOnDisk_OPENAI_API_KEY exercises the
@@ -27,7 +35,7 @@ func envUniverse(m map[string]string) func(string) string {
 // auth.json a second, profile.Core a third → EnvOverride wins with
 // Shadowed = [Core, OnDisk] older→newer.
 func TestProject_EnvOverrideWinsOverOnDisk_OPENAI_API_KEY(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"OPENAI_API_KEY": "env-key",
 	}))
 	defer restore()
@@ -82,7 +90,7 @@ func TestProject_EnvOverrideWinsOverOnDisk_OPENAI_API_KEY(t *testing.T) {
 // through the shim; it is a real Codex env var but does not shadow
 // any owned key value.
 func TestProject_EnvNotAllowlistedIgnored(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"OPENAI_API_KEY": "env-key",
 		"CODEX_HOME":     "/should-not-leak",
 		"UNRELATED_KNOB": "should-not-leak",
@@ -116,7 +124,7 @@ func TestProject_EnvNotAllowlistedIgnored(t *testing.T) {
 // model="haiku", env CODEX_MODEL="sonnet" → env wins, shadowed set
 // carries both older layers.
 func TestProject_EnvShadowingConfigTomlKey(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"CODEX_MODEL": "sonnet",
 	}))
 	defer restore()
@@ -163,7 +171,7 @@ func TestProject_EnvShadowingConfigTomlKey(t *testing.T) {
 // this test, a future rename or accidental removal of the mapping
 // would silently drop env-based provider overrides).
 func TestProject_EnvShadowingCodexModelProvider(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"CODEX_MODEL_PROVIDER": "env-provider",
 	}))
 	defer restore()
@@ -212,7 +220,7 @@ func TestProject_EnvShadowingCodexModelProvider(t *testing.T) {
 // key). Verifies the env-var → owned-key mapping picks the correct
 // dotted path.
 func TestProject_EnvShadowingOpenAIBaseURL(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"OPENAI_BASE_URL": "https://env.openai.example",
 	}))
 	defer restore()
@@ -246,7 +254,7 @@ base_url = "https://disk.openai.example"
 // TestProject_EnvEmptyStringIgnored — an env var set to "" does not
 // count as an EnvOverride contribution.
 func TestProject_EnvEmptyStringIgnored(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{
 		"CODEX_MODEL": "",
 	}))
 	defer restore()
@@ -274,7 +282,7 @@ func TestProject_EnvEmptyStringIgnored(t *testing.T) {
 // surface as OnDisk-layer entries with correct Secret flags. Under
 // -tags=test so env is fully insulated.
 func TestProject_TokenFieldsFromAuthJson(t *testing.T) {
-	restore := codex.SetLookupEnvForTest(envUniverse(map[string]string{}))
+	restore := envextract.SetLookupForTest(envUniverse(map[string]string{}))
 	defer restore()
 
 	r := projectResolver(t)

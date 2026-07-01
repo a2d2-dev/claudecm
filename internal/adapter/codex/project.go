@@ -80,11 +80,15 @@
 // hand-edit like `"OPENAI_API_KEY": null` from shadowing a real
 // ProfileCore value.
 //
-// EnvOverride. Read via lookupEnv (build-tag seam — see project_env.go
-// / project_env_testhook.go). A non-empty env-var value wins over all
-// lower layers. Empty string on the process env is treated as "not
-// set" here because Codex CLI itself would not consume an empty env
-// literal to override a config.toml value.
+// EnvOverride. Read via envextract.Lookup — the single env-read
+// primitive shared with the Claude Code adapter (E5-S3). A non-empty
+// env-var value wins over all lower layers. Empty string on the
+// process env is treated as "not set" here because Codex CLI itself
+// would not consume an empty env literal to override a config.toml
+// value. The build-tag seam that lets tests inject a synthetic env
+// universe lives in internal/envextract (see SetLookupForTest under
+// `//go:build test`); this adapter carries no per-package seam of
+// its own.
 //
 // BuiltInDefault. No v1 owned key has a built-in default value. The
 // layer is still enumerated in the code path so a future default
@@ -114,6 +118,7 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	codextoml "github.com/a2d2-dev/claudecm/internal/adapter/codex/toml"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -473,7 +478,11 @@ func envOverrideLayer(envName string) *layerValue {
 	if envName == "" {
 		return nil
 	}
-	v := lookupEnv(envName)
+	// envextract.Lookup is the single env-read primitive for the
+	// resolver (E5-S3). We discard the "set" boolean because Codex
+	// treats an empty env-var literal as absent — the effective view
+	// mirrors that runtime behaviour.
+	v, _ := envextract.Lookup(envName)
 	if v == "" {
 		return nil
 	}
