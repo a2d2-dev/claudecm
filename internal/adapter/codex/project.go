@@ -117,6 +117,7 @@ import (
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	codextoml "github.com/a2d2-dev/claudecm/internal/adapter/codex/toml"
+	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
@@ -207,18 +208,16 @@ func init() {
 //
 // Read-only: never writes to disk, never mutates the process env.
 func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, profile config.Profile) (adapter.EffectiveView, error) {
-	// TODO(task #31: state-schema evolution): populate
-	// view.ExternalDriftDetected / view.ExternalDriftFile once
-	// internal/config.State grows a LastAppliedPerTool[codex].SHA256
-	// slot. See docs/plan/stories/E4-S6.md AC 3 for the E4-S6
-	// deferral, docs/plan/stories/E3-S6.md for the sibling
-	// Claude Code deferral (same schema-evolution dependency), and
-	// the pending "State schema evolution for drift tracking" task
-	// (#31) tracked in the sprint plan — the EffectiveView fields
-	// exist on the adapter type today but are left zero-valued here
-	// because the state schema does not yet carry the two SHA256s
-	// (one per file) to compare against. Grep for `task #31` to find
-	// every deferral site once #31 lands.
+	// E5-S4: external drift detection. State.LastAppliedPerTool[codex]
+	// records a per-file entry (auth.json and config.toml are tracked
+	// independently) with the SHA256 of the last successful Apply.
+	// Project re-hashes each owned file (raw bytes, before any parse
+	// or normalisation) and reports drift for each file whose SHA256
+	// no longer matches. No prior state for a given file → no drift
+	// reported for that file (E5-S4 AC edge case). Both files can
+	// drift independently — the check runs per file so partial drift
+	// (e.g. auth.json edited, config.toml intact) surfaces only the
+	// touched file.
 	view := adapter.EffectiveView{Tool: adapter.ToolCodex}
 
 	// Honour ctx cancellation before any filesystem or env work.
@@ -233,13 +232,39 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 	// that file's OnDisk contribution. Malformed → ErrParseFailed.
 	// Symlink-outside-HOME → ErrOutsideHome. Uses the shared helpers
 	// in readers.go so the read semantics stay identical to Import's.
-	configPresent, tomlDoc, err := readCodexTOMLWithPrefix(configPath, r, "codex project")
+	// The raw-bytes tail lets the drift check hash the SAME bytes the
+	// parser saw, without opening the owned file a second time
+	// (F4/F5 fix; the previous driftForFile / os.ReadFile pass also
+	// bypassed the readers' HOME-containment check).
+	configPresent, tomlDoc, configRaw, err := readCodexTOMLWithPrefix(configPath, r, "codex project")
 	if err != nil {
 		return view, err
 	}
-	authPresent, authRoot, authFlat, err := readCodexAuthWithPrefix(authPath, r, "codex project")
+	authPresent, authRoot, authFlat, authRaw, err := readCodexAuthWithPrefix(authPath, r, "codex project")
 	if err != nil {
 		return view, err
+	}
+
+	// Drift check. Runs AFTER the reads so we hash the same bytes the
+	// parser consumed — no second os.ReadFile, no second HOME-containment
+	// check. Order the slice auth-first to match Files() ordering so
+	// renderers iterating ExternalDriftFiles get deterministic output.
+	//
+	// A file whose read helper returned raw==nil (absent, or a
+	// containment/parse error propagated above) contributes no drift
+	// entry: for absent files this matches the AC "absent file → no
+	// drift"; for error paths we would already have returned before
+	// reaching this point.
+	var driftFiles []string
+	if authRaw != nil && driftForFileBytes(r, adapter.ToolCodex, authPath, authRaw) {
+		driftFiles = append(driftFiles, authPath)
+	}
+	if configRaw != nil && driftForFileBytes(r, adapter.ToolCodex, configPath, configRaw) {
+		driftFiles = append(driftFiles, configPath)
+	}
+	if len(driftFiles) > 0 {
+		view.ExternalDriftDetected = true
+		view.ExternalDriftFiles = driftFiles
 	}
 
 	// Cache the overlay Raw map once so the per-key loop does not
@@ -491,6 +516,27 @@ func envOverrideLayer(envName string) *layerValue {
 		value:  v,
 		source: "env:" + envName,
 	}
+}
+
+// driftForFileBytes reports whether raw differs from the SHA256 that
+// state.yaml records for (tool, filePath). Returns false when state
+// has no prior entry (E5-S4 AC: no anchor → no drift) or when the
+// state read itself errored — drift is informational and must never
+// break `current` / `explain` (state read errors are swallowed here
+// on purpose; the E5-S4 review's F4/F5 findings verified we do not
+// double-read the owned file).
+//
+// Symmetric with the claudecode adapter's onDisk-hash path, which
+// runs against stateio directly out of project.go's readOnDiskSettings.
+// The codex readers surface raw bytes to keep the drift check honest
+// against the parser's view of the file (no TOCTOU between parse and
+// hash).
+func driftForFileBytes(r *storage.Resolver, tool config.ToolID, filePath string, raw []byte) bool {
+	last, ok, err := stateio.LoadLastApplied(r, tool, filePath)
+	if err != nil || !ok {
+		return false
+	}
+	return stateio.Sha256Hex(raw) != last.SHA256
 }
 
 // The tri-state read helpers formerly named readCodexTOMLForProject /

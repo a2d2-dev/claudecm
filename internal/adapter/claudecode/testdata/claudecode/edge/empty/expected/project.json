@@ -2,5 +2,5 @@
   "Tool": "claude_code",
   "Fields": [],
   "ExternalDriftDetected": false,
-  "ExternalDriftFile": ""
+  "ExternalDriftFiles": null
 }

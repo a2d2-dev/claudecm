@@ -90,6 +90,7 @@ import (
 	"github.com/tidwall/gjson"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
+	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/storage"
@@ -146,13 +147,16 @@ func init() {
 //
 // Read-only: never writes to disk, never mutates the process env.
 func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, profile config.Profile) (adapter.EffectiveView, error) {
-	// TODO(E5/E7 state-schema evolution): populate
-	// view.ExternalDriftDetected / view.ExternalDriftFile once
-	// internal/config.State grows a LastAppliedPerTool[claude_code].SHA256
-	// slot. See docs/plan/stories/E3-S6.md "Implementation Notes /
-	// Decision" for the rationale — the EffectiveView fields exist on
-	// the adapter type today but are left zero-valued by E3-S6 because
-	// the state schema does not yet carry the SHA256 to compare against.
+	// E5-S4: external drift detection. State.LastAppliedPerTool[claude_code]
+	// records the file path + SHA256 of the last successful Apply.
+	// Project re-hashes the current on-disk settings.json (raw bytes,
+	// before any parse or normalisation) and compares against that
+	// SHA256. Mismatch → EffectiveView.ExternalDriftDetected = true and
+	// the offending file appears in ExternalDriftFiles. No prior state
+	// (either the state.yaml file is absent, or has no entry for this
+	// tool) → drift is NOT reported (E5-S4 AC "no prior state → no
+	// drift report"). Drift is READ-ONLY informational: no auto-reapply,
+	// no auto-import (architecture §6.2, PRD FR-6).
 	view := adapter.EffectiveView{Tool: adapter.ToolClaudeCode}
 
 	// Honour ctx cancellation before any filesystem or env work.
@@ -162,10 +166,33 @@ func (a *Adapter) projectFromProfile(ctx context.Context, r *storage.Resolver, p
 
 	// Read on-disk settings.json (best-effort). Missing → empty {}.
 	// Symlink-outside-HOME → ErrOutsideHome. Malformed → ErrParseFailed.
+	// rawOnDisk carries the untransformed bytes for the drift check;
+	// onDisk is the normalised form (empty → "{}") the field loop
+	// consumes. Keeping both means drift and layered projection do
+	// not step on each other's I/O.
 	settingsPath := SettingsPath(r)
-	onDisk, haveOnDiskFile, err := readOnDiskSettings(settingsPath, r)
+	onDisk, rawOnDisk, haveOnDiskFile, err := readOnDiskSettings(settingsPath, r)
 	if err != nil {
 		return view, err
+	}
+
+	// External-drift check (E5-S4). Runs BEFORE the field loop so the
+	// drift flag is populated regardless of which owned keys turn out
+	// to contribute. Only fires when (a) the on-disk file is present
+	// AND (b) state.yaml records a prior Apply for this tool anchored
+	// at this same file. Any other combination — missing file, missing
+	// state, state anchored at a different path — is silently treated
+	// as "no drift" per the E5-S4 AC edge case. Errors from state read
+	// are swallowed here: drift is informational, and a corrupt or
+	// unreadable state.yaml must not break `current` / `explain`.
+	if haveOnDiskFile {
+		if last, ok, _ := stateio.LoadLastApplied(r, adapter.ToolClaudeCode, settingsPath); ok {
+			currentSHA := stateio.Sha256Hex(rawOnDisk)
+			if currentSHA != last.SHA256 {
+				view.ExternalDriftDetected = true
+				view.ExternalDriftFiles = []string{settingsPath}
+			}
+		}
 	}
 
 	// Cache the overlay ExtraEnv map (may be nil) once so the per-key
@@ -434,27 +461,31 @@ func envOverrideLayer(envName string) *layerValue {
 // lookups behave uniformly regardless of a fresh-install zero-byte
 // shape (shared predicate treatAsEmpty keeps this in lockstep with
 // Import / Plan).
-func readOnDiskSettings(path string, r *storage.Resolver) ([]byte, bool, error) {
+func readOnDiskSettings(path string, r *storage.Resolver) (normalised, raw []byte, present bool, err error) {
 	// Symlink containment mirrors Import's read-side behaviour. When
 	// the file is absent (EvalSymlinks ENOENT), Import maps to
 	// ErrNoConfig; Project instead treats that as "no on-disk layer"
-	// and returns (nil, false, nil) so a fresh install still produces
-	// an EffectiveView driven by profile+env.
-	if err := verifyReadTargetInHome(path, r); err != nil {
-		if errors.Is(err, ErrNoConfig) {
-			return nil, false, nil
+	// and returns (nil, nil, false, nil) so a fresh install still
+	// produces an EffectiveView driven by profile+env.
+	if verr := verifyReadTargetInHome(path, r); verr != nil {
+		if errors.Is(verr, ErrNoConfig) {
+			return nil, nil, false, nil
 		}
-		return nil, false, err
+		return nil, nil, false, verr
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		if errors.Is(rerr, os.ErrNotExist) {
+			return nil, nil, false, nil
 		}
-		return nil, false, fmt.Errorf("claudecode project: read %q: %w", path, err)
+		return nil, nil, false, fmt.Errorf("claudecode project: read %q: %w", path, rerr)
 	}
 	if treatAsEmpty(data) {
-		return []byte("{}"), true, nil
+		// Return normalised "{}" for the layer chain but preserve the
+		// original bytes for the drift SHA256 — an empty file that
+		// State recorded as SHA256("") legitimately matches, and any
+		// other body is real drift.
+		return []byte("{}"), data, true, nil
 	}
 	// Shape-check the same way Plan does: require an object root.
 	// gjson.ValidBytes tolerates a bare `null`/scalar/array at the
@@ -463,17 +494,17 @@ func readOnDiskSettings(path string, r *storage.Resolver) ([]byte, bool, error) 
 	// ErrParseFailed so a corrupt file cannot silently under-report
 	// the layer chain.
 	if !gjson.ValidBytes(data) {
-		return nil, false, fmt.Errorf("%w: %s: not valid JSON", ErrParseFailed, path)
+		return nil, nil, false, fmt.Errorf("%w: %s: not valid JSON", ErrParseFailed, path)
 	}
 	if !json.Valid(data) {
-		return nil, false, fmt.Errorf("%w: %s: trailing content after root value", ErrParseFailed, path)
+		return nil, nil, false, fmt.Errorf("%w: %s: trailing content after root value", ErrParseFailed, path)
 	}
 	// Peek at the root byte after trimming; refuse non-object roots.
 	trimmed := trimJSONLeadingSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return nil, false, fmt.Errorf("%w: %s: settings.json root must be a JSON object", ErrParseFailed, path)
+		return nil, nil, false, fmt.Errorf("%w: %s: settings.json root must be a JSON object", ErrParseFailed, path)
 	}
-	return data, true, nil
+	return data, data, true, nil
 }
 
 // trimJSONLeadingSpace returns data with leading ASCII whitespace
@@ -492,4 +523,3 @@ func trimJSONLeadingSpace(data []byte) []byte {
 	}
 	return data[i:]
 }
-

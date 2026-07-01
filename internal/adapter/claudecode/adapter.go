@@ -16,8 +16,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
+	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
@@ -268,6 +270,39 @@ func (a *Adapter) Apply(ctx context.Context, r *storage.Resolver, plan writepath
 	report, err := writepath.Apply(ctx, r, plan)
 	if err != nil {
 		return report, fmt.Errorf("claudecode apply %q: %w", plan.Target, err)
+	}
+
+	// E5-S4 state update: after writepath.Apply succeeds, persist the
+	// (path, SHA256, timestamp) tuple state.yaml uses for external drift
+	// detection. The SHA256 comes from report.PostFingerprint — that is
+	// the digest storage.AtomicWrite computed over the bytes it just
+	// renamed into place, so the digest is guaranteed to match what a
+	// subsequent Project's re-hash of the on-disk file computes without
+	// a duplicate read.
+	//
+	// Skipped Applies do NOT update state — the on-disk bytes are
+	// unchanged, and their fingerprint matches PreFingerprint. DryRun
+	// runs have an empty PostFingerprint.SHA256. The `!report.Skipped`
+	// boolean is the primary guard; the SHA256 != empty check protects
+	// DryRun specifically.
+	//
+	// TODO(E6 cmd/switch): decide whether Skipped=true should anchor
+	// state on first activation. Current behavior: no anchor. See
+	// E5-S4 review finding F3.
+	//
+	// Failures here bubble up so an operator sees "write succeeded but
+	// state.yaml update failed" as a distinct condition — silently
+	// swallowing would leave the drift detector in a permanent
+	// false-positive state after the next external edit. The concrete
+	// scenarios this surfaces (state.yaml on a read-only mount,
+	// bootstrap not run, state.yaml flock timeout under contention) are
+	// actionable operator errors. RecordApplied serialises the
+	// read-modify-write through a state.yaml flock so concurrent Apply
+	// calls do not race (F1 fix, see internal/adapter/stateio).
+	if !plan.DryRun && !report.Skipped && report.PostFingerprint.SHA256 != "" {
+		if serr := stateio.RecordApplied(r, adapter.ToolClaudeCode, plan.Target, report.PostFingerprint.SHA256, time.Now()); serr != nil {
+			return report, fmt.Errorf("claudecode apply %q: state update: %w", plan.Target, serr)
+		}
 	}
 	return report, nil
 }

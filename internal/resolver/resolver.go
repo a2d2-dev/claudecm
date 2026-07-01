@@ -77,7 +77,7 @@ type ToolView struct {
 	// Project (architecture §6). Fields is a slice; renderers MUST
 	// call adapter.SortFields on Effective.Fields before formatting so
 	// output is stable. Effective.ExternalDriftDetected /
-	// ExternalDriftFile flow through verbatim.
+	// ExternalDriftFiles flow through verbatim.
 	Effective adapter.EffectiveView
 
 	// Errors lists non-fatal per-tool issues surfaced during the
