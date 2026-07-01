@@ -63,7 +63,11 @@ func init() {
 
 func runSwitch(cmd *cobra.Command, args []string) error {
 	// Create storage and manager
-	store := storage.NewFileStorage()
+	resolver, err := storage.Default()
+	if err != nil {
+		return fmt.Errorf("failed to resolve HOME: %w", err)
+	}
+	store := storage.NewFileStorage(resolver)
 	validator := config.NewValidator()
 	mgr := config.NewManager(store, validator)
 
@@ -171,7 +175,8 @@ func startShellWithProfile(profile *config.Profile, name string) error {
 	// Start shell
 	fmt.Printf("✓ Switched to profile %q\n", name)
 	fmt.Printf("🚀 Starting new shell with environment loaded...\n")
-	fmt.Println("   Type 'exit' to return to the previous shell\n")
+	fmt.Println("   Type 'exit' to return to the previous shell")
+	fmt.Println()
 
 	shellCmd := exec.Command(shellPath)
 	shellCmd.Env = env

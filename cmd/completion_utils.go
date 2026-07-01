@@ -14,7 +14,11 @@ func profileNamesCompletion(cmd *cobra.Command, args []string, toComplete string
 	}
 
 	// Create storage and manager
-	store := storage.NewFileStorage()
+	resolver, err := storage.Default()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	store := storage.NewFileStorage(resolver)
 	validator := config.NewValidator()
 	mgr := config.NewManager(store, validator)
 

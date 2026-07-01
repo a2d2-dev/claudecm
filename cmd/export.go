@@ -60,7 +60,11 @@ func init() {
 
 func runExport(cmd *cobra.Command, args []string) error {
 	// Create storage and manager
-	store := storage.NewFileStorage()
+	resolver, err := storage.Default()
+	if err != nil {
+		return fmt.Errorf("failed to resolve HOME: %w", err)
+	}
+	store := storage.NewFileStorage(resolver)
 	validator := config.NewValidator()
 	mgr := config.NewManager(store, validator)
 

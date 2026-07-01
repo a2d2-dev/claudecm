@@ -7,14 +7,15 @@ import (
 	"testing"
 )
 
-// withHome installs a sandboxed HOME override for the duration of a subtest
-// and restores whatever was configured before. Every path test must funnel
+// mustResolver builds a Resolver rooted at dir. Every path test funnels
 // through here so we never touch a real user HOME.
-func withHome(t *testing.T, dir string) {
+func mustResolver(t *testing.T, dir string) *Resolver {
 	t.Helper()
-	prev := currentHomeOverride()
-	SetHomeOverride(dir)
-	t.Cleanup(func() { SetHomeOverride(prev) })
+	r, err := NewResolverWithHome(dir)
+	if err != nil {
+		t.Fatalf("NewResolverWithHome(%q) = _, %v; want nil", dir, err)
+	}
+	return r
 }
 
 func TestValidateProfileName(t *testing.T) {
@@ -80,53 +81,58 @@ func TestValidateProfileName(t *testing.T) {
 	}
 }
 
-func TestResolveHome_HonorsOverride(t *testing.T) {
+func TestResolver_HonorsExplicitHome(t *testing.T) {
 	dir := t.TempDir()
-	withHome(t, dir)
-
-	got, err := ResolveHome()
-	if err != nil {
-		t.Fatalf("ResolveHome() = _, %v; want nil error", err)
-	}
-	if want := filepath.Clean(dir); got != want {
-		t.Fatalf("ResolveHome() = %q; want %q", got, want)
+	r := mustResolver(t, dir)
+	if got, want := r.Home(), filepath.Clean(dir); got != want {
+		t.Fatalf("Resolver.Home() = %q; want %q", got, want)
 	}
 }
 
-func TestResolveHome_RefusesRoot(t *testing.T) {
-	withHome(t, "/")
-	if _, err := ResolveHome(); err == nil {
-		t.Fatal(`ResolveHome() with HOME="/" = nil; want refuse`)
+func TestResolver_RefusesRoot(t *testing.T) {
+	if _, err := NewResolverWithHome("/"); err == nil {
+		t.Fatal(`NewResolverWithHome("/") = nil; want refuse`)
 	}
 }
 
-func TestResolveHome_RefusesEmptyOverride(t *testing.T) {
-	// Empty override falls through to os.UserHomeDir(). To simulate the
-	// "empty HOME" branch, override with only whitespace-equivalent absolute
-	// nonsense — cover the non-absolute check instead.
-	withHome(t, "relative/path")
-	if _, err := ResolveHome(); err == nil {
-		t.Fatal("ResolveHome() with relative HOME = nil; want refuse")
+func TestResolver_RefusesRelativeHome(t *testing.T) {
+	if _, err := NewResolverWithHome("relative/path"); err == nil {
+		t.Fatal("NewResolverWithHome(relative) = nil; want refuse")
 	}
 }
 
-func TestResolveHome_RefusesMissingDir(t *testing.T) {
+// TestResolver_RefusesEmptyHome exercises both the --home "" branch and the
+// real $HOME fallback branch: an unset HOME must be refused rather than
+// silently defaulting to something dangerous.
+func TestResolver_RefusesEmptyHome(t *testing.T) {
+	t.Run("explicit empty", func(t *testing.T) {
+		if _, err := NewResolverWithHome(""); err == nil {
+			t.Fatal(`NewResolverWithHome("") = nil; want refuse`)
+		}
+	})
+	t.Run("empty $HOME", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		if _, err := NewResolver(); err == nil {
+			t.Fatal("NewResolver() with HOME=\"\" = nil; want refuse")
+		}
+	})
+}
+
+func TestResolver_RefusesMissingDir(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	withHome(t, missing)
-	if _, err := ResolveHome(); err == nil {
-		t.Fatalf("ResolveHome(%q) missing dir = nil; want refuse", missing)
+	if _, err := NewResolverWithHome(missing); err == nil {
+		t.Fatalf("NewResolverWithHome(%q) missing = nil; want refuse", missing)
 	}
 }
 
-func TestResolveHome_RefusesFileAsHome(t *testing.T) {
+func TestResolver_RefusesFileAsHome(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	withHome(t, file)
-	if _, err := ResolveHome(); err == nil {
-		t.Fatal("ResolveHome() with file-as-HOME = nil; want refuse")
+	if _, err := NewResolverWithHome(file); err == nil {
+		t.Fatal("NewResolverWithHome(file) = nil; want refuse")
 	}
 }
 
@@ -138,25 +144,25 @@ func TestResolveHome_RefusesFileAsHome(t *testing.T) {
 // branch is small, has no hidden control flow, and is reviewed by
 // inspection.
 
-func TestProfilePath_RejectsBadNames(t *testing.T) {
-	withHome(t, t.TempDir())
+func TestResolver_ProfilePath_RejectsBadNames(t *testing.T) {
+	r := mustResolver(t, t.TempDir())
 
 	cases := []string{"", ".", "..", "../evil", "/etc/passwd", "foo/bar", "ABC"}
 	for _, name := range cases {
 		name := name
 		t.Run(name, func(t *testing.T) {
-			if _, err := ProfilePath(name); err == nil {
+			if _, err := r.ProfilePath(name); err == nil {
 				t.Fatalf("ProfilePath(%q) = nil; want error", name)
 			}
 		})
 	}
 }
 
-func TestProfilePath_HappyStaysUnderHome(t *testing.T) {
+func TestResolver_ProfilePath_HappyStaysUnderHome(t *testing.T) {
 	home := t.TempDir()
-	withHome(t, home)
+	r := mustResolver(t, home)
 
-	got, err := ProfilePath("foo")
+	got, err := r.ProfilePath("foo")
 	if err != nil {
 		t.Fatalf("ProfilePath(\"foo\") = _, %v; want nil", err)
 	}
@@ -169,11 +175,11 @@ func TestProfilePath_HappyStaysUnderHome(t *testing.T) {
 	}
 }
 
-func TestStatePath_And_ProfilesDir_And_BackupsRoot(t *testing.T) {
+func TestResolver_StatePath_And_ProfilesDir_And_BackupsRoot(t *testing.T) {
 	home := t.TempDir()
-	withHome(t, home)
+	r := mustResolver(t, home)
 
-	sp, err := StatePath()
+	sp, err := r.StatePath()
 	if err != nil {
 		t.Fatalf("StatePath = _, %v", err)
 	}
@@ -181,29 +187,23 @@ func TestStatePath_And_ProfilesDir_And_BackupsRoot(t *testing.T) {
 		t.Fatalf("StatePath = %q; want %q", sp, want)
 	}
 
-	pd, err := ProfilesDir()
-	if err != nil {
-		t.Fatalf("ProfilesDir = _, %v", err)
-	}
+	pd := r.ProfilesDir()
 	if want := filepath.Join(home, ConfigDirName, ProfilesDirName); pd != want {
 		t.Fatalf("ProfilesDir = %q; want %q", pd, want)
 	}
 
-	br, err := BackupsRoot()
-	if err != nil {
-		t.Fatalf("BackupsRoot = _, %v", err)
-	}
+	br := r.BackupsRoot()
 	if want := filepath.Join(home, ConfigDirName, BackupsDirName); br != want {
 		t.Fatalf("BackupsRoot = %q; want %q", br, want)
 	}
 }
 
-func TestBackupPath(t *testing.T) {
+func TestResolver_BackupPath(t *testing.T) {
 	home := t.TempDir()
-	withHome(t, home)
+	r := mustResolver(t, home)
 
 	t.Run("happy", func(t *testing.T) {
-		got, err := BackupPath("claude_code", "settings.json", "20260701T000000Z-abcd")
+		got, err := r.BackupPath("claude_code", "settings.json", "20260701T000000Z-abcd")
 		if err != nil {
 			t.Fatalf("BackupPath happy = _, %v", err)
 		}
@@ -228,7 +228,7 @@ func TestBackupPath(t *testing.T) {
 	for _, tc := range badSegments {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := BackupPath(tc.tool, tc.file, tc.when); err == nil {
+			if _, err := r.BackupPath(tc.tool, tc.file, tc.when); err == nil {
 				t.Fatalf("BackupPath(%q,%q,%q) = nil; want error",
 					tc.tool, tc.file, tc.when)
 			}
@@ -236,29 +236,34 @@ func TestBackupPath(t *testing.T) {
 	}
 }
 
-func TestSafeToolConfigPath(t *testing.T) {
+// TestResolver_LexicalToolConfigPath verifies the lexical-only, HOME-relative
+// join. This method deliberately does NOT resolve symlinks — that job
+// belongs to writepath (E1-S3 / FR-5). We only prove: HOME-relative inputs
+// under HOME succeed; absolute, empty, NUL, and traversal-escaping inputs
+// are refused.
+func TestResolver_LexicalToolConfigPath(t *testing.T) {
 	home := t.TempDir()
-	withHome(t, home)
+	r := mustResolver(t, home)
 
 	t.Run("happy claude settings", func(t *testing.T) {
-		got, err := SafeToolConfigPath(".claude/settings.json")
+		got, err := r.LexicalToolConfigPath(".claude/settings.json")
 		if err != nil {
-			t.Fatalf("SafeToolConfigPath happy = _, %v", err)
+			t.Fatalf("LexicalToolConfigPath happy = _, %v", err)
 		}
 		want := filepath.Join(home, ".claude", "settings.json")
 		if got != want {
-			t.Fatalf("SafeToolConfigPath = %q; want %q", got, want)
+			t.Fatalf("LexicalToolConfigPath = %q; want %q", got, want)
 		}
 	})
 
 	t.Run("happy codex config", func(t *testing.T) {
-		got, err := SafeToolConfigPath(".codex/config.toml")
+		got, err := r.LexicalToolConfigPath(".codex/config.toml")
 		if err != nil {
-			t.Fatalf("SafeToolConfigPath codex = _, %v", err)
+			t.Fatalf("LexicalToolConfigPath codex = _, %v", err)
 		}
 		want := filepath.Join(home, ".codex", "config.toml")
 		if got != want {
-			t.Fatalf("SafeToolConfigPath = %q; want %q", got, want)
+			t.Fatalf("LexicalToolConfigPath = %q; want %q", got, want)
 		}
 	})
 
@@ -274,18 +279,18 @@ func TestSafeToolConfigPath(t *testing.T) {
 	for _, tc := range badCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := SafeToolConfigPath(tc.input); err == nil {
-				t.Fatalf("SafeToolConfigPath(%q) = nil; want error", tc.input)
+			if _, err := r.LexicalToolConfigPath(tc.input); err == nil {
+				t.Fatalf("LexicalToolConfigPath(%q) = nil; want error", tc.input)
 			}
 		})
 	}
 }
 
-func TestEnsureConfigDir_CreatesLayout(t *testing.T) {
+func TestResolver_EnsureConfigDir_CreatesLayout(t *testing.T) {
 	home := t.TempDir()
-	withHome(t, home)
+	r := mustResolver(t, home)
 
-	if err := EnsureConfigDir(); err != nil {
+	if err := r.EnsureConfigDir(); err != nil {
 		t.Fatalf("EnsureConfigDir = %v", err)
 	}
 	for _, sub := range []string{ConfigDirName, filepath.Join(ConfigDirName, ProfilesDirName)} {
@@ -299,22 +304,5 @@ func TestEnsureConfigDir_CreatesLayout(t *testing.T) {
 		if perm := info.Mode().Perm(); perm != 0700 {
 			t.Fatalf("%s mode = %o; want 0700", sub, perm)
 		}
-	}
-}
-
-func TestSetHomeOverride_ClearReverts(t *testing.T) {
-	// Explicitly document the "" contract: SetHomeOverride("") clears the
-	// override so ResolveHome falls back to os.UserHomeDir().
-	prev := currentHomeOverride()
-	t.Cleanup(func() { SetHomeOverride(prev) })
-
-	dir := t.TempDir()
-	SetHomeOverride(dir)
-	if got := currentHomeOverride(); got != dir {
-		t.Fatalf("after SetHomeOverride(%q) got %q", dir, got)
-	}
-	SetHomeOverride("")
-	if got := currentHomeOverride(); got != "" {
-		t.Fatalf("after SetHomeOverride(\"\") got %q; want empty", got)
 	}
 }

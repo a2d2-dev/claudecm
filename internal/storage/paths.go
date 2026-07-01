@@ -2,6 +2,12 @@
 // touches. Per docs/architecture/coding-standards.md rule 3, no other package
 // may build absolute paths from user input; they must route through here.
 //
+// Path resolution is provided by a value-type Resolver: construct one at the
+// entry point (cmd/*) and thread it downstream. There is no package-level
+// mutable state — rule 12 of the coding standards forbids it. Tests build
+// their own Resolver via NewResolverWithHome(t.TempDir()); a future --home
+// CLI flag will do the same.
+//
 // This file encodes the NFR-S3 (HOME sanity) and NFR-S5 (profile-name regex)
 // invariants declared in docs/prd/prd-v1.md and docs/architecture.md §8.
 package storage
@@ -13,7 +19,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -43,31 +48,11 @@ const (
 // docs/architecture.md §8 and docs/plan/stories/E1-S2.md.
 var profileNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-var (
-	homeOverrideMu sync.RWMutex
-	homeOverride   string // explicit --home; empty means "use os.UserHomeDir()"
-)
-
-// SetHomeOverride installs an explicit HOME override for path resolution.
-// Passing "" clears the override. This is the hook that a future `--home`
-// CLI flag will call from cmd/. Tests also use it to sandbox the path
-// gateway under t.TempDir().
-func SetHomeOverride(path string) {
-	homeOverrideMu.Lock()
-	homeOverride = path
-	homeOverrideMu.Unlock()
-}
-
-// currentHomeOverride returns the currently-installed override, if any.
-func currentHomeOverride() string {
-	homeOverrideMu.RLock()
-	defer homeOverrideMu.RUnlock()
-	return homeOverride
-}
-
 // ValidateProfileName enforces the NFR-S5 profile-name allowlist plus a
 // defense-in-depth Unicode-NFKC check that catches homoglyphs decoding to
-// reserved names (".", ".."). Errors always name the specific reason.
+// reserved names (".", ".."). Errors always name the specific reason. This
+// is a pure function on the input string and has no HOME dependency, so it
+// lives at the package level instead of on *Resolver.
 func ValidateProfileName(name string) error {
 	if name == "" {
 		return errors.New("profile name is empty")
@@ -98,133 +83,119 @@ func ValidateProfileName(name string) error {
 	return nil
 }
 
-// ResolveHome returns the effective HOME directory used by every path helper
-// in this package. It honors an explicit override set via SetHomeOverride
-// (populated by the future --home flag) and otherwise falls back to
-// os.UserHomeDir().
-//
-// It refuses, with a clear error, any HOME that is: empty, "/", not an
-// absolute path, not an existing directory, or (when the process is not
-// running as root) is "/root" or is root-owned. This maps to NFR-S3.
-func ResolveHome() (string, error) {
-	raw := currentHomeOverride()
-	source := "--home"
-	if raw == "" {
+// Resolver owns a fully-validated HOME directory and produces every absolute
+// path claudecm needs. It is immutable after construction and carries no
+// package-level state. Construct one per command invocation (see Default)
+// and thread it through to callers.
+type Resolver struct {
+	home string // absolute, cleaned, verified by NFR-S3
+}
+
+// NewResolver builds a Resolver from the real process HOME (os.UserHomeDir).
+// The resolved directory is validated per NFR-S3: non-empty, absolute, not
+// "/", exists, is a directory, and — when running as non-root — is neither
+// "/root" nor root-owned.
+func NewResolver() (*Resolver, error) {
+	return newResolver("", "$HOME")
+}
+
+// NewResolverWithHome builds a Resolver from an explicit HOME string. This is
+// the entry point that tests use to sandbox the path gateway under t.TempDir,
+// and that a future --home CLI flag will call from cmd/*.
+func NewResolverWithHome(home string) (*Resolver, error) {
+	return newResolver(home, "--home")
+}
+
+// Default is a construction convenience for cmd/*: it returns a Resolver
+// bound to the real process HOME. It is a thin wrapper over NewResolver so
+// command entry points stay one-liners; it is NOT global state.
+func Default() (*Resolver, error) {
+	return NewResolver()
+}
+
+// newResolver is the shared HOME-validation core used by NewResolver and
+// NewResolverWithHome. When raw is empty it falls back to os.UserHomeDir().
+// source is used only in error messages so operators can tell which input
+// tripped which check.
+func newResolver(raw, source string) (*Resolver, error) {
+	if raw == "" && source == "$HOME" {
 		h, err := os.UserHomeDir()
 		if err != nil {
-			return "", fmt.Errorf("HOME resolution failed: %w", err)
+			return nil, fmt.Errorf("HOME resolution failed: %w", err)
 		}
 		raw = h
-		source = "$HOME"
 	}
 	if raw == "" {
-		return "", fmt.Errorf("%s is empty; refuse to build any path from it", source)
+		return nil, fmt.Errorf("%s is empty; refuse to build any path from it", source)
 	}
 	if !filepath.IsAbs(raw) {
-		return "", fmt.Errorf("%s %q must be an absolute path", source, raw)
+		return nil, fmt.Errorf("%s %q must be an absolute path", source, raw)
 	}
 	cleaned := filepath.Clean(raw)
 	if cleaned == "/" {
-		return "", fmt.Errorf(`%s resolves to "/"; refuse to build any path from it`, source)
+		return nil, fmt.Errorf(`%s resolves to "/"; refuse to build any path from it`, source)
 	}
 	info, err := os.Stat(cleaned)
 	if err != nil {
-		return "", fmt.Errorf("%s %q is not accessible: %w", source, cleaned, err)
+		return nil, fmt.Errorf("%s %q is not accessible: %w", source, cleaned, err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("%s %q is not a directory", source, cleaned)
+		return nil, fmt.Errorf("%s %q is not a directory", source, cleaned)
 	}
 	if err := verifyHomeOwnership(cleaned, info); err != nil {
-		return "", err
+		return nil, err
 	}
-	return cleaned, nil
+	return &Resolver{home: cleaned}, nil
 }
 
-// SafeToolConfigPath joins a HOME-relative path fragment onto the resolved
-// HOME and verifies the result stays inside HOME after filepath.Clean.
-// Adapter code will call this to build tool-config target paths without
-// re-implementing the traversal-refusal logic. Absolute inputs are refused
-// so callers cannot bypass HOME.
-func SafeToolConfigPath(homeRelative string) (string, error) {
-	if homeRelative == "" {
-		return "", errors.New("tool config path is empty")
-	}
-	if filepath.IsAbs(homeRelative) {
-		return "", fmt.Errorf("tool config path %q must be relative to $HOME", homeRelative)
-	}
-	if strings.ContainsRune(homeRelative, 0x00) {
-		return "", fmt.Errorf("tool config path %q contains a NUL byte", homeRelative)
-	}
-	home, err := ResolveHome()
-	if err != nil {
-		return "", err
-	}
-	joined := filepath.Join(home, homeRelative)
-	return ensureUnderHome(joined, home)
+// Home returns the resolved, cleaned HOME directory this Resolver was built
+// with. It is always absolute and always passes NFR-S3.
+func (r *Resolver) Home() string { return r.home }
+
+// ConfigDir returns the absolute path to `<HOME>/.claudecm/`, lexically under
+// HOME after filepath.Clean; symlink resolution is deferred to writepath
+// (FR-5 / NFR-S2).
+func (r *Resolver) ConfigDir() string {
+	return filepath.Join(r.home, ConfigDirName)
 }
 
-// ConfigDir returns the absolute path to `~/.claudecm/`.
-func ConfigDir() (string, error) {
-	home, err := ResolveHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ConfigDirName), nil
+// ProfilesDir returns the absolute path to `<HOME>/.claudecm/profiles/`,
+// lexically under HOME after filepath.Clean; symlink resolution is deferred
+// to writepath (FR-5 / NFR-S2).
+func (r *Resolver) ProfilesDir() string {
+	return filepath.Join(r.ConfigDir(), ProfilesDirName)
 }
 
-// ProfilesDir returns the absolute path to `~/.claudecm/profiles/`.
-func ProfilesDir() (string, error) {
-	cd, err := ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cd, ProfilesDirName), nil
-}
-
-// ProfilePath returns the absolute on-disk path for a profile YAML file.
-// It validates the name via ValidateProfileName and verifies the result
-// stays under the resolved HOME.
-func ProfilePath(name string) (string, error) {
+// ProfilePath returns the absolute on-disk path for a profile YAML file. It
+// validates the name via ValidateProfileName and verifies the result stays
+// lexically under HOME after filepath.Clean; symlink resolution is deferred
+// to writepath (FR-5 / NFR-S2).
+func (r *Resolver) ProfilePath(name string) (string, error) {
 	if err := ValidateProfileName(name); err != nil {
 		return "", err
 	}
-	dir, err := ProfilesDir()
-	if err != nil {
-		return "", err
-	}
-	home, err := ResolveHome()
-	if err != nil {
-		return "", err
-	}
-	return ensureUnderHome(filepath.Join(dir, name+ProfileFileExt), home)
+	return ensureUnderHome(filepath.Join(r.ProfilesDir(), name+ProfileFileExt), r.home)
 }
 
-// StatePath returns the absolute path to `~/.claudecm/state.yaml`.
-func StatePath() (string, error) {
-	cd, err := ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	home, err := ResolveHome()
-	if err != nil {
-		return "", err
-	}
-	return ensureUnderHome(filepath.Join(cd, StateFileName), home)
+// StatePath returns the absolute path to `<HOME>/.claudecm/state.yaml`,
+// verified lexically under HOME after filepath.Clean; symlink resolution is
+// deferred to writepath (FR-5 / NFR-S2).
+func (r *Resolver) StatePath() (string, error) {
+	return ensureUnderHome(filepath.Join(r.ConfigDir(), StateFileName), r.home)
 }
 
-// BackupsRoot returns the absolute path to `~/.claudecm/backups/`.
-func BackupsRoot() (string, error) {
-	cd, err := ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(cd, BackupsDirName), nil
+// BackupsRoot returns the absolute path to `<HOME>/.claudecm/backups/`,
+// lexically under HOME after filepath.Clean; symlink resolution is deferred
+// to writepath (FR-5 / NFR-S2).
+func (r *Resolver) BackupsRoot() string {
+	return filepath.Join(r.ConfigDir(), BackupsDirName)
 }
 
 // BackupPath builds a per-(tool, file) backup path under BackupsRoot with a
 // timestamp suffix. Every segment is validated against traversal and control
-// characters; the final path is verified to stay under HOME.
-func BackupPath(tool, filename, ts string) (string, error) {
+// characters; the final path is verified lexically under HOME after
+// filepath.Clean. Symlink resolution is deferred to writepath (FR-5 / NFR-S2).
+func (r *Resolver) BackupPath(tool, filename, ts string) (string, error) {
 	if err := validatePathSegment(tool, "tool"); err != nil {
 		return "", err
 	}
@@ -234,34 +205,39 @@ func BackupPath(tool, filename, ts string) (string, error) {
 	if err := validatePathSegment(ts, "timestamp"); err != nil {
 		return "", err
 	}
-	root, err := BackupsRoot()
-	if err != nil {
-		return "", err
-	}
-	home, err := ResolveHome()
-	if err != nil {
-		return "", err
-	}
 	// backups/<tool>/<filename>.bak.<ts> matches the architecture §8 layout.
-	return ensureUnderHome(filepath.Join(root, tool, filename+".bak."+ts), home)
+	return ensureUnderHome(filepath.Join(r.BackupsRoot(), tool, filename+".bak."+ts), r.home)
+}
+
+// LexicalToolConfigPath joins a HOME-relative path fragment onto the resolved
+// HOME and verifies the result stays inside HOME after filepath.Clean.
+//
+// Lexical-only. Does NOT resolve symlinks. Callers that write to the
+// returned path must additionally use writepath's symlink-following escape
+// check (E1-S3 / FR-5) — the pair of checks is what actually defeats a
+// symlink that points outside HOME. Absolute inputs are refused so callers
+// cannot bypass HOME.
+func (r *Resolver) LexicalToolConfigPath(homeRelative string) (string, error) {
+	if homeRelative == "" {
+		return "", errors.New("tool config path is empty")
+	}
+	if filepath.IsAbs(homeRelative) {
+		return "", fmt.Errorf("tool config path %q must be relative to $HOME", homeRelative)
+	}
+	if strings.ContainsRune(homeRelative, 0x00) {
+		return "", fmt.Errorf("tool config path %q contains a NUL byte", homeRelative)
+	}
+	return ensureUnderHome(filepath.Join(r.home, homeRelative), r.home)
 }
 
 // EnsureConfigDir creates the configuration directory structure if it does
 // not exist, with the strict permissions declared in the architecture (dir
 // 0700, files 0600).
-func EnsureConfigDir() error {
-	configDir, err := ConfigDir()
-	if err != nil {
+func (r *Resolver) EnsureConfigDir() error {
+	if err := os.MkdirAll(r.ConfigDir(), 0700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return err
-	}
-	profilesDir, err := ProfilesDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(profilesDir, 0700); err != nil {
+	if err := os.MkdirAll(r.ProfilesDir(), 0700); err != nil {
 		return err
 	}
 	return nil
