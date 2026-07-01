@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
@@ -40,7 +41,7 @@ func TestCommit_TypesCompile(t *testing.T) {
 	// StagedTxn.
 	txn := StagedTxn{
 		Plans:    []writepath.WritePlan{},
-		Locks:    []LockHandle{{Target: "/tmp/x", Handle: nil}},
+		Locks:    []LockHandle{{Target: "/tmp/x", handle: nil}},
 		Prepared: []PreparedFile{},
 		StagedAt: time.Now(),
 	}
@@ -90,6 +91,10 @@ func TestCommit_TypesCompile(t *testing.T) {
 // contract for non-empty input. The stub returns ErrNotImplemented
 // from Stage / Commit for non-zero plans and nil from Abort. The
 // zero-plan path is covered in TestCommit_ZeroPlansStageOK.
+//
+// NOTE: E7-S2 will run writepath.ValidatePlan on Stage inputs; when that
+// lands, either add Parser + valid fields to these test plans, or change
+// the assertion path.
 func TestCommit_ErrNotImplementedFromStubs(t *testing.T) {
 	c := NewCommitter()
 	ctx := context.Background()
@@ -322,6 +327,50 @@ func TestCanonicalCommitOrder_EmptyInput(t *testing.T) {
 	got = canonicalCommitOrder([]writepath.WritePlan{})
 	if len(got) != 0 {
 		t.Fatalf("expected empty slice for empty input, got %v", got)
+	}
+}
+
+// TestCommitPriority_TracksAdapterConstants pins that the commit-order
+// routing keys off the typed adapter.ToolCodex / adapter.ToolClaudeCode
+// constants rather than raw string literals. If either constant's
+// underlying string value is renamed in a future adapter refactor,
+// commitPriority would silently reroute Codex or Claude Code writes
+// into the "unknown" bucket 3, breaking the auth-first ordering. This
+// test uses the constants directly so a drift in either literal fails
+// here at test time (and, in most refactor patterns, at compile time
+// via the adapter constant rename itself).
+func TestCommitPriority_TracksAdapterConstants(t *testing.T) {
+	auth := writepath.WritePlan{
+		Tool:   string(adapter.ToolCodex),
+		Target: "/home/u/.codex/auth.json",
+	}
+	if got := commitPriority(auth); got != 0 {
+		t.Errorf("codex auth.json: want priority 0, got %d — adapter.ToolCodex value drifted?", got)
+	}
+
+	config := writepath.WritePlan{
+		Tool:   string(adapter.ToolCodex),
+		Target: "/home/u/.codex/config.toml",
+	}
+	if got := commitPriority(config); got != 1 {
+		t.Errorf("codex config.toml: want priority 1, got %d — adapter.ToolCodex value drifted?", got)
+	}
+
+	settings := writepath.WritePlan{
+		Tool:   string(adapter.ToolClaudeCode),
+		Target: "/home/u/.claude/settings.json",
+	}
+	if got := commitPriority(settings); got != 2 {
+		t.Errorf("claude_code settings.json: want priority 2, got %d — adapter.ToolClaudeCode value drifted?", got)
+	}
+
+	// Sanity: an explicitly unknown ToolID lands in bucket 3.
+	unknown := writepath.WritePlan{
+		Tool:   "not-a-real-tool",
+		Target: "/home/u/.mystery/config.yaml",
+	}
+	if got := commitPriority(unknown); got != 3 {
+		t.Errorf("unknown tool: want priority 3, got %d", got)
 	}
 }
 

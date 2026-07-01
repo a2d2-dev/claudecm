@@ -69,6 +69,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
@@ -162,16 +163,21 @@ type StagedTxn struct {
 }
 
 // LockHandle wraps a *storage.Handle so Commit and Abort can release
-// it. Target is stored redundantly with Handle.Path() so callers
-// rendering the pre-commit summary do not have to poke into the
-// storage handle.
+// it. Target is stored redundantly with the underlying handle's path
+// so callers rendering the pre-commit summary do not have to poke into
+// the storage handle.
+//
+// The underlying lock handle is unexported; only Commit/Abort may
+// Release it. This prevents an external caller from prematurely
+// releasing a flock that Stage still expects to hold — the commit
+// package alone owns the flock lifecycle.
 type LockHandle struct {
 	// Target is the absolute path the lock protects.
 	Target string
 
-	// Handle is the underlying flock. Commit / Abort call
-	// Handle.Release. Nil for the empty-txn path.
-	Handle *storage.Handle
+	// handle is the underlying flock. Commit / Abort call
+	// handle.Release. Nil for the empty-txn path.
+	handle *storage.Handle
 }
 
 // PreparedFile is a single plan whose current bytes were read and
@@ -338,13 +344,33 @@ func (e *PartialFailure) Unwrap() error {
 // Deleted in E7-S2 when the pipeline body lands.
 var ErrNotImplemented = errors.New("claudecm/commit: not implemented")
 
+// Option customizes a Committer at construction time. E7-S1 defines
+// the seam without any concrete options; E7-S2 will populate it with
+// test seams (WithClock, WithBackupFn, ...) without breaking existing
+// callers thanks to the variadic Option shape.
+type Option func(*committerCfg)
+
+// committerCfg holds Committer construction knobs. Empty in E7-S1;
+// E7-S2 will add fields backed by Option setters.
+type committerCfg struct{}
+
 // NewCommitter returns the default Committer. The E7-S1 stub
 // implementation returns ErrNotImplemented from Stage / Commit for
 // non-empty plan input, and nil (safe no-op) from Abort. The zero-plan
 // Stage path is wired end-to-end because the story acceptance
 // criterion "zero-plan input → Stage returns an empty transaction"
 // applies to the stub too.
-func NewCommitter() Committer { return &stubCommitter{} }
+//
+// The variadic Option argument is the seam E7-S2 will populate with
+// test knobs (clock, backup writer, ...). Callers today pass no
+// options; E7-S2 additions do not break this signature.
+func NewCommitter(opts ...Option) Committer {
+	cfg := committerCfg{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return &stubCommitter{}
+}
 
 // stubCommitter is the E7-S1 placeholder implementation. Replaced in
 // E7-S2 by the real pipeline body.
@@ -402,17 +428,26 @@ func canonicalCommitOrder(plans []writepath.WritePlan) []int {
 // Lower is earlier. Bucket 3 catches "unknown" (unrecognized tool or
 // unrecognized basename); such plans commit last in their input
 // order.
+//
+// The tool comparison routes through the typed adapter.ToolCodex /
+// adapter.ToolClaudeCode constants (via string() because WritePlan.Tool
+// is a bare string field, not a ToolID) so that a rename of either
+// constant's underlying value breaks this file at compile time — or,
+// failing that, is caught by TestCommitPriority_TracksAdapterConstants
+// below. That drift detector is deliberate: commit ordering is auth-
+// first, and a silent adapter ToolID change would otherwise re-order
+// writes without any test failure.
 func commitPriority(p writepath.WritePlan) int {
 	base := path.Base(p.Target)
-	switch p.Tool {
-	case "codex":
+	switch adapter.ToolID(p.Tool) {
+	case adapter.ToolCodex:
 		switch base {
 		case "auth.json":
 			return 0
 		case "config.toml":
 			return 1
 		}
-	case "claude_code":
+	case adapter.ToolClaudeCode:
 		if base == "settings.json" {
 			return 2
 		}
