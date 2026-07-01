@@ -306,16 +306,26 @@ claudecm operates only on files and keys it claims to own. Everything else is pr
 
 #### Codex CLI
 - **Owned files:** `~/.codex/config.toml` and `~/.codex/auth.json`.
-- **Owned-key allowlist for `config.toml` (Codex adapter, v1):**
+- **Owned-key allowlist for `config.toml` (Codex adapter, v1):** concrete flat keys matching writepath.Flatten output. v1 ships the top-level provider-agnostic knobs plus the explicitly-named `openai` and `anthropic` provider entries. Other custom provider names (e.g. `my-relay`) are considered non-owned by claudecm and preserved via FR-5 merge-preserve. Post-v1: dynamic provider ownership.
+  - `approval_mode`
   - `model`
   - `model_provider`
-  - `model_providers.<name>.base_url`
-  - `model_providers.<name>.wire_api`
-  - `model_providers.<name>.env_key`
-  - `model_providers.<name>.name`
-- **Owned-key allowlist for `auth.json` (Codex adapter, v1):**
+  - `model_providers.openai.base_url`
+  - `model_providers.openai.env_key`
+  - `model_providers.openai.name`
+  - `model_providers.openai.wire_api`
+  - `model_providers.anthropic.base_url`
+  - `model_providers.anthropic.env_key`
+  - `model_providers.anthropic.name`
+  - `model_providers.anthropic.wire_api`
+- **Owned-key allowlist for `auth.json` (Codex adapter, v1):** concrete flat leaves of the OAuth token bundle plus the top-level API key and auth-state scalars.
   - `OPENAI_API_KEY`
-  - any top-level field used by Codex CLI for current-user auth state (architecture freezes the exact list).
+  - `auth_mode`
+  - `last_refresh`
+  - `tokens.access_token`
+  - `tokens.account_id`
+  - `tokens.id_token`
+  - `tokens.refresh_token`
 - All other keys are preserved verbatim through merge-preserve. The adapter MUST NOT touch them.
 
 #### Adapter contract
