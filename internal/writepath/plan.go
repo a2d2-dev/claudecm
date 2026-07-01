@@ -261,6 +261,13 @@ func ValidatePlan(plan WritePlan) error {
 			return fmt.Errorf("%w: Target %q contains '..' component after Clean", ErrPlanInvalid, plan.Target)
 		}
 	}
+	// A plan with neither Transform nor NewContent set would silently
+	// truncate the target to zero bytes (Transform nil → newBytes =
+	// plan.NewContent = nil → AtomicWrite publishes []byte{}). Refuse
+	// at validation time so callers cannot express that shape at all.
+	if plan.Transform == nil && plan.NewContent == nil {
+		return fmt.Errorf("%w: neither Transform nor NewContent is set", ErrPlanInvalid)
+	}
 	seen := make(map[string]struct{}, len(plan.OwnedKeys))
 	for i, k := range plan.OwnedKeys {
 		if k == "" {

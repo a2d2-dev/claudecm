@@ -1,4 +1,4 @@
-.PHONY: build test test-hooks lint install clean help
+.PHONY: build test test-hooks lint lint-osrename install clean help
 
 # Build variables
 BINARY_NAME=claudecm
@@ -37,7 +37,7 @@ test-coverage: test ## Run tests with coverage report
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "✓ Coverage report: coverage.html"
 
-lint: ## Run linters
+lint: lint-osrename ## Run linters
 	@echo "Running linters..."
 	@command -v golangci-lint >/dev/null 2>&1 || { \
 		echo "golangci-lint not found. Installing..."; \
@@ -45,6 +45,9 @@ lint: ## Run linters
 	}
 	golangci-lint run ./...
 	@echo "✓ Linting completed"
+
+lint-osrename: ## Enforce Story E2-S2 AC #5 os.Rename discipline
+	@bash scripts/lint-osrename.sh
 
 fmt: ## Format code
 	@echo "Formatting code..."

@@ -542,6 +542,190 @@ func TestApply_NoParserSkipsDiffAndSkipsOnByteIdentity(t *testing.T) {
 	}
 }
 
+// TestApply_ContextAlreadyExpired pins F1: an already-expired context
+// deadline must short-circuit with ErrLockTimeout before ever calling
+// storage.Acquire — no ~5s DefaultLockTimeout fall-back. Timing bound is
+// intentionally generous (100ms) to stay stable on shared CI runners.
+func TestApply_ContextAlreadyExpired(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+	defer cancel()
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"x":1}`),
+		Parser:     jsonParser,
+		OwnedKeys:  []string{"x"},
+	}
+	start := time.Now()
+	_, err := Apply(ctx, r, plan)
+	elapsed := time.Since(start)
+	if !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("err = %v; want wraps ErrLockTimeout", err)
+	}
+	if !errors.Is(err, ctx.Err()) {
+		t.Fatalf("err = %v; want also wraps ctx.Err() = %v", err, ctx.Err())
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("Apply took %v for expired ctx; want <100ms (no DefaultLockTimeout fallback)", elapsed)
+	}
+	// File must not have been created.
+	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target created despite expired ctx: %v", statErr)
+	}
+}
+
+// TestApply_FirstWriteEmptyDocPublishesFile pins F2: a first write of an
+// empty document ({}) with a Parser MUST still publish the file at 0600
+// even though the parsed diff against the "nothing" side computes as
+// empty (curFlat starts empty; Flatten({}) is also empty).
+func TestApply_FirstWriteEmptyDocPublishesFile(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte("{}"),
+		Parser:     jsonParser,
+		// OwnedKeys deliberately empty — nothing touched inside the doc.
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if report.Skipped {
+		t.Fatalf("Skipped = true on first write of empty doc; want false")
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat target: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v; want 0600", info.Mode().Perm())
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "{}" {
+		t.Fatalf("bytes = %q; want %q", got, "{}")
+	}
+}
+
+// TestApply_FirstWriteWithParserAndNewContentPublishes is the F4
+// companion to F2 — the exact shape F2 fixed. Would have failed against
+// the pre-F2 skip guard (bytesEqual=false, diffEmpty=true, no exists
+// gate). Kept alongside the F2 test as a redundant tripwire.
+func TestApply_FirstWriteWithParserAndNewContentPublishes(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "settings.json")
+	ensureParent(t, target)
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte("{}"),
+		Parser:     jsonParser,
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if report.Skipped {
+		t.Fatalf("Skipped = true; want false (first write must publish)")
+	}
+	if report.PostFingerprint.SHA256 == "" {
+		t.Fatalf("PostFingerprint.SHA256 empty; want hash of new bytes")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "{}" {
+		t.Fatalf("bytes = %q; want %q", got, "{}")
+	}
+}
+
+// TestApply_ParsedIdenticalDespiteWhitespaceIsSkipped pins the semantic-
+// skip claim in the header: parser-equal values skip the write even
+// when the raw bytes differ. Whitespace on disk must remain untouched.
+func TestApply_ParsedIdenticalDespiteWhitespaceIsSkipped(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	orig := []byte(`{"a": 1}`)
+	if err := os.WriteFile(target, orig, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{ "a" : 1 }`), // extra whitespace, same semantic
+		Parser:     jsonParser,
+		OwnedKeys:  []string{"a"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if !report.Skipped {
+		t.Fatalf("Skipped = false; want true (parsed values are equal)")
+	}
+	if (report.Backup != storage.BackupRecord{}) {
+		t.Fatalf("Backup = %+v; want zero on semantic skip", report.Backup)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !reflect.DeepEqual(got, orig) {
+		t.Fatalf("on-disk changed under semantic skip: %q vs %q", got, orig)
+	}
+	assertBackupCount(t, r, "tool", 0)
+}
+
+// TestApply_TransformAndNewContentBothSet_TransformWins pins the
+// documented precedence: when both fields are set, Transform's return
+// value is written and NewContent is ignored. No fallback to NewContent
+// under any condition.
+func TestApply_TransformAndNewContentBothSet_TransformWins(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.txt")
+	ensureParent(t, target)
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte("B"),
+		Transform: func(cur []byte) ([]byte, error) {
+			return []byte("A"), nil
+		},
+		// No Parser: byte-identity is the only skip trigger, and "A" !=
+		// nothing so the write proceeds.
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if report.Skipped {
+		t.Fatalf("Skipped = true; want false")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "A" {
+		t.Fatalf("bytes = %q; want %q (Transform must win over NewContent)", got, "A")
+	}
+}
+
 // assertBackupCount counts .bak. entries in ~/.claudecm/backups/<tool>.
 // Missing dir counts as zero. Foreign entries are ignored.
 func assertBackupCount(t *testing.T, r *storage.Resolver, tool string, want int) {

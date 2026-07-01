@@ -4,46 +4,64 @@
 // concurrent-edit detection) land in E2-S3 and E2-S4 on top of the same
 // call site.
 //
-// Pipeline expressed here (architecture.md §4, PRD FR-5):
+// OS-Rename discipline: only internal/storage/atomic.go and this file
+// may call os.Rename on tool-owned paths. Enforced by
+// scripts/lint-osrename.sh (wired into `make lint`).
+//
+// Story E2-S2 steps 1-7 (implemented here):
 //
 //  1. ValidatePlan — cheap pre-execution refuse. Wraps ErrPlanInvalid.
 //  2. Acquire flock via storage.WithLock on the target sidecar. Timeout
 //     is derived from ctx.Deadline() when set, otherwise
 //     storage.DefaultLockTimeout. Timeout maps to ErrLockTimeout.
+//     ctx.Deadline() (when set) caps the flock acquisition timeout; an
+//     already-expired deadline returns ErrLockTimeout without attempting
+//     to acquire.
 //  3. Read current bytes (may not exist → treated as "empty" for the
 //     Transform seam) and capture pre-write Fingerprint via
 //     storage.Stat. Non-existence yields a zero Fingerprint with the
-//     exists=false signal.
-//  4. Symlink escape is enforced twice — by storage.Acquire's EnsureDir
-//     under HOME and by storage.AtomicWrite on the parent — and mapped
-//     to ErrOutsideHome here so callers can errors.Is on one sentinel
-//     without importing internal/storage.
-//  5. Compute new bytes: plan.Transform wins over plan.NewContent (see
+//     exists=false signal. Symlink escape is enforced twice — by
+//     storage.Acquire's EnsureDir under HOME and by storage.AtomicWrite
+//     on the parent — and mapped to ErrOutsideHome here so callers can
+//     errors.Is on one sentinel without importing internal/storage.
+//  4. Compute new bytes: plan.Transform wins over plan.NewContent (see
 //     plan.go package doc). Transform errors abort — no fallback to
 //     NewContent, per CLAUDE.md "no fallback" rule.
-//  6. Parse current + new via plan.Parser. Non-nil Parser is mandatory
+//  5. Parse current + new via plan.Parser. Non-nil Parser is mandatory
 //     for a meaningful Diff; a nil Parser skips diff computation and
 //     the skip-on-identical-bytes shortcut becomes the only "no-op"
 //     signal. On parse failure of EITHER side we wrap the parser error
-//     with ErrParseFailed and abort. NFR-S1: no silent rewrite.
-//  7. Flatten + Diff. Empty diff (bytes byte-identical OR parsed values
-//     identical) short-circuits to Skipped=true with no backup and no
-//     write; PostFingerprint mirrors PreFingerprint.
-//  8. DryRun=true returns a report populated with the diff but WITHOUT
+//     with ErrParseFailed and abort. NFR-S1: no silent rewrite. Then
+//     Flatten + Diff. A byte-identical current==new against an existing
+//     file, OR a parsed-empty diff against an existing file, short-
+//     circuits to Skipped=true with no backup and no write;
+//     PostFingerprint mirrors PreFingerprint. A first write (no prior
+//     file) is NEVER skipped even if diff is empty — the atomic publish
+//     still creates the file at 0600.
+//  6. DryRun=true returns a report populated with the diff but WITHOUT
 //     backing up or writing. Callers use this for FR-15.
-//  9. Diff.TouchesUnowned=true AND AllowUnowned=false AND DryRun=false
+//     Diff.TouchesUnowned=true AND AllowUnowned=false AND DryRun=false
 //     is refused with ErrDryRunUnownedTouched. The sentinel name is
 //     kept for API stability even though it fires outside dry-run.
-//  10. storage.Backup snapshots the pre-write bytes. ErrNothingToBackup
+//  7. storage.Backup snapshots the pre-write bytes. ErrNothingToBackup
 //     means "first write, no prior state" and produces a zero
 //     BackupRecord. Any other backup failure wraps ErrBackupFailed and
-//     aborts before touching the target.
-//  11. storage.AtomicWrite publishes the new bytes at mode 0600, honoring
-//     MustNotExist. AtomicWrite's own ErrTargetExists propagates
-//     unwrapped so callers can errors.Is against storage.ErrTargetExists.
-//  12. storage.Stat captures the post-write Fingerprint for the report.
-//     No post-write reparse or fingerprint-drift check happens here;
-//     those are E2-S3/E2-S4.
+//     aborts before touching the target. Then storage.AtomicWrite
+//     publishes the new bytes at mode 0600, honoring MustNotExist.
+//     AtomicWrite's own ErrTargetExists propagates unwrapped so callers
+//     can errors.Is against storage.ErrTargetExists. storage.Stat
+//     captures the post-write Fingerprint for the report.
+//
+// E2-S3 steps 8-10 (deferred):
+//
+//  8. Post-write reparse against plan.Parser to confirm the on-disk
+//     bytes still parse cleanly and every OwnedKeys entry matches
+//     intent. Failure triggers auto-rollback (step 9).
+//  9. Auto-rollback from the freshly captured BackupRecord when step 8
+//     fails or a fingerprint-drift check fires.
+//  10. Concurrent-edit detection: re-Stat the target after publish and
+//      compare against PreFingerprint to catch a foreign writer that
+//      slipped in between our read and our rename.
 //
 // Concurrency scope: the file is held under storage.WithLock for the
 // entirety of read → parse → diff → backup → write → post-stat. Panic
@@ -100,9 +118,16 @@ func Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (WriteRepor
 
 	lockOpts := storage.LockOptions{}
 	if deadline, ok := ctx.Deadline(); ok {
-		if d := time.Until(deadline); d > 0 {
-			lockOpts.Timeout = d
+		d := time.Until(deadline)
+		if d <= 0 {
+			// An already-expired deadline must not silently degrade to
+			// storage.DefaultLockTimeout — that would cost the caller ~5s
+			// of blocking on a context they already gave up on. Short-
+			// circuit with ErrLockTimeout joined to ctx.Err() so callers
+			// can errors.Is against either sentinel.
+			return WriteReport{}, errors.Join(ErrLockTimeout, ctx.Err())
 		}
+		lockOpts.Timeout = d
 	}
 
 	var report WriteReport
@@ -117,11 +142,12 @@ func Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (WriteRepor
 	return report, nil
 }
 
-// applyLocked runs steps 3-12 under the assumption the lock is held.
+// applyLocked runs steps 3-7 under the assumption the lock is held.
 // Split out so Apply itself remains a linear lock+dispatch shell.
 func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 	now := time.Now()
 
+	// Step 3: read current bytes + pre-write fingerprint.
 	currentBytes, exists, err := readAll(plan.Target)
 	if err != nil {
 		return WriteReport{}, err
@@ -131,7 +157,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		return WriteReport{}, err
 	}
 
-	// Step 5: compute new bytes. Transform wins over NewContent; a
+	// Step 4: compute new bytes. Transform wins over NewContent; a
 	// Transform error is fatal (no fallback rewrite).
 	var newBytes []byte
 	if plan.Transform != nil {
@@ -144,7 +170,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		newBytes = plan.NewContent
 	}
 
-	// Step 6: parse current + new. Skipped entirely when Parser is nil.
+	// Step 5 (parse+diff): parse current + new. Skipped entirely when Parser is nil.
 	// When the file did not exist, the "current" side is an empty flat
 	// map (not the result of Flatten(nil), which yields {"": nil} — see
 	// Flatten's non-map top-level rule). Skipping parse+flatten on the
@@ -176,13 +202,14 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		diff = Diff(curFlat, newFlat, plan.OwnedKeys)
 	}
 
-	// Step 7: skip iff bytes byte-identical AND file existed, or
-	// (Parser present AND parsed diff is empty). The "&& exists"
-	// guard makes "current absent + newBytes empty" NOT skip — a
-	// legitimate zero-byte first write still goes through the atomic
-	// publish so the file appears at 0600.
+	// Step 5 (skip guard): skip iff bytes byte-identical AND file existed,
+	// or (Parser present AND parsed diff is empty AND file existed). Both
+	// halves gate on `exists` because on a first write, "empty diff
+	// against nothing" MUST still publish the file. Story E2-S2 AC:
+	// legitimate zero-byte / empty-doc first write still goes through
+	// the atomic publish so the file appears at 0600.
 	bytesEqual := exists && bytes.Equal(currentBytes, newBytes)
-	diffEmpty := plan.Parser != nil && reflect.DeepEqual(diff, DiffResult{})
+	diffEmpty := plan.Parser != nil && exists && reflect.DeepEqual(diff, DiffResult{})
 	if bytesEqual || diffEmpty {
 		return WriteReport{
 			Tool:            plan.Tool,
@@ -195,7 +222,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		}, nil
 	}
 
-	// Step 8: dry-run short-circuits before backup and write.
+	// Step 6 (dry-run): short-circuits before backup and write.
 	if plan.DryRun {
 		return WriteReport{
 			Tool:           plan.Tool,
@@ -207,14 +234,14 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		}, nil
 	}
 
-	// Step 9: unowned-touched guard. Refuse the write unless the caller
+	// Step 6 (unowned-touched guard). Refuse the write unless the caller
 	// pre-authorized via AllowUnowned. Sentinel name kept for API
 	// stability (see plan.go ErrDryRunUnownedTouched doc).
 	if diff.TouchesUnowned && !plan.AllowUnowned {
 		return WriteReport{}, fmt.Errorf("%w: %s", ErrDryRunUnownedTouched, plan.Target)
 	}
 
-	// Step 10: backup pre-write state. ErrNothingToBackup is fine —
+	// Step 7 (backup): backup pre-write state. ErrNothingToBackup is fine —
 	// first write against a missing target. Anything else is fatal.
 	var backup storage.BackupRecord
 	brec, berr := storage.Backup(r, plan.Tool, filepath.Base(plan.Target), plan.Target)
@@ -227,8 +254,9 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		return WriteReport{}, fmt.Errorf("%w: %v", ErrBackupFailed, berr)
 	}
 
-	// Step 11: atomic publish. Mode 0600 is re-asserted regardless of
-	// umask by storage.AtomicWrite itself.
+	// Step 7 (atomic publish): mode 0600 is re-asserted regardless of
+	// umask by storage.AtomicWrite itself. Post-write Stat captures the
+	// PostFingerprint for the report.
 	postFP, werr := storage.AtomicWrite(r, plan.Target, newBytes, storage.AtomicWriteOptions{
 		Mode:         0o600,
 		MustNotExist: plan.MustNotExist,
