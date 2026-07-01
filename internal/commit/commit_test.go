@@ -17,13 +17,28 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
+// Package-level compile-time assertions. Kept at package scope (not
+// inside a test) so a future removal of a method or a type-shape
+// change breaks the build immediately rather than only failing at
+// runtime.
+var (
+	// *PartialFailure satisfies the error interface.
+	_ error = (*PartialFailure)(nil)
+
+	// The stub *stubCommitter satisfies the Committer interface.
+	// Assigning through the (*stubCommitter)(nil) sentinel avoids
+	// staticcheck ST1023/QF1011 (redundant type on rhs) while still
+	// pinning the interface contract at compile time.
+	_ Committer = (*stubCommitter)(nil)
+)
+
 // TestCommit_TypesCompile pins the shape of every exported type by
 // constructing a value of each. If any type is renamed, removed, or
 // changes shape, this test will fail to compile — which is exactly
 // the E7-S1 acceptance gate.
 func TestCommit_TypesCompile(t *testing.T) {
 	// StagedTxn.
-	var txn StagedTxn = StagedTxn{
+	txn := StagedTxn{
 		Plans:    []writepath.WritePlan{},
 		Locks:    []LockHandle{{Target: "/tmp/x", Handle: nil}},
 		Prepared: []PreparedFile{},
@@ -34,7 +49,7 @@ func TestCommit_TypesCompile(t *testing.T) {
 	}
 
 	// PreparedFile.
-	var pf PreparedFile = PreparedFile{
+	pf := PreparedFile{
 		Plan:           writepath.WritePlan{},
 		CurrentBytes:   nil,
 		NewBytes:       nil,
@@ -63,9 +78,10 @@ func TestCommit_TypesCompile(t *testing.T) {
 		t.Fatalf("PerFile length lost")
 	}
 
-	// Committer interface.
-	var c Committer = NewCommitter()
-	if c == nil {
+	// Runtime sanity check that NewCommitter returns non-nil. The
+	// compile-time Committer contract is pinned by the package-level
+	// var _ Committer = (*stubCommitter)(nil) assertion above.
+	if NewCommitter() == nil {
 		t.Fatalf("NewCommitter returned nil")
 	}
 }
@@ -166,11 +182,10 @@ func TestPartialFailure_ErrorImplemented(t *testing.T) {
 		Untouched:  []string{"/tmp/z"},
 	}
 
-	// Assign to the error interface — pins the compile-time contract.
-	var err error = pf
-	if err == nil {
-		t.Fatalf("PartialFailure did not satisfy error")
-	}
+	// Compile-time assertion: *PartialFailure satisfies error. Kept
+	// as a package-level var below (var _ error = (*PartialFailure)(nil))
+	// so removing the type's Error method breaks the build. Here we
+	// exercise the runtime path via errors.Is / errors.Unwrap.
 
 	// errors.Is reaches through Unwrap to Cause.
 	if !errors.Is(pf, cause) {
