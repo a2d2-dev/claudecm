@@ -755,6 +755,381 @@ func assertBackupCount(t *testing.T, r *storage.Resolver, tool string, want int)
 	}
 }
 
+// TestApply_ReparseSuccessNoRollback pins the E2-S3 happy path: when the
+// post-write reparse succeeds, WriteReport.RolledBack is false and the
+// on-disk bytes match the intended payload byte-for-byte.
+func TestApply_ReparseSuccessNoRollback(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	if err := os.WriteFile(target, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	newBytes := []byte(`{"model":"opus"}`)
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: newBytes,
+		Parser:     jsonParser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if report.RolledBack {
+		t.Fatalf("RolledBack = true; want false on happy reparse")
+	}
+	got, _ := os.ReadFile(target)
+	if !reflect.DeepEqual(got, newBytes) {
+		t.Fatalf("bytes = %q; want %q", got, newBytes)
+	}
+}
+
+// countingParser is a stateful Parser that succeeds for the first
+// (n-1) calls and returns an error on the n-th call and beyond. Used to
+// simulate a parser that accepts pre-write content but rejects the
+// post-write reparse. n is 1-indexed against the total call count.
+type countingParser struct {
+	calls  int
+	failOn int
+	inner  Parser
+}
+
+func (p *countingParser) Parse(data []byte) (any, error) {
+	p.calls++
+	if p.calls >= p.failOn {
+		return nil, errors.New("countingParser: rejected on call " + itoa(p.calls))
+	}
+	return p.inner.Parse(data)
+}
+
+// itoa avoids importing strconv inside the test file's tight import
+// block. Small non-negative ints only.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// TestApply_ReparseFailureRollsBack_HadBackup pins the overwrite-case
+// rollback: existing file A, plan writes B, parser rejects the reparse,
+// rollback restores A byte-for-byte via AtomicWrite of the pre-write
+// bytes; RolledBack=true and both ErrPostWriteReparse and ErrRollback
+// are visible to errors.Is.
+func TestApply_ReparseFailureRollsBack_HadBackup(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	origA := []byte(`{"model":"sonnet"}`)
+	if err := os.WriteFile(target, origA, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Pre-write calls: parse current (A) then new (B) — both must pass.
+	// Post-write reparse is call #3 and must fail.
+	parser := &countingParser{failOn: 3, inner: jsonParser}
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"model":"opus"}`),
+		Parser:     parser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err == nil {
+		t.Fatalf("Apply err = nil; want ErrPostWriteReparse + ErrRollback")
+	}
+	if !errors.Is(err, ErrPostWriteReparse) {
+		t.Fatalf("err = %v; want wraps ErrPostWriteReparse", err)
+	}
+	if !errors.Is(err, ErrRollback) {
+		t.Fatalf("err = %v; want wraps ErrRollback", err)
+	}
+	if errors.Is(err, ErrRollbackFailed) {
+		t.Fatalf("err = %v; must NOT wrap ErrRollbackFailed on successful rollback", err)
+	}
+	if !report.RolledBack {
+		t.Fatalf("RolledBack = false; want true")
+	}
+	// After F3, PostFingerprint is a fresh Stat of the restored file
+	// (not a copy of PreFingerprint). Bytes match pre-write, so SHA256
+	// must equal; ModTime will differ because the rollback rewrote the
+	// file microseconds after the original stat.
+	if report.PostFingerprint.SHA256 == "" {
+		t.Fatalf("PostFingerprint.SHA256 empty; want hash of restored bytes")
+	}
+	if report.PreFingerprint.SHA256 != report.PostFingerprint.SHA256 {
+		t.Fatalf("PreFingerprint.SHA256 %q != PostFingerprint.SHA256 %q; want equal on rollback",
+			report.PreFingerprint.SHA256, report.PostFingerprint.SHA256)
+	}
+	if report.PreFingerprint.Size != report.PostFingerprint.Size {
+		t.Fatalf("PreFingerprint.Size %d != PostFingerprint.Size %d; want equal on rollback",
+			report.PreFingerprint.Size, report.PostFingerprint.Size)
+	}
+	// On-disk bytes must match the pre-write payload byte-for-byte.
+	got, _ := os.ReadFile(target)
+	if !reflect.DeepEqual(got, origA) {
+		t.Fatalf("post-rollback bytes = %q; want %q (byte-identical to pre-write)", got, origA)
+	}
+	// Backup receipt must be populated (this was an overwrite case).
+	if report.Backup.BackupPath == "" {
+		t.Fatalf("Backup.BackupPath empty; want populated on overwrite-case rollback")
+	}
+}
+
+// TestApply_ReparseFailureRollsBack_FirstWrite pins the first-write
+// rollback branch: no prior file, parser rejects the reparse, rollback
+// removes the freshly written target so the tree is byte-identical to
+// its pre-write state (i.e. no file). RolledBack=true; error joins
+// ErrPostWriteReparse + ErrRollback.
+func TestApply_ReparseFailureRollsBack_FirstWrite(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+
+	// Pre-write calls: only parse new (call #1). Reparse is call #2.
+	parser := &countingParser{failOn: 2, inner: jsonParser}
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"model":"opus"}`),
+		Parser:     parser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err == nil {
+		t.Fatalf("Apply err = nil; want ErrPostWriteReparse + ErrRollback")
+	}
+	if !errors.Is(err, ErrPostWriteReparse) {
+		t.Fatalf("err = %v; want wraps ErrPostWriteReparse", err)
+	}
+	if !errors.Is(err, ErrRollback) {
+		t.Fatalf("err = %v; want wraps ErrRollback", err)
+	}
+	if !report.RolledBack {
+		t.Fatalf("RolledBack = false; want true")
+	}
+	if (report.Backup != storage.BackupRecord{}) {
+		t.Fatalf("Backup = %+v; want zero on first-write rollback", report.Backup)
+	}
+	// Target must no longer exist on disk.
+	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("target still on disk after first-write rollback: err=%v", statErr)
+	}
+}
+
+// sabotageParser succeeds on pre-write calls, and on the reparse call
+// mutates the target from a regular file into a non-empty directory so
+// the subsequent AtomicWrite rollback fails at os.Rename with EISDIR.
+// The parser then returns an error to trigger rollback.
+type sabotageParser struct {
+	calls   int
+	failOn  int
+	target  string
+	inner   Parser
+	t       *testing.T
+	sabbed  bool
+}
+
+func (p *sabotageParser) Parse(data []byte) (any, error) {
+	p.calls++
+	if p.calls < p.failOn {
+		return p.inner.Parse(data)
+	}
+	if !p.sabbed {
+		p.sabbed = true
+		// Replace the just-written target file with a non-empty directory
+		// so AtomicWrite's tempfile→rename fails with EISDIR during
+		// rollback. Running as root cannot bypass this — the kernel
+		// refuses rename(file → existing-dir) regardless of uid.
+		if err := os.Remove(p.target); err != nil {
+			p.t.Fatalf("sabotage: remove %q: %v", p.target, err)
+		}
+		if err := os.Mkdir(p.target, 0o700); err != nil {
+			p.t.Fatalf("sabotage: mkdir %q: %v", p.target, err)
+		}
+		if err := os.WriteFile(filepath.Join(p.target, "keeper"), []byte("x"), 0o600); err != nil {
+			p.t.Fatalf("sabotage: seed keeper: %v", err)
+		}
+	}
+	return nil, errors.New("sabotageParser: reparse rejected")
+}
+
+// TestApply_ReparseFailureRollbackFails pins the "state is undefined"
+// branch: reparse fails AND the rollback restore itself fails. Expect
+// errors.Is(ErrPostWriteReparse) && errors.Is(ErrRollbackFailed); no
+// WriteReport is returned (zero value acceptable).
+func TestApply_ReparseFailureRollbackFails(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	if err := os.WriteFile(target, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	parser := &sabotageParser{failOn: 3, target: target, inner: jsonParser, t: t}
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"model":"opus"}`),
+		Parser:     parser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err == nil {
+		t.Fatalf("Apply err = nil; want ErrPostWriteReparse + ErrRollbackFailed")
+	}
+	if !errors.Is(err, ErrPostWriteReparse) {
+		t.Fatalf("err = %v; want wraps ErrPostWriteReparse", err)
+	}
+	if !errors.Is(err, ErrRollbackFailed) {
+		t.Fatalf("err = %v; want wraps ErrRollbackFailed", err)
+	}
+	if errors.Is(err, ErrRollback) {
+		t.Fatalf("err = %v; must NOT wrap ErrRollback on failed rollback", err)
+	}
+	if !reflect.DeepEqual(report, WriteReport{}) {
+		t.Fatalf("report = %+v; want zero on failed rollback (state undefined)", report)
+	}
+	// Pin the parser-call ordering so a future rearrangement (e.g.
+	// reparseTarget parsing twice, or rollback re-parsing the restored
+	// bytes) can't silently sail past by never reaching the sabotage
+	// branch. Pre-write parses current (#1) + new (#2); reparse is (#3)
+	// which sabotages the target and returns the error; rollback does
+	// not invoke the parser. Total: 3.
+	if parser.calls != 3 {
+		t.Fatalf("sabotageParser.calls = %d; want 3 (pre-write current, pre-write new, reparse-that-sabotages)", parser.calls)
+	}
+}
+
+// panicIfCalledParser is used by the Skipped path to prove that the
+// post-write reparse never runs when Skipped=true. It succeeds on the
+// first (n-1) calls (which cover the pre-write parse of current + new)
+// and panics on the n-th call and beyond.
+type panicIfCalledParser struct {
+	calls    int
+	panicsOn int
+	inner    Parser
+}
+
+func (p *panicIfCalledParser) Parse(data []byte) (any, error) {
+	p.calls++
+	if p.calls >= p.panicsOn {
+		panic("panicIfCalledParser: called on invocation " + itoa(p.calls))
+	}
+	return p.inner.Parse(data)
+}
+
+// TestApply_ParserNilSkipsReparse pins that a nil Parser opts the whole
+// reparse+rollback pipeline out. Write succeeds, RolledBack=false,
+// PostFingerprint matches the on-disk hash produced by AtomicWrite.
+func TestApply_ParserNilSkipsReparse(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.txt")
+	ensureParent(t, target)
+
+	newBytes := []byte("hello world")
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: newBytes,
+		// Parser deliberately nil.
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if report.RolledBack {
+		t.Fatalf("RolledBack = true; want false when Parser is nil")
+	}
+	if report.PostFingerprint.SHA256 == "" {
+		t.Fatalf("PostFingerprint.SHA256 empty; want hash of new bytes")
+	}
+	got, _ := os.ReadFile(target)
+	if !reflect.DeepEqual(got, newBytes) {
+		t.Fatalf("bytes = %q; want %q", got, newBytes)
+	}
+}
+
+// TestApply_DryRunSkipsReparse pins that DryRun=true bypasses reparse
+// entirely: a Parser that would panic on the reparse call is used to
+// prove the code never gets there.
+func TestApply_DryRunSkipsReparse(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	if err := os.WriteFile(target, []byte(`{"model":"sonnet"}`), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Pre-write calls under DryRun: parse current + parse new = 2 calls.
+	// Panicking on call #3 proves no reparse fires.
+	parser := &panicIfCalledParser{panicsOn: 3, inner: jsonParser}
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"model":"opus"}`),
+		Parser:     parser,
+		OwnedKeys:  []string{"model"},
+		DryRun:     true,
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if !report.DryRun {
+		t.Fatalf("DryRun = false; want true")
+	}
+	if report.RolledBack {
+		t.Fatalf("RolledBack = true; want false on DryRun")
+	}
+}
+
+// TestApply_SkipsIdenticalReparseNotAttempted pins that the Skipped
+// short-circuit (byte-identical current/new against an existing file)
+// bypasses reparse entirely: a Parser that panics on the reparse call
+// proves the code path never fires.
+func TestApply_SkipsIdenticalReparseNotAttempted(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	initial := []byte(`{"model":"opus"}`)
+	if err := os.WriteFile(target, initial, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Pre-write calls on the skip path: parse current + parse new = 2.
+	// Panic on call #3 proves we never reparse.
+	parser := &panicIfCalledParser{panicsOn: 3, inner: jsonParser}
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: append([]byte(nil), initial...), // byte-identical
+		Parser:     parser,
+		OwnedKeys:  []string{"model"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if err != nil {
+		t.Fatalf("Apply err = %v", err)
+	}
+	if !report.Skipped {
+		t.Fatalf("Skipped = false; want true")
+	}
+	if report.RolledBack {
+		t.Fatalf("RolledBack = true; want false on Skipped path")
+	}
+}
+
 // TestApply_ConcurrentSerialization pins that WithLock serializes two
 // Apply calls against the same target: both succeed, the winner's
 // bytes are on disk, and exactly one backup exists (the second call

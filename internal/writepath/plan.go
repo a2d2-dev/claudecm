@@ -166,9 +166,21 @@ type WriteReport struct {
 	Skipped         bool                 // no-op: current bytes already match intent
 	Backup          storage.BackupRecord // zero value on skipped/dry-run/first-write
 	PreFingerprint  storage.Fingerprint  // captured under lock before write
-	PostFingerprint storage.Fingerprint  // captured after successful atomic write
+	PostFingerprint storage.Fingerprint  // reflects the file as it exists on disk after Apply returns (may be zero for removed / dry-run)
 	Diff            DiffResult
 	AppliedAt       time.Time
+
+	// RolledBack is true when FR-5 step 8 (post-write reparse) failed
+	// and Apply successfully restored the pre-write bytes from the
+	// step-6 backup. When true, PostFingerprint reflects the on-disk
+	// state after rollback: same SHA256 as PreFingerprint (with a
+	// refreshed ModTime) for the overwrite case, or the zero
+	// Fingerprint for the first-write case (target removed). The
+	// returned error joins ErrPostWriteReparse with ErrRollback so
+	// callers can distinguish "we rolled back cleanly" from "state is
+	// undefined" (ErrRollbackFailed, no report). Always false on
+	// Skipped/DryRun runs.
+	RolledBack bool
 }
 
 // Sentinel error kinds. Adapters and cmd/* switch on these via errors.Is;
