@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,76 @@ func TestApply_DriftDetection_ModTimeChangedOnly(t *testing.T) {
 	}
 	if report.Backup.BackupPath == "" {
 		t.Fatalf("Backup.BackupPath empty; want populated")
+	}
+}
+
+// TestApply_DriftDetection_VanishedUnderLock pins the
+// exists→!exists branch: PreFingerprint said the target existed and
+// the step-6 backup was taken, but a concurrent actor os.Removed the
+// file between the step-3 read (which captured PreFingerprint) and
+// the step-9 drift-check Stat. Apply must refuse via
+// ErrConcurrentEdit, the error message must name "vanished" so the
+// coded branch in detectDrift is what fired (not the size/sha/appeared
+// branches), and the step-6 backup file — taken from state A before
+// the vanish — must still exist on disk for audit.
+func TestApply_DriftDetection_VanishedUnderLock(t *testing.T) {
+	r, home := newTestHome(t)
+	target := filepath.Join(home, "tool", "config.json")
+	ensureParent(t, target)
+	original := []byte(`{"a":1}`) // content A
+	if err := os.WriteFile(target, original, 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	runWithHook(t, func() {
+		// External actor removes the target AFTER our step-3 read +
+		// PreFingerprint capture AND after step-6 backup captured the
+		// original bytes. The step-9 drift-check Stat must observe
+		// !exists and steer into detectDrift's "vanished under lock"
+		// branch (prevExists=true, curExists=false).
+		if err := os.Remove(target); err != nil {
+			t.Fatalf("hook remove: %v", err)
+		}
+	})
+
+	plan := WritePlan{
+		Tool:       "tool",
+		Target:     target,
+		NewContent: []byte(`{"a":2}`), // content B
+		Parser:     jsonParser,
+		OwnedKeys:  []string{"a"},
+	}
+	report, err := Apply(context.Background(), r, plan)
+	if !errors.Is(err, ErrConcurrentEdit) {
+		t.Fatalf("err = %v; want wraps ErrConcurrentEdit", err)
+	}
+	// The error message must contain "vanished" — this pins that
+	// detectDrift's prevExists && !curExists branch is what fired,
+	// not one of the fingerprint-mismatch branches.
+	if msg := err.Error(); !strings.Contains(msg, "vanished") {
+		t.Fatalf("err message = %q; want to contain %q (detectDrift vanished branch)", msg, "vanished")
+	}
+	// The backup file must still exist on disk — it captured state A
+	// (the pre-vanish bytes) and is retained for operator audit.
+	if report.Backup.BackupPath == "" {
+		t.Fatalf("Backup.BackupPath empty; want populated for audit")
+	}
+	if _, statErr := os.Stat(report.Backup.BackupPath); statErr != nil {
+		t.Fatalf("backup file stat %q: %v; want file present on disk", report.Backup.BackupPath, statErr)
+	}
+	backupBytes, berr := os.ReadFile(report.Backup.BackupPath)
+	if berr != nil {
+		t.Fatalf("read backup: %v", berr)
+	}
+	if !reflect.DeepEqual(backupBytes, original) {
+		t.Fatalf("backup bytes = %q; want %q (backup must reflect pre-vanish state A)", backupBytes, original)
+	}
+	// PostFingerprint stays zero — we did not write.
+	if (report.PostFingerprint != storage.Fingerprint{}) {
+		t.Fatalf("PostFingerprint = %+v; want zero on drift abort", report.PostFingerprint)
+	}
+	if report.RolledBack {
+		t.Fatalf("RolledBack = true; want false on drift abort")
 	}
 }
 

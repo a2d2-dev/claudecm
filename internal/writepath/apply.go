@@ -1,69 +1,73 @@
 // apply.go implements FR-5 steps 1-10 of the locked write-path pipeline
-// (Story E2-S2 steps 1-7 + Story E2-S3 steps 8-10 + Story E2-S4 step 9).
+// (Story E2-S2 steps 1-7 + Story E2-S3 steps 8, 10 + Story E2-S4 step 9).
 // It is the single legal path to disk for any tool-owned config file
 // claudecm mutates. The FR-5 pipeline is now landed end-to-end.
+//
+// Step numbers below are the canonical arch step numbers from
+// docs/architecture.md §4. A reader following "arch step N" should
+// land directly on the code labeled "Step N …" in applyLocked below;
+// in particular arch step 9 (concurrent-edit drift detection) is the
+// detectDrift call, physically ordered BEFORE arch step 7 (atomic
+// rename) so a drifted target aborts before we publish stale bytes.
 //
 // OS-Rename discipline: only internal/storage/atomic.go and this file
 // may call os.Rename on tool-owned paths. Enforced by
 // scripts/lint-osrename.sh (wired into `make lint`).
 //
-// Story E2-S2 steps 1-7 (implemented here):
-//
-//  1. ValidatePlan — cheap pre-execution refuse. Wraps ErrPlanInvalid.
-//  2. Acquire flock via storage.WithLock on the target sidecar. Timeout
-//     is derived from ctx.Deadline() when set, otherwise
-//     storage.DefaultLockTimeout. Timeout maps to ErrLockTimeout.
-//     ctx.Deadline() (when set) caps the flock acquisition timeout; an
-//     already-expired deadline returns ErrLockTimeout without attempting
-//     to acquire.
-//  3. Read current bytes (may not exist → treated as "empty" for the
-//     Transform seam) and capture pre-write Fingerprint via
+//  1. Lock. ValidatePlan first (cheap pre-execution refuse, wraps
+//     ErrPlanInvalid). Then acquire flock via storage.WithLock on the
+//     target sidecar. Timeout derives from ctx.Deadline() when set,
+//     otherwise storage.DefaultLockTimeout. Timeout maps to
+//     ErrLockTimeout; an already-expired deadline returns
+//     ErrLockTimeout without attempting to acquire.
+//  2. Read. Read current bytes (may not exist → treated as "empty" for
+//     the Transform seam) and capture pre-write Fingerprint via
 //     storage.Stat. Non-existence yields a zero Fingerprint with the
 //     exists=false signal. Symlink escape is enforced twice — by
 //     storage.Acquire's EnsureDir under HOME and by storage.AtomicWrite
 //     on the parent — and mapped to ErrOutsideHome here so callers can
 //     errors.Is on one sentinel without importing internal/storage.
-//  4. Compute new bytes: plan.Transform wins over plan.NewContent (see
-//     plan.go package doc). Transform errors abort — no fallback to
-//     NewContent, per CLAUDE.md "no fallback" rule.
-//  5. Parse current + new via plan.Parser. Non-nil Parser is mandatory
-//     for a meaningful Diff; a nil Parser skips diff computation and
-//     the skip-on-identical-bytes shortcut becomes the only "no-op"
-//     signal. On parse failure of EITHER side we wrap the parser error
-//     with ErrParseFailed and abort. NFR-S1: no silent rewrite. Then
-//     Flatten + Diff. A byte-identical current==new against an existing
-//     file, OR a parsed-empty diff against an existing file, short-
-//     circuits to Skipped=true with no backup and no write;
-//     PostFingerprint mirrors PreFingerprint. A first write (no prior
-//     file) is NEVER skipped even if diff is empty — the atomic publish
-//     still creates the file at 0600.
-//  6. DryRun=true returns a report populated with the diff but WITHOUT
-//     backing up or writing. Callers use this for FR-15.
-//     Diff.TouchesUnowned=true AND AllowUnowned=false AND DryRun=false
-//     is refused with ErrDryRunUnownedTouched. The sentinel name is
-//     kept for API stability even though it fires outside dry-run.
-//  7. storage.Backup snapshots the pre-write bytes. ErrNothingToBackup
-//     means "first write, no prior state" and produces a zero
-//     BackupRecord. Any other backup failure wraps ErrBackupFailed and
-//     aborts before touching the target. Step 9 (drift check, below)
-//     runs between backup and the atomic publish, then
-//     storage.AtomicWrite publishes the new bytes at mode 0600, honoring
-//     MustNotExist. AtomicWrite's own ErrTargetExists propagates
-//     unwrapped so callers can errors.Is against storage.ErrTargetExists.
-//     storage.Stat captures the post-write Fingerprint for the report.
-//
-// Story E2-S4 step 9 (implemented here):
-//
-//  9. Concurrent-edit fingerprint drift check. Under the flock, another
-//     claudecm invocation cannot race us — the advisory lock is honored
-//     process-wide. But nothing prevents a NON-claudecm actor (the
-//     Claude Code app itself, a user editor, an unrelated script) from
-//     writing the target between our step-3 read (which captured
-//     PreFingerprint) and the step-7 AtomicWrite. Immediately before
-//     AtomicWrite we re-Stat the target and compare against
-//     PreFingerprint (Size, SHA256, ModTime). Policy is strict — any
-//     Fingerprint mismatch aborts; ModTime-only drift still aborts
-//     (rare in practice; users who hit spurious drift can rerun). Rules:
+//     The Transform seam runs here too: plan.Transform wins over
+//     plan.NewContent (see plan.go package doc). Transform errors abort
+//     — no fallback to NewContent, per CLAUDE.md "no fallback" rule.
+//  3. Parse. Parse current + new via plan.Parser. Non-nil Parser is
+//     mandatory for a meaningful Diff; a nil Parser skips diff
+//     computation and the skip-on-identical-bytes shortcut becomes the
+//     only "no-op" signal. On parse failure of EITHER side we wrap the
+//     parser error with ErrParseFailed and abort. NFR-S1: no silent
+//     rewrite.
+//  4. Resolve symlink. Symlink escape is enforced by storage.Acquire
+//     (EnsureDir under HOME) and by storage.AtomicWrite (parent-dir
+//     check). Escapes surface as ErrOutsideHome. No dedicated code
+//     block here — the guarantee is inherited from the storage layer.
+//  5. Diff. Flatten + Diff against plan.OwnedKeys. A byte-identical
+//     current==new against an existing file, OR a parsed-empty diff
+//     against an existing file, short-circuits to Skipped=true with no
+//     backup and no write; PostFingerprint mirrors PreFingerprint. A
+//     first write (no prior file) is NEVER skipped even if diff is
+//     empty — the atomic publish still creates the file at 0600. Two
+//     diff-consumer guards fire here before we advance to backup:
+//     DryRun=true returns a report populated with the diff but WITHOUT
+//     backing up or writing (FR-15); Diff.TouchesUnowned=true AND
+//     AllowUnowned=false AND DryRun=false is refused with
+//     ErrDryRunUnownedTouched (sentinel name kept for API stability
+//     even though it fires outside dry-run).
+//  6. Backup. storage.Backup snapshots the pre-write bytes.
+//     ErrNothingToBackup means "first write, no prior state" and
+//     produces a zero BackupRecord. Any other backup failure wraps
+//     ErrBackupFailed and aborts before touching the target.
+//  9. Concurrency check (physically ordered BEFORE arch step 7 so a
+//     drifted target aborts before AtomicWrite publishes stale bytes).
+//     Under the flock, another claudecm invocation cannot race us —
+//     the advisory lock is honored process-wide. But nothing prevents
+//     a NON-claudecm actor (the Claude Code app itself, a user editor,
+//     an unrelated script) from writing the target between our step-2
+//     read (which captured PreFingerprint) and the step-7 AtomicWrite.
+//     Immediately before AtomicWrite we re-Stat the target and compare
+//     against PreFingerprint (Size, SHA256, ModTime). Policy is strict
+//     — any Fingerprint mismatch aborts; ModTime-only drift still
+//     aborts (rare in practice; users who hit spurious drift can
+//     rerun). Rules:
 //
 //       - PreFingerprint said exists=false AND current Stat says
 //         !exists: first-write path, nothing to drift against — skip
@@ -81,16 +85,22 @@
 //     current bytes), DO NOT roll back the backup (the pre-write bytes
 //     the backup captured are now stale, but they are still the last
 //     known clean state — the file on disk is whatever the external
-//     writer put there). The step-7 backup file, if any, is retained on
-//     disk (retention policy will eventually reap it) so operators can
-//     inspect what state we thought we had at read time. The returned
-//     WriteReport is partial: Backup populated (may be zero for first-
-//     write drift), PreFingerprint is the stale snapshot, PostFingerprint
-//     is the zero Fingerprint (we never wrote). The error wraps
-//     ErrConcurrentEdit with both fingerprints embedded for audit.
-//
-// Story E2-S3 steps 8, 10 (implemented here):
-//
+//     writer put there). The retained backup file captures the on-disk
+//     state at backup time (which may already reflect drift if the
+//     external write happened between step 2 read and step 6 backup).
+//     It is NOT guaranteed to equal the bytes we read into memory
+//     under the lock. Retention policy will eventually reap it so
+//     operators can inspect what state we snapshotted before the
+//     abort. The returned WriteReport is partial: Backup populated
+//     (may be zero for first-write drift), PreFingerprint is the
+//     step-2 snapshot, PostFingerprint is the zero Fingerprint (we
+//     never wrote). The error wraps ErrConcurrentEdit with both
+//     fingerprints embedded for audit.
+//  7. Atomic write. storage.AtomicWrite publishes the new bytes at
+//     mode 0600, honoring MustNotExist. AtomicWrite's own
+//     ErrTargetExists propagates unwrapped so callers can errors.Is
+//     against storage.ErrTargetExists. storage.Stat captures the
+//     post-write Fingerprint for the report.
 //  8. Post-write reparse: re-read the target bytes from disk via
 //     os.ReadFile, then feed them through plan.Parser. Skipped entirely
 //     when plan.Parser == nil (adapter opts out; adapter takes
@@ -98,7 +108,7 @@
 //     Skipped=true (no write happened) and when DryRun=true (nothing
 //     was written). Any reparse failure — read error or parse error —
 //     joins into ErrPostWriteReparse and triggers step 10.
-//  10. Auto-rollback from the step-7 backup on any step-8 failure:
+//  10. Auto-rollback from the step-6 backup on any step-8 failure:
 //      - When Backup is zero-value (first-write case), rollback =
 //        os.Remove(plan.Target). A Remove failure surfaces as
 //        ErrRollbackFailed joined with ErrPostWriteReparse and the
@@ -212,12 +222,13 @@ func Apply(ctx context.Context, r *storage.Resolver, plan WritePlan) (WriteRepor
 	return report, nil
 }
 
-// applyLocked runs steps 3-7 under the assumption the lock is held.
-// Split out so Apply itself remains a linear lock+dispatch shell.
+// applyLocked runs arch steps 2-10 under the assumption the lock
+// (arch step 1) is held. Split out so Apply itself remains a linear
+// lock+dispatch shell. Body step labels match docs/architecture.md §4.
 func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 	now := time.Now()
 
-	// Step 3: read current bytes + pre-write fingerprint.
+	// Step 2 (read): read current bytes + pre-write fingerprint.
 	currentBytes, exists, err := readAll(plan.Target)
 	if err != nil {
 		return WriteReport{}, err
@@ -227,8 +238,8 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		return WriteReport{}, err
 	}
 
-	// Step 4: compute new bytes. Transform wins over NewContent; a
-	// Transform error is fatal (no fallback rewrite).
+	// Step 2 (transform seam): compute new bytes. Transform wins over
+	// NewContent; a Transform error is fatal (no fallback rewrite).
 	var newBytes []byte
 	if plan.Transform != nil {
 		nb, terr := plan.Transform(currentBytes)
@@ -240,7 +251,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		newBytes = plan.NewContent
 	}
 
-	// Step 5 (parse+diff): parse current + new. Skipped entirely when Parser is nil.
+	// Step 3 (parse) + Step 5 (diff): parse current + new. Skipped entirely when Parser is nil.
 	// When the file did not exist, the "current" side is an empty flat
 	// map (not the result of Flatten(nil), which yields {"": nil} — see
 	// Flatten's non-map top-level rule). Skipping parse+flatten on the
@@ -292,7 +303,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		}, nil
 	}
 
-	// Step 6 (dry-run): short-circuits before backup and write.
+	// Step 5 (dry-run short-circuit): diff-consumer guard, fires before backup and write.
 	if plan.DryRun {
 		return WriteReport{
 			Tool:           plan.Tool,
@@ -304,14 +315,14 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		}, nil
 	}
 
-	// Step 6 (unowned-touched guard). Refuse the write unless the caller
-	// pre-authorized via AllowUnowned. Sentinel name kept for API
-	// stability (see plan.go ErrDryRunUnownedTouched doc).
+	// Step 5 (unowned-touched guard): diff-consumer guard. Refuse the
+	// write unless the caller pre-authorized via AllowUnowned. Sentinel
+	// name kept for API stability (see plan.go ErrDryRunUnownedTouched doc).
 	if diff.TouchesUnowned && !plan.AllowUnowned {
 		return WriteReport{}, fmt.Errorf("%w: %s", ErrDryRunUnownedTouched, plan.Target)
 	}
 
-	// Step 7 (backup): backup pre-write state. ErrNothingToBackup is fine —
+	// Step 6 (backup): snapshot pre-write state. ErrNothingToBackup is fine —
 	// first write against a missing target. Anything else is fatal.
 	var backup storage.BackupRecord
 	brec, berr := storage.Backup(r, plan.Tool, filepath.Base(plan.Target), plan.Target)
@@ -324,16 +335,17 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 		return WriteReport{}, fmt.Errorf("%w: %v", ErrBackupFailed, berr)
 	}
 
-	// Step 9 (concurrent-edit drift detection): between step 3 and now,
+	// Step 9 (concurrent-edit drift detection): between step 2 and now,
 	// nothing else claudecm-owned raced us (the flock is held), but a
 	// non-claudecm process may have written the target. Re-Stat and
-	// compare against preFP; abort BEFORE AtomicWrite on any mismatch so
-	// our stale-derived newBytes never land on disk. The backup file
-	// stays on disk for audit (see file header). postReadHookForTest is
-	// a build-tag seam — a no-op in production, swap-able only under
-	// -tags=test to let unit tests inject a between-read-and-Stat
-	// mutation. Kept ahead of Stat so the hook fires while the pre-Stat
-	// state is still whatever the test wants it to be.
+	// compare against preFP; abort BEFORE step 7 AtomicWrite on any
+	// mismatch so our stale-derived newBytes never land on disk. The
+	// backup file stays on disk for audit (see file header).
+	// postReadHookForTest is a build-tag seam — a no-op in production,
+	// swap-able only under -tags=test to let unit tests inject a
+	// between-read-and-Stat mutation. Kept ahead of Stat so the hook
+	// fires while the pre-Stat state is still whatever the test wants
+	// it to be.
 	postReadHookForTest()
 	curFP, curExists, cerr := storage.Stat(plan.Target)
 	if cerr != nil {
@@ -389,7 +401,7 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 // ErrPostWriteReparse so the caller can errors.Is on the single sentinel.
 // Called only when plan.Parser != nil. Uses the local readAll helper so
 // the read shape (existence signal vs I/O error) stays consistent with
-// step 3; a post-write !exists is anomalous — AtomicWrite succeeded
+// step 2; a post-write !exists is anomalous — AtomicWrite succeeded
 // microseconds earlier — and surfaces as its own reparse failure.
 func reparseTarget(plan WritePlan) error {
 	b, exists, err := readAll(plan.Target)
@@ -409,12 +421,12 @@ func reparseTarget(plan WritePlan) error {
 // failure. It is called inside the flock; no fresh Backup is taken.
 //
 //   - First-write case (backup zero-value): remove the target. The
-//     step-3 read reported the file did not exist, so removing brings
+//     step-2 read reported the file did not exist, so removing brings
 //     the tree back to that state. PostFingerprint is intentionally
 //     zero — no file exists on disk after rollback.
 //   - Overwrite case: restore the pre-write bytes over the target via
 //     AtomicWrite (mode 0600, MustNotExist=false). currentBytes was
-//     captured under the same lock in step 3, so it's the authoritative
+//     captured under the same lock in step 2, so it's the authoritative
 //     pre-write payload; we prefer it over re-reading the backup file
 //     (fewer failure modes, and the backup path is retained on the
 //     WriteReport regardless). PostFingerprint reflects the file as it
@@ -439,7 +451,7 @@ func rollback(
 ) (WriteReport, error) {
 	if !exists {
 		// First-write case: revert to "no file". Zero-value backup is
-		// expected here (Backup returned ErrNothingToBackup in step 7).
+		// expected here (Backup returned ErrNothingToBackup in step 6).
 		if err := os.Remove(plan.Target); err != nil {
 			return WriteReport{}, errors.Join(
 				reparseErr,
@@ -517,11 +529,11 @@ func mapStorageError(err error) error {
 }
 
 // detectDrift compares the pre-write existence+Fingerprint captured in
-// step 3 against a fresh Stat taken immediately before the atomic
-// publish. Any divergence surfaces as an ErrConcurrentEdit-wrapped
-// error carrying both fingerprints for the audit log; returns nil on a
-// clean first-write (both sides !exists) or a byte-identical match.
-// See file header (Story E2-S4 step 9) for the policy narrative.
+// step 2 against a fresh Stat taken immediately before the arch-step-7
+// atomic publish. Any divergence surfaces as an ErrConcurrentEdit-
+// wrapped error carrying both fingerprints for the audit log; returns
+// nil on a clean first-write (both sides !exists) or a byte-identical
+// match. See file header (arch step 9) for the policy narrative.
 func detectDrift(target string, prevExists bool, preFP storage.Fingerprint, curExists bool, curFP storage.Fingerprint) error {
 	if !prevExists && !curExists {
 		// First write; nothing to drift against. Proceed to AtomicWrite.
