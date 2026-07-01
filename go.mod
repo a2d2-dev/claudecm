@@ -1,9 +1,10 @@
 module github.com/a2d2-dev/claudecm
 
-go 1.21
+go 1.21.0
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
+	github.com/gofrs/flock v0.12.1
 	github.com/spf13/cobra v1.8.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/text v0.4.0
@@ -19,6 +20,6 @@ require (
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
+	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
 )
