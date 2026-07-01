@@ -393,13 +393,11 @@ func renderCurrentToolText(w io.Writer, tv resolver.ToolView, reveal bool) {
 		orDash(tv.Presence.ConfigDir),
 	)
 
-	// A tool that is not installed still gets a Presence line but no
-	// effective-value block — the operator cares that the tool is
-	// missing, not that its Model would have been "opus" hypothetically.
-	if !tv.Presence.Installed {
-		return
-	}
-
+	// Always render the highlighted-fields block — the AC calls for
+	// "minimum effective values per tool" independent of tool
+	// installation status. On a not-installed tool, the values still
+	// reflect what the resolver would apply if the tool were installed;
+	// missing fields render as "(not set)" via displayHighlight.
 	for _, h := range selectHighlightFields(tv, reveal) {
 		fmt.Fprintf(w, "  %s: %s\n", h.Label, h.Display)
 	}
@@ -484,13 +482,11 @@ func renderCurrentJSON(w io.Writer, view resolver.View, reveal bool) error {
 			},
 			Effective: make([]jsonCurrentEffective, 0),
 		}
-		if tv.Presence.Installed {
-			for _, h := range selectHighlightFields(tv, reveal) {
-				jt.Effective = append(jt.Effective, jsonCurrentEffective{
-					Key:   h.JSONKey,
-					Value: jsonCurrentValue(h.Value, h.Secret, reveal),
-				})
-			}
+		for _, h := range selectHighlightFields(tv, reveal) {
+			jt.Effective = append(jt.Effective, jsonCurrentEffective{
+				Key:   h.JSONKey,
+				Value: jsonCurrentValue(h.Value, h.Secret, reveal),
+			})
 		}
 		out.Tools = append(out.Tools, jt)
 	}
