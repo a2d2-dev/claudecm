@@ -104,10 +104,13 @@ type OwnedFile struct {
 	Optional bool
 }
 
-// Files is the ordered set of files an Adapter owns for its tool. The
-// slice order is meaningful: it is the order in which two-phase commit
-// (internal/commit, FR-16) will stage and rename entries.
-type Files = []OwnedFile
+// OwnedFiles is the ordered set of files an Adapter owns for its tool.
+// The slice order is meaningful: it is the order in which two-phase
+// commit (internal/commit, FR-16) will stage and rename entries.
+//
+// Named OwnedFiles (not Files) to avoid colliding with the Adapter.Files
+// method that returns this type.
+type OwnedFiles = []OwnedFile
 
 // CoreFromTool is the core-shape intent an adapter infers when reading
 // the tool's current on-disk state. Aliased to config.CoreConfig so
@@ -133,21 +136,58 @@ type ApplyReport = writepath.WriteReport
 // and grep-friendly in operator logs.
 type Layer string
 
-// Precedence layers, low → high. EnvOverride wins.
+// Precedence layers, low → high. EnvOverride wins. String values match
+// architecture.md §6 verbatim so `explain` output uses the exact names
+// operators see in the architecture doc — no translation table needed.
 const (
-	LayerDefault     Layer = "default"
-	LayerCore        Layer = "core"
-	LayerOverlay     Layer = "overlay"
-	LayerOnDisk      Layer = "on-disk"
-	LayerEnvOverride Layer = "env"
+	LayerDefault     Layer = "BuiltInDefault"
+	LayerCore        Layer = "ProfileCore"
+	LayerOverlay     Layer = "ProfileOverlay"
+	LayerOnDisk      Layer = "OnDiskToolConfig"
+	LayerEnvOverride Layer = "EnvOverride"
 )
 
 // EffectiveField is one resolved config value plus its provenance.
 // Populated by Adapter.Project and rendered by `current` / `explain`.
+//
+// Value type is any (heterogeneous). Real-world tool config values are
+// not uniformly strings: Claude Code's CLAUDE_CODE_USE_BEDROCK is a
+// bool; Codex may carry numeric knobs; array-shaped keys deserialize to
+// []string. Widening to any is deliberate — the alternative (string)
+// forces every adapter to stringify at the projection boundary, which
+// destroys type information `explain` needs to render correctly and
+// makes round-trip semantics (import→switch→export) lossy.
+//
+// Redaction contract (NFR-S8). Because Value is any, redactors CANNOT
+// rely on regex-over-string. The contract is:
+//   1. The adapter that populated this field is the authority. If the
+//      adapter knows the field is a secret (env vars ending in _KEY,
+//      _TOKEN, _SECRET, or matching an explicit per-adapter secret
+//      allowlist), it MUST set Secret=true. Downstream renderers
+//      (list / current / explain / export) then redact regardless of
+//      the underlying Go type.
+//   2. For non-string Value types, renderers must type-switch before
+//      formatting; passing a bool or int64 through fmt.Sprintf("%s",...)
+//      is a rendering bug, not a data bug.
+//   3. --reveal disables redaction uniformly across every type.
+//
+// architecture.md §6 (EffectiveField shape) is updated in this PR to
+// match this contract.
 type EffectiveField struct {
+	// Key is the flat key path (writepath.Flatten shape), e.g.
+	// "env.ANTHROPIC_API_KEY". Populated by the adapter; used by
+	// `explain` as the field label and by SortFields as the sort key.
+	Key string
+
 	// Value is the resolved effective value. May be nil for unset
-	// fields that still have a shadowed entry.
+	// fields that still have a shadowed entry. Type is heterogeneous
+	// per the godoc block above.
 	Value any
+
+	// Secret is true when the adapter has declared this field carries
+	// a secret and must be redacted in default rendering. See the
+	// redaction contract above. Independent of Value's Go type.
+	Secret bool
 
 	// WinningLayer is the layer this value came from.
 	WinningLayer Layer
@@ -169,10 +209,15 @@ type EffectiveField struct {
 // ShadowedLayer records one lower-precedence layer that lost to a
 // winning layer. Keeping value+source paired here means `explain` never
 // has to reach back into raw config to render its diagnostic chain.
+//
+// Value carries the same heterogeneous-type contract as
+// EffectiveField.Value; Secret propagates from the parent field so
+// shadowed values are redacted under the same rule.
 type ShadowedLayer struct {
 	Layer  Layer
 	Source string
 	Value  any
+	Secret bool
 }
 
 // EffectiveView is the per-tool projection Adapter.Project returns. It
@@ -182,10 +227,13 @@ type EffectiveView struct {
 	// Tool identifies which tool this view describes.
 	Tool ToolID
 
-	// Fields maps a flat key path (writepath.Flatten shape) to its
-	// resolved effective field. Deterministic in `explain` output
-	// because callers sort the keys before rendering.
-	Fields map[string]EffectiveField
+	// Fields is the flat list of resolved fields. Slice (not map) so
+	// `explain` output ordering is a property of the data, not of map
+	// iteration. Adapters SHOULD emit fields in a deterministic order
+	// — callers rendering to a user MUST call SortFields first (or
+	// otherwise commit to a stable order) so runs against identical
+	// input produce identical output.
+	Fields []EffectiveField
 
 	// ExternalDriftDetected is true when any owned file's on-disk
 	// SHA256 differs from state.LastAppliedPerTool[Tool].SHA256
@@ -196,6 +244,14 @@ type EffectiveView struct {
 	// ExternalDriftFile is the absolute path of the drifting file
 	// when ExternalDriftDetected is true. Empty otherwise.
 	ExternalDriftFile string
+}
+
+// SortFields sorts fields lexicographically by Key in place. Downstream
+// `current` / `explain` renderers call this before formatting so their
+// output is stable across runs and across binaries — random map order
+// bugs cannot regress through Project's return path.
+func SortFields(fields []EffectiveField) {
+	sort.Slice(fields, func(i, j int) bool { return fields[i].Key < fields[j].Key })
 }
 
 // Adapter is the contract every supported tool implements. Concrete
@@ -216,6 +272,30 @@ type EffectiveView struct {
 // Context. Methods that touch the filesystem accept a context.Context
 // so cmd/* can propagate cancellation from signal handlers. Methods
 // that are pure over their arguments (ID) omit it.
+//
+// Deviations from architecture.md §3 (architecture §3 was reconciled
+// to match this shape in the same PR that introduced this godoc):
+//
+//   - Every method that touches the filesystem takes a context.Context
+//     AND a *storage.Resolver. The Resolver is the sole legal source of
+//     HOME-anchored paths (coding-standards rule 3); passing it as a
+//     parameter is dependency injection rather than package-global
+//     lookup, which keeps adapters testable with a temp-dir Resolver.
+//   - Plan returns []WritePlan, not a single WritePlan. Required
+//     because Codex owns two files (~/.codex/auth.json and
+//     ~/.codex/config.toml) and each is a separate WritePlan the
+//     two-phase commit stages in the auth-first order (architecture
+//     §5). A single-WritePlan return would force Codex into a
+//     dishonest packed shape.
+//   - Apply operates per-file (WritePlan → ApplyReport). Batch
+//     two-phase commit orchestration lives in internal/commit (E7);
+//     the adapter never calls Apply for multiple files itself.
+//   - Import reads via *storage.Resolver rather than taking a Files()
+//     argument. Import is a read-only tool-discovery operation;
+//     accepting a pre-computed Files list would let a caller inject
+//     paths that were never adapter-declared, which contradicts the
+//     "adapter is the sole authority on owned paths" invariant
+//     (coding-standards rule 3).
 type Adapter interface {
 	// ID names the tool this adapter targets. Must return one of the
 	// two v1 ToolID constants above; adapters that return anything
@@ -230,7 +310,7 @@ type Adapter interface {
 	// order the two-phase commit must stage them (FR-16, architecture
 	// §5 auth-first ordering). Each entry carries its owned-key
 	// allowlist. Pure — no I/O.
-	Files(r *storage.Resolver) Files
+	Files(r *storage.Resolver) OwnedFiles
 
 	// Import reads the current on-disk state of this tool's owned
 	// files and produces (a) the core intent the user appears to be

@@ -28,7 +28,7 @@ func (m *mockAdapter) Detect(ctx context.Context, r *storage.Resolver) (Presence
 	return Presence{}, errNotImplemented
 }
 
-func (m *mockAdapter) Files(r *storage.Resolver) Files { return nil }
+func (m *mockAdapter) Files(r *storage.Resolver) OwnedFiles { return nil }
 
 func (m *mockAdapter) Import(ctx context.Context, r *storage.Resolver) (CoreFromTool, OverlayFromTool, error) {
 	return CoreFromTool{}, OverlayFromTool{}, errNotImplemented
@@ -276,6 +276,105 @@ func TestDefaultRegistryShortcuts(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("List() missing registered id %q; got %v", id, list)
+	}
+}
+
+func TestLayerConstantsMatchArchitectureNames(t *testing.T) {
+	// Story AC (E3-S1 F6): the Layer string values must match
+	// architecture.md §6 verbatim so `explain` output uses the exact
+	// operator-facing names in the architecture doc.
+	cases := []struct {
+		got  Layer
+		want string
+	}{
+		{LayerDefault, "BuiltInDefault"},
+		{LayerCore, "ProfileCore"},
+		{LayerOverlay, "ProfileOverlay"},
+		{LayerOnDisk, "OnDiskToolConfig"},
+		{LayerEnvOverride, "EnvOverride"},
+	}
+	for _, c := range cases {
+		if string(c.got) != c.want {
+			t.Errorf("Layer = %q, want %q", string(c.got), c.want)
+		}
+	}
+}
+
+func TestSortFields(t *testing.T) {
+	// SortFields must be a stable, in-place lexicographic sort by
+	// Key so `current`/`explain` output is deterministic regardless
+	// of the order the adapter emitted fields in.
+	fields := []EffectiveField{
+		{Key: "env.ANTHROPIC_MODEL", Value: "claude-3-5-sonnet"},
+		{Key: "env.ANTHROPIC_API_KEY", Value: "sk-xxx", Secret: true},
+		{Key: "env.ANTHROPIC_BASE_URL", Value: "https://api.anthropic.com"},
+	}
+	SortFields(fields)
+	want := []string{
+		"env.ANTHROPIC_API_KEY",
+		"env.ANTHROPIC_BASE_URL",
+		"env.ANTHROPIC_MODEL",
+	}
+	got := make([]string, len(fields))
+	for i, f := range fields {
+		got[i] = f.Key
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SortFields order = %v, want %v", got, want)
+	}
+	// Secret + non-string Value carriers must survive the sort.
+	if !fields[0].Secret {
+		t.Errorf("SortFields dropped Secret bit on fields[0] = %+v", fields[0])
+	}
+	// Idempotent: sorting a sorted slice is a no-op.
+	SortFields(fields)
+	got2 := make([]string, len(fields))
+	for i, f := range fields {
+		got2[i] = f.Key
+	}
+	if !reflect.DeepEqual(got2, want) {
+		t.Errorf("SortFields not idempotent: %v -> %v", want, got2)
+	}
+	// Nil/empty is a no-op, not a panic.
+	SortFields(nil)
+	SortFields([]EffectiveField{})
+}
+
+func TestEffectiveFieldHeterogeneousValueTypes(t *testing.T) {
+	// F2 contract: Value is any. Adapters must be able to store
+	// bool / int64 / []string alongside string values, and Secret
+	// operates independently of Go type.
+	view := EffectiveView{
+		Tool: ToolClaudeCode,
+		Fields: []EffectiveField{
+			{Key: "env.CLAUDE_CODE_USE_BEDROCK", Value: true, WinningLayer: LayerEnvOverride},
+			{Key: "env.ANTHROPIC_API_KEY", Value: "sk-live-abc", Secret: true, WinningLayer: LayerOnDisk,
+				Shadowed: []ShadowedLayer{{Layer: LayerCore, Source: "profile.core", Value: "sk-core-xxx", Secret: true}}},
+			{Key: "env.SOMETHING_NUMERIC", Value: int64(42), WinningLayer: LayerCore},
+		},
+	}
+	// Sanity: the map->slice migration means Fields is indexable by
+	// position and can be sorted; the shape must be a slice.
+	if got, want := len(view.Fields), 3; got != want {
+		t.Fatalf("Fields len = %d, want %d", got, want)
+	}
+	SortFields(view.Fields)
+	if view.Fields[0].Key != "env.ANTHROPIC_API_KEY" {
+		t.Errorf("Fields[0].Key = %q after sort, want env.ANTHROPIC_API_KEY", view.Fields[0].Key)
+	}
+	// Value type-switching contract: renderers must be able to
+	// pattern-match on the underlying type.
+	switch v := view.Fields[2].Value.(type) {
+	case int64:
+		if v != 42 {
+			t.Errorf("int64 Value = %d, want 42", v)
+		}
+	default:
+		t.Errorf("Value type = %T, want int64", v)
+	}
+	// Shadowed carries Secret alongside its Value.
+	if len(view.Fields[0].Shadowed) != 1 || !view.Fields[0].Shadowed[0].Secret {
+		t.Errorf("Shadowed[0].Secret dropped: %+v", view.Fields[0].Shadowed)
 	}
 }
 
