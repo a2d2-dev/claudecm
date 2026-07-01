@@ -515,3 +515,21 @@ func TestSentinels_AllDistinct(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteReport_ShapeIncludesRolledBack pins the E2-S3 addition of
+// the RolledBack field on WriteReport. Guards against accidental shape
+// drift (rename/remove) since adapters and cmd/* will assert on this
+// field once wiring lands. Zero-value is false — Skipped/DryRun/happy
+// paths never flip it true.
+func TestWriteReport_ShapeIncludesRolledBack(t *testing.T) {
+	var zero WriteReport
+	if zero.RolledBack {
+		t.Fatalf("zero WriteReport.RolledBack = true; want false")
+	}
+	// The field must be assignable as a plain bool. This line is a
+	// compile-time contract more than a runtime check.
+	zero.RolledBack = true
+	if !zero.RolledBack {
+		t.Fatalf("WriteReport.RolledBack not settable")
+	}
+}

@@ -169,6 +169,15 @@ type WriteReport struct {
 	PostFingerprint storage.Fingerprint  // captured after successful atomic write
 	Diff            DiffResult
 	AppliedAt       time.Time
+
+	// RolledBack is true when FR-5 step 8 (post-write reparse) failed
+	// and Apply successfully restored the pre-write bytes from the
+	// step-6 backup. When true, PostFingerprint mirrors PreFingerprint
+	// (state restored) and the returned error joins ErrPostWriteReparse
+	// with ErrRollback so callers can distinguish "we rolled back
+	// cleanly" from "state is undefined" (ErrRollbackFailed, no report).
+	// Always false on Skipped/DryRun runs.
+	RolledBack bool
 }
 
 // Sentinel error kinds. Adapters and cmd/* switch on these via errors.Is;
