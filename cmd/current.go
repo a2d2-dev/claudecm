@@ -74,8 +74,16 @@ const noActiveProfileMessage = "no active profile"
 
 var (
 	currentOutputFlag string
-	currentRevealFlag bool
 	currentToolFlag   string
+	// currentRevealFlag preserves the pre-E6-S9 flag var so tests that
+	// pin it directly (cmd/current_test.go — the harness resets it, and
+	// several cases set it to true to exercise the revealed rendering
+	// path) keep compiling without a mechanical rewrite. Its value is
+	// OR'd with the global --reveal via globalRevealActive at every
+	// consumer. The cobra flag registration was removed in E6-S9
+	// (root.go owns the persistent --reveal); the var remains as a
+	// test-only seam.
+	currentRevealFlag bool
 )
 
 var currentCmd = &cobra.Command{
@@ -106,7 +114,11 @@ EXAMPLES
 
 func init() {
 	currentCmd.Flags().StringVarP(&currentOutputFlag, "output", "o", "text", "Output format (text|json)")
-	currentCmd.Flags().BoolVar(&currentRevealFlag, "reveal", false, "Reveal secret values in plaintext (prints stderr warning)")
+	// --reveal was previously registered as a local flag here. E6-S9
+	// promoted it to a persistent flag on rootCmd (cmd/root.go); the
+	// local currentRevealFlag var survives as a test-only seam OR'd
+	// into the effective reveal via globalRevealActive at every use
+	// site.
 	currentCmd.Flags().StringVar(&currentToolFlag, "tool", "", "Restrict to a comma-separated list of tool IDs (default all)")
 	rootCmd.AddCommand(currentCmd)
 }
@@ -151,10 +163,11 @@ func runCurrent(cmd *cobra.Command, args []string) error {
 	// output so a piped consumer that reads only stdout does not miss
 	// it, and so a user watching the terminal sees the warning next to
 	// the plaintext they asked for. Gated on activeName != "" per the
-	// comment above. Symmetric with cmd/explain.
-	if currentRevealFlag {
-		fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: --reveal exposes secret values on your terminal and in scrollback.")
-	}
+	// comment above. Symmetric with cmd/explain. The effective reveal
+	// is the OR of the global --reveal (root persistent flag) and the
+	// legacy currentRevealFlag test seam.
+	effectiveReveal := globalRevealActive(currentRevealFlag)
+	emitRevealNoticeIfNeeded(cmd.ErrOrStderr(), effectiveReveal)
 
 	profile, err := mgr.GetProfile(activeName)
 	if err != nil {
@@ -170,9 +183,9 @@ func runCurrent(cmd *cobra.Command, args []string) error {
 
 	switch format {
 	case currentOutputJSON:
-		return renderCurrentJSON(cmd.OutOrStdout(), view, currentRevealFlag)
+		return renderCurrentJSON(cmd.OutOrStdout(), view, effectiveReveal)
 	default:
-		return renderCurrentText(cmd.OutOrStdout(), view, currentRevealFlag)
+		return renderCurrentText(cmd.OutOrStdout(), view, effectiveReveal)
 	}
 }
 

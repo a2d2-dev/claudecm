@@ -1,326 +1,138 @@
+// Package cmd — completion command (Story E6-S9).
+//
+// `claudecm completion <bash|zsh|fish|powershell>` emits the shell
+// completion script for the requested shell on stdout, using cobra's
+// built-in generators. The intended use is:
+//
+//	# bash
+//	source <(claudecm completion bash)
+//
+//	# zsh
+//	source <(claudecm completion zsh)
+//	# ...or persist under $fpath:
+//	claudecm completion zsh > "${fpath[1]}/_claudecm"
+//
+//	# fish
+//	claudecm completion fish | source
+//
+//	# PowerShell
+//	claudecm completion powershell | Out-String | Invoke-Expression
+//
+// The command carries no side effects — it never writes to disk on the
+// operator's behalf, so tab completion configured incorrectly is a
+// human-visible failure (an unsourced script) rather than an invisible
+// mkdir into a system directory. This is the E6-S9 story shape;
+// prior installs-into-fs behaviour is out of scope.
+//
+// Profile-name tab completion is wired via ValidArgsFunction on
+// individual subcommands (see cmd/switch.go, cmd/explain.go, and this
+// file's init(), which registers the same completer on cmd/export,
+// cmd/delete, cmd/edit, cmd/rename, cmd/restore). The completer lives
+// in cmd/completion_utils.go and reuses storage.Default + FileStorage
+// to enumerate ~/.claudecm/profiles/.
 package cmd
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 
 	"github.com/spf13/cobra"
 )
 
+// completionCmd emits a shell completion script. The positional arg
+// selects the shell.
 var completionCmd = &cobra.Command{
-	Use:   "completion",
-	Short: "Install shell completion",
-	Long: `Install shell completion for claudecm.
+	Use:   "completion [bash|zsh|fish|powershell]",
+	Short: "Emit a shell completion script for claudecm",
+	Long: `Generate a shell completion script for claudecm.
 
-This command will:
-  1. Detect your current shell (zsh/bash/fish)
-  2. Generate the completion script
-  3. Install it to the appropriate location
-  4. Show you what to add to your shell config
+The script is written to stdout. Redirect or source it as your shell
+requires. No files are written on your behalf.
 
-EXAMPLES
-  # Quick install (auto-detect shell)
-  claudecm completion
+USAGE
+  # bash (one-shot for this session)
+  source <(claudecm completion bash)
 
-  # Install for specific shell
-  claudecm completion --shell zsh
+  # zsh (persist under $fpath)
+  claudecm completion zsh > "${fpath[1]}/_claudecm"
 
-  # Output script with usage instructions
-  claudecm completion --print
+  # fish
+  claudecm completion fish | source
 
-  # Output script for specific shell
-  claudecm completion --print --shell bash
-
-WHAT IS SHELL COMPLETION?
-  Shell completion allows you to press TAB to auto-complete claudecm
-  commands, subcommands, and profile names.`,
-	RunE: runCompletion,
+  # PowerShell
+  claudecm completion powershell | Out-String | Invoke-Expression`,
+	Args:                  cobra.ExactArgs(1),
+	ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
+	DisableFlagsInUseLine: true,
+	RunE:                  runCompletion,
 }
-
-var (
-	completionShellFlag string
-	completionPrintFlag bool
-)
 
 func init() {
-	completionCmd.Flags().StringVar(&completionShellFlag, "shell", "", "Target shell: zsh, bash, fish, powershell (default: auto-detect)")
-	completionCmd.Flags().BoolVar(&completionPrintFlag, "print", false, "Output completion script with usage instructions")
 	rootCmd.AddCommand(completionCmd)
+	// Wire profile-name tab completion at Execute() time via
+	// cobra.OnInitialize. init() order within the package is source-file
+	// order, so any subcommand whose file sorts after completion.go
+	// (delete, edit, rename, restore, export, switch) has not yet
+	// registered on rootCmd when this init runs. OnInitialize fires
+	// after all inits complete, so every subcommand is present by
+	// then. The bare check inside RegisterProfileNameCompletion is
+	// defensive: if a name is not found the function no-ops instead of
+	// panicking, which keeps a rename of a subcommand from making the
+	// binary refuse to start.
+	cobra.OnInitialize(RegisterProfileNameCompletion)
 }
 
+// RegisterProfileNameCompletion wires profileNamesCompletion onto every
+// subcommand whose first positional argument is a profile name so users
+// get tab completion consistently across the surface.
+//
+// switch and explain already register the completer themselves (they
+// pre-date E6-S9); we also cover export, delete, edit, rename, and
+// restore. Cobra allows re-registration by later assignment, so
+// stamping the completer here after AddCommand runs is safe even if a
+// command file already set it.
+//
+// Exported so tests can invoke it deterministically without waiting
+// for cobra's Execute() to fire OnInitialize.
+func RegisterProfileNameCompletion() {
+	// Look each subcommand up by Use prefix so re-labelling a command
+	// (e.g. adding flags to Use) does not silently break wiring.
+	for _, name := range []string{"switch", "delete", "edit", "rename", "explain", "restore", "export"} {
+		if sub := findSubcommandByName(name); sub != nil {
+			sub.ValidArgsFunction = profileNamesCompletion
+		}
+	}
+}
+
+// findSubcommandByName is a small helper: cobra's Commands() slice is
+// ordered by AddCommand, and each Command's Name() is the first token
+// of its Use field. Returning the first hit is fine because we do not
+// re-register any subcommand name.
+func findSubcommandByName(name string) *cobra.Command {
+	for _, c := range rootCmd.Commands() {
+		if c.Name() == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// runCompletion emits the requested shell's script on stdout via the
+// matching cobra generator. Unknown shells short-circuit with a
+// deterministic error message; cobra's ValidArgs already prevents this
+// path in practice, but the switch default is defensive.
 func runCompletion(cmd *cobra.Command, args []string) error {
-	// Determine shell type
-	shellName := completionShellFlag
-	if shellName == "" {
-		// Auto-detect from $SHELL
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			return fmt.Errorf("unable to detect shell from $SHELL environment variable\n\n💡 Specify manually: claudecm completion --shell zsh")
-		}
-		shellName = filepath.Base(shell)
-	}
-
-	// Validate shell type
-	validShells := map[string]bool{
-		"bash":       true,
-		"zsh":        true,
-		"fish":       true,
-		"powershell": true,
-	}
-	if !validShells[shellName] {
-		return fmt.Errorf("unsupported shell: %s\n\n💡 Supported shells: zsh, bash, fish, powershell", shellName)
-	}
-
-	// Handle print mode
-	if completionPrintFlag {
-		return printCompletionScript(shellName)
-	}
-
-	// Default: install mode
-	return installCompletion(shellName)
-}
-
-func installCompletion(shellName string) error {
-	fmt.Printf("🔍 Target shell: %s\n\n", shellName)
-
-	switch shellName {
-	case "zsh":
-		return installZshCompletion()
+	shell := args[0]
+	out := cmd.OutOrStdout()
+	switch shell {
 	case "bash":
-		return installBashCompletion()
-	case "fish":
-		return installFishCompletion()
-	case "powershell":
-		return installPowerShellCompletion()
-	default:
-		return fmt.Errorf("unsupported shell: %s", shellName)
-	}
-}
-
-func printCompletionScript(shellName string) error {
-	// Print header with instructions
-	fmt.Printf("# ============================================\n")
-	fmt.Printf("# claudecm completion script for %s\n", shellName)
-	fmt.Printf("# ============================================\n")
-	fmt.Println("#")
-
-	switch shellName {
+		return rootCmd.GenBashCompletion(out)
 	case "zsh":
-		fmt.Println("# INSTALLATION:")
-		fmt.Println("#   1. Save this script:")
-		fmt.Println("#      claudecm completion --print --shell zsh > ~/.zsh/completions/_claudecm")
-		fmt.Println("#")
-		fmt.Println("#   2. Add to your ~/.zshrc:")
-		fmt.Println("#      fpath=(~/.zsh/completions $fpath)")
-		fmt.Println("#      autoload -U compinit; compinit")
-		fmt.Println("#")
-		fmt.Println("#   3. Reload shell:")
-		fmt.Println("#      source ~/.zshrc")
-		fmt.Println("#")
-		fmt.Printf("# ============================================\n\n")
-		return rootCmd.GenZshCompletion(os.Stdout)
-
-	case "bash":
-		fmt.Println("# INSTALLATION:")
-		if runtime.GOOS == "darwin" {
-			fmt.Println("#   1. Save this script:")
-			fmt.Println("#      claudecm completion --print --shell bash > $(brew --prefix)/etc/bash_completion.d/claudecm")
-		} else {
-			fmt.Println("#   1. Save this script:")
-			fmt.Println("#      claudecm completion --print --shell bash > ~/.bash_completion.d/claudecm")
-		}
-		fmt.Println("#")
-		fmt.Println("#   2. Reload shell:")
-		fmt.Println("#      source ~/.bashrc")
-		fmt.Println("#")
-		fmt.Printf("# ============================================\n\n")
-		return rootCmd.GenBashCompletion(os.Stdout)
-
+		return rootCmd.GenZshCompletion(out)
 	case "fish":
-		fmt.Println("# INSTALLATION:")
-		fmt.Println("#   1. Save this script:")
-		fmt.Println("#      claudecm completion --print --shell fish > ~/.config/fish/completions/claudecm.fish")
-		fmt.Println("#")
-		fmt.Println("#   2. Completion will work in new fish sessions")
-		fmt.Println("#")
-		fmt.Printf("# ============================================\n\n")
-		return rootCmd.GenFishCompletion(os.Stdout, true)
-
+		return rootCmd.GenFishCompletion(out, true)
 	case "powershell":
-		fmt.Println("# INSTALLATION:")
-		fmt.Println("#   1. Save this script:")
-		fmt.Println("#      claudecm completion --print --shell powershell > claudecm.ps1")
-		fmt.Println("#")
-		fmt.Println("#   2. Add to your PowerShell profile:")
-		fmt.Println("#      . /path/to/claudecm.ps1")
-		fmt.Println("#")
-		fmt.Printf("# ============================================\n\n")
-		return rootCmd.GenPowerShellCompletionWithDesc(os.Stdout)
-
+		return rootCmd.GenPowerShellCompletionWithDesc(out)
 	default:
-		return fmt.Errorf("unsupported shell: %s", shellName)
+		return fmt.Errorf("unsupported shell %q (want bash|zsh|fish|powershell)", shell)
 	}
-}
-
-func installZshCompletion() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	completionDir := filepath.Join(homeDir, ".zsh", "completions")
-	fmt.Println("📦 Installing completion...")
-
-	if err := os.MkdirAll(completionDir, 0755); err != nil {
-		return fmt.Errorf("failed to create completion directory: %w", err)
-	}
-	fmt.Printf("   ✓ Created directory: %s\n", completionDir)
-
-	completionFile := filepath.Join(completionDir, "_claudecm")
-	f, err := os.Create(completionFile)
-	if err != nil {
-		return fmt.Errorf("failed to create completion file: %w", err)
-	}
-	defer f.Close()
-
-	if err := rootCmd.GenZshCompletion(f); err != nil {
-		return fmt.Errorf("failed to generate completion: %w", err)
-	}
-	fmt.Println("   ✓ Generated completion script")
-	fmt.Printf("   ✓ Installed to: %s\n", completionFile)
-
-	fmt.Println()
-	fmt.Println("📝 Next steps:")
-	fmt.Println("   Add these lines to your ~/.zshrc (if not already present):")
-	fmt.Println()
-	fmt.Println("   # Enable zsh completion")
-	fmt.Println("   autoload -U compinit; compinit")
-	fmt.Printf("   fpath=(%s $fpath)\n", completionDir)
-	fmt.Println()
-	fmt.Println("   Then reload: source ~/.zshrc")
-	fmt.Println()
-	fmt.Println("✅ Done! You'll have tab completion for claudecm commands.")
-
-	return nil
-}
-
-func installBashCompletion() error {
-	var completionDir string
-
-	fmt.Println("📦 Installing completion...")
-
-	if runtime.GOOS == "darwin" {
-		// macOS - try Homebrew first
-		brewPrefix, err := exec.Command("brew", "--prefix").Output()
-		if err == nil {
-			completionDir = filepath.Join(string(brewPrefix[:len(brewPrefix)-1]), "etc", "bash_completion.d")
-		} else {
-			homeDir, _ := os.UserHomeDir()
-			completionDir = filepath.Join(homeDir, ".bash_completion.d")
-		}
-	} else {
-		// Linux
-		if _, err := os.Stat("/etc/bash_completion.d"); err == nil {
-			completionDir = "/etc/bash_completion.d"
-		} else {
-			homeDir, _ := os.UserHomeDir()
-			completionDir = filepath.Join(homeDir, ".bash_completion.d")
-		}
-	}
-
-	if err := os.MkdirAll(completionDir, 0755); err != nil {
-		return fmt.Errorf("failed to create completion directory: %w", err)
-	}
-	fmt.Printf("   ✓ Created directory: %s\n", completionDir)
-
-	completionFile := filepath.Join(completionDir, "claudecm")
-	f, err := os.Create(completionFile)
-	if err != nil {
-		return fmt.Errorf("failed to create completion file: %w", err)
-	}
-	defer f.Close()
-
-	if err := rootCmd.GenBashCompletion(f); err != nil {
-		return fmt.Errorf("failed to generate completion: %w", err)
-	}
-	fmt.Println("   ✓ Generated completion script")
-	fmt.Printf("   ✓ Installed to: %s\n", completionFile)
-
-	fmt.Println()
-	fmt.Println("📝 Next steps:")
-	fmt.Println("   Reload your shell: source ~/.bashrc")
-	fmt.Println()
-	fmt.Println("✅ Done! You'll have tab completion for claudecm commands.")
-
-	return nil
-}
-
-func installFishCompletion() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	fmt.Println("📦 Installing completion...")
-
-	completionDir := filepath.Join(homeDir, ".config", "fish", "completions")
-	if err := os.MkdirAll(completionDir, 0755); err != nil {
-		return fmt.Errorf("failed to create completion directory: %w", err)
-	}
-	fmt.Printf("   ✓ Created directory: %s\n", completionDir)
-
-	completionFile := filepath.Join(completionDir, "claudecm.fish")
-	f, err := os.Create(completionFile)
-	if err != nil {
-		return fmt.Errorf("failed to create completion file: %w", err)
-	}
-	defer f.Close()
-
-	if err := rootCmd.GenFishCompletion(f, true); err != nil {
-		return fmt.Errorf("failed to generate completion: %w", err)
-	}
-	fmt.Println("   ✓ Generated completion script")
-	fmt.Printf("   ✓ Installed to: %s\n", completionFile)
-
-	fmt.Println()
-	fmt.Println("✅ Done! Completion will be available in new fish sessions.")
-
-	return nil
-}
-
-func installPowerShellCompletion() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	fmt.Println("📦 Installing completion...")
-
-	completionFile := filepath.Join(homeDir, "claudecm-completion.ps1")
-	f, err := os.Create(completionFile)
-	if err != nil {
-		return fmt.Errorf("failed to create completion file: %w", err)
-	}
-	defer f.Close()
-
-	if err := rootCmd.GenPowerShellCompletionWithDesc(f); err != nil {
-		return fmt.Errorf("failed to generate completion: %w", err)
-	}
-	fmt.Println("   ✓ Generated completion script")
-	fmt.Printf("   ✓ Saved to: %s\n", completionFile)
-
-	fmt.Println()
-	fmt.Println("📝 Next steps:")
-	fmt.Println("   Add this line to your PowerShell profile:")
-	fmt.Println()
-	fmt.Printf("   . %s\n", completionFile)
-	fmt.Println()
-	fmt.Println("   Find your profile location with: $PROFILE")
-	fmt.Println()
-	fmt.Println("✅ Done! Restart PowerShell for completion to work.")
-
-	return nil
 }
