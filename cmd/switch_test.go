@@ -72,12 +72,11 @@ func runSwitchInner(t *testing.T, args ...string) (stdout, stderr string, err er
 
 // seedCodexRaw stamps a codex Tools.Raw overlay onto an already-saved
 // profile so the codex Plan renders non-empty owned bytes into
-// config.toml. Without this, a fresh-install codex config.toml plan
-// produces empty output and trips a pre-existing Flatten(nil) diff
-// quirk (tracked as followup #34): the parser returns nil, Flatten
-// yields {"":nil}, and Diff reports the empty key as TouchesUnowned.
-// Seeding a real model_provider keeps the diff purely inside the
-// owned set.
+// config.toml. Retained (post Flatten(nil) hotfix) for tests that
+// still want to exercise a codex overlay with owned values — the
+// original workaround for followup #34 is no longer needed, but the
+// helper is genuinely useful for the "codex has real content"
+// scenarios below.
 func seedCodexRaw(t *testing.T, h *explainHarness, name string) {
 	t.Helper()
 	profile, err := h.mgr.GetProfile(name)
@@ -193,11 +192,6 @@ func TestSwitch_DryRunNoChanges(t *testing.T) {
 	// pre-condition — dry-run must not modify it.
 
 	switchDryRunFlag = true
-	// Codex adapter's fresh-install config.toml plan produces empty
-	// output that trips a pre-existing Flatten(nil) diff quirk
-	// (followup #34). Restrict to claude_code so this test focuses on
-	// the dry-run behaviour, not the codex quirk.
-	switchToolFlag = "claude_code"
 	stdout, _, err := runSwitchInner(t, "prod")
 	if err != nil {
 		t.Fatalf("runSwitch --dry-run err=%v", err)
@@ -232,9 +226,6 @@ func TestSwitch_NonInteractiveWithoutYesAborts(t *testing.T) {
 	h := newSwitchHarness(t)
 	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
 
-	// Restrict to claude_code so this test does not race the codex
-	// fresh-install empty-diff quirk (followup #34).
-	switchToolFlag = "claude_code"
 	// Force the isTerminal probe to report non-TTY. `go test`'s stdin
 	// mode is host-dependent (interactive dev machines may show it as
 	// a char device even under `go test`), so we override the seam
@@ -316,10 +307,7 @@ func TestSwitch_EmptyPlansNoOp(t *testing.T) {
 	// Best-effort no-op: apply once to establish an aligned baseline,
 	// then switch to the same profile a second time. The second switch's
 	// per-file plans will be Skipped (currentBytes == newBytes).
-	// Restrict to claude_code to sidestep the codex empty-config quirk
-	// (followup #34).
 	switchYesFlag = true
-	switchToolFlag = "claude_code"
 	if _, _, err := runSwitchInner(t, "prod"); err != nil {
 		t.Fatalf("initial switch prod err=%v", err)
 	}
@@ -359,7 +347,6 @@ func TestSwitch_DiffPrintsRedactedSecrets(t *testing.T) {
 	h.activate("prev")
 
 	switchDryRunFlag = true
-	switchToolFlag = "claude_code"
 	stdout, _, err := runSwitchInner(t, "next")
 	if err != nil {
 		t.Fatalf("dry-run switch next err=%v; stdout=%s", err, stdout)
@@ -384,7 +371,6 @@ func TestSwitch_JSONOutputParses(t *testing.T) {
 	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
 	switchDryRunFlag = true
 	switchOutputFlag = "json"
-	switchToolFlag = "claude_code"
 
 	stdout, _, err := runSwitchInner(t, "prod")
 	if err != nil {
@@ -525,7 +511,6 @@ func TestSwitch_NoOpJSONShape(t *testing.T) {
 	h := newSwitchHarness(t)
 	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
 	switchYesFlag = true
-	switchToolFlag = "claude_code"
 	if _, _, err := runSwitchInner(t, "prod"); err != nil {
 		t.Fatalf("initial switch err=%v", err)
 	}
@@ -568,7 +553,6 @@ func TestSwitch_DryRunAbortsTxnPreservesTarget(t *testing.T) {
 	}
 
 	switchDryRunFlag = true
-	switchToolFlag = "claude_code"
 	if _, _, err := runSwitchInner(t, "prod"); err != nil {
 		t.Fatalf("dry-run switch err=%v", err)
 	}
@@ -999,5 +983,173 @@ func TestSwitch_UpdateStateOnSuccessRecordsCommittedOnly(t *testing.T) {
 	}
 	if _, ok := state.GetLastApplied(config.ToolCodex, codexadapter.ConfigPath(h.resv)); ok {
 		t.Errorf("untouched codex entry was recorded; should be skipped")
+	}
+}
+
+// TestSwitch_FreshInstallHappyPath is the regression for the workaround
+// removal after PR #46 (Flatten(nil) hotfix). With no on-disk configs
+// (~/.codex/config.toml missing, ~/.claude/settings.json missing) and
+// a profile that only carries claude_code values, switch must succeed:
+// the codex plan is a no-op (no owned keys in the profile), the
+// claude_code plan writes settings.json, and state.yaml flips to the
+// new profile without a Flatten(nil) crash.
+func TestSwitch_FreshInstallHappyPath(t *testing.T) {
+	h := newSwitchHarness(t)
+	// Fresh disk: no seed of settings.json, no seed of config.toml.
+	// Profile has claude_code content only — no codex overlay.
+	h.saveProfile("fresh", "sk-freshtoken-1234abcd", "https://fresh.example.com", "fresh-model")
+
+	// Confirm the pre-condition: neither tool config exists on disk.
+	if _, err := os.Stat(claudecodeadapter.SettingsPath(h.resv)); !os.IsNotExist(err) {
+		t.Fatalf("pre-condition: settings.json unexpectedly exists: err=%v", err)
+	}
+	if _, err := os.Stat(codexadapter.ConfigPath(h.resv)); !os.IsNotExist(err) {
+		t.Fatalf("pre-condition: config.toml unexpectedly exists: err=%v", err)
+	}
+
+	switchYesFlag = true
+	stdout, stderr, err := runSwitchInner(t, "fresh")
+	if err != nil {
+		t.Fatalf("fresh-install switch err=%v\nstdout=%s\nstderr=%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `Switched to "fresh"`) {
+		t.Errorf("stdout missing switched line:\n%s", stdout)
+	}
+
+	// state.yaml pointer moved.
+	state, err := h.store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.CurrentProfile != "fresh" {
+		t.Errorf("state.CurrentProfile = %q; want fresh", state.CurrentProfile)
+	}
+	// settings.json created with the profile's values.
+	raw, err := os.ReadFile(claudecodeadapter.SettingsPath(h.resv))
+	if err != nil {
+		t.Fatalf("read settings.json after fresh switch: %v", err)
+	}
+	if !strings.Contains(string(raw), "fresh-model") {
+		t.Errorf("settings.json missing fresh-model:\n%s", raw)
+	}
+}
+
+// TestSwitch_DiffShowsAddedValueForNewKey is the F2 regression. When a
+// switch adds a key that did not exist on disk, the dry-run diff must
+// render the actual (redacted-when-secret) new value, not an empty
+// slot. Covers both the text renderer and the JSON diff shape.
+func TestSwitch_DiffShowsAddedValueForNewKey(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+
+	// Seed only ANTHROPIC_MODEL on disk; the profile carries base_url
+	// and auth_token as well, so those become Added keys in the diff.
+	h.writeSettingsJSON(`{"env":{"ANTHROPIC_MODEL":"prod-model"}}`)
+
+	// Text mode assertion: the Added row for env.ANTHROPIC_BASE_URL
+	// must carry the URL value, not an empty slot.
+	switchDryRunFlag = true
+	stdout, _, err := runSwitchInner(t, "prod")
+	if err != nil {
+		t.Fatalf("dry-run switch err=%v", err)
+	}
+	if !strings.Contains(stdout, "+ env.ANTHROPIC_BASE_URL: https://prod.example.com") {
+		t.Errorf("dry-run text missing base_url added value:\n%s", stdout)
+	}
+	// Secret Added row must be redacted (F2 must not weaken NFR-S8).
+	if strings.Contains(stdout, "sk-prodtoken-1234abcd") {
+		t.Errorf("dry-run leaked plaintext auth_token:\n%s", stdout)
+	}
+	// The redacted form must still appear on the auth_token added row
+	// so operators can eyeball it changed.
+	if !strings.Contains(stdout, "+ env.ANTHROPIC_AUTH_TOKEN: sk-p***abcd") {
+		t.Errorf("dry-run auth_token added row missing redacted form:\n%s", stdout)
+	}
+
+	// JSON mode assertion: the added change must carry a non-empty
+	// new_value for env.ANTHROPIC_BASE_URL.
+	resetSwitchFlags()
+	switchDryRunFlag = true
+	switchOutputFlag = "json"
+	jsonStdout, _, err := runSwitchInner(t, "prod")
+	if err != nil {
+		t.Fatalf("dry-run json switch err=%v", err)
+	}
+	var doc jsonSwitch
+	if err := json.Unmarshal([]byte(jsonStdout), &doc); err != nil {
+		t.Fatalf("json invalid: %v\n%s", err, jsonStdout)
+	}
+	found := false
+	for _, d := range doc.Diff {
+		for _, c := range d.OwnedChanges {
+			if c.Op == "added" && c.Key == "env.ANTHROPIC_BASE_URL" {
+				if c.NewValue != "https://prod.example.com" {
+					t.Errorf("added base_url NewValue = %q; want URL", c.NewValue)
+				}
+				found = true
+			}
+			if c.Op == "added" && c.Key == "env.ANTHROPIC_AUTH_TOKEN" {
+				if strings.Contains(c.NewValue, "prodtoken") {
+					t.Errorf("json added auth_token leaked plaintext: %q", c.NewValue)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("json diff missing added env.ANTHROPIC_BASE_URL entry:\n%s", jsonStdout)
+	}
+}
+
+// TestDefaultIsTerminal_RedirectFromDevNullReturnsFalse is the F3
+// regression: /dev/null carries os.ModeCharDevice on Linux, so the
+// old Mode()&ModeCharDevice probe misidentifies a shell redirect
+// from /dev/null (or CI's default stdin) as an interactive TTY. The
+// new x/term-backed probe must report false.
+func TestDefaultIsTerminal_RedirectFromDevNullReturnsFalse(t *testing.T) {
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer devnull.Close()
+	if defaultIsTerminal(devnull) {
+		t.Errorf("defaultIsTerminal(/dev/null) = true; want false")
+	}
+	// Sanity: a regular file must also report false.
+	f, err := os.CreateTemp("", "switch-devnull-*")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if defaultIsTerminal(f) {
+		t.Errorf("defaultIsTerminal(regular file) = true; want false")
+	}
+	// Nil handle is defensively false.
+	if defaultIsTerminal(nil) {
+		t.Errorf("defaultIsTerminal(nil) = true; want false")
+	}
+}
+
+// TestSwitch_PartialFailureJSONGoesToStdout is the F4 regression: JSON
+// mode routes the partial-failure body to stdout so shell consumers
+// see exactly one JSON document per stream. renderPartialFailure is
+// called directly with the writer runSwitch chooses; the test asserts
+// that a JSON-mode caller can dump into a plain io.Writer and parse
+// the result cleanly.
+func TestSwitch_PartialFailureJSONGoesToStdout(t *testing.T) {
+	newSwitchHarness(t)
+	pf := &commit.PartialFailure{
+		FailedFile: "/tmp/x/config.toml",
+		Cause:      errors.New("boom"),
+		RolledBack: []string{"/tmp/x/settings.json"},
+	}
+	var stdout bytes.Buffer
+	renderPartialFailure(&stdout, switchOutputJSON, "prod", pf)
+	var doc jsonSwitchPartial
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+		t.Fatalf("partial-failure JSON invalid: %v\n%s", err, stdout.String())
+	}
+	if doc.FailedFile != "/tmp/x/config.toml" {
+		t.Errorf("failed_file = %q; want /tmp/x/config.toml", doc.FailedFile)
 	}
 }

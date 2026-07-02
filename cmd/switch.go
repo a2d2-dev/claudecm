@@ -46,6 +46,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/a2d2-dev/claudecm/internal/adapter"
 	// Side-effect imports register the two v1 adapters into
@@ -133,7 +134,15 @@ EXAMPLES
 		if errors.As(err, &pf) {
 			cmd.SilenceErrors = true
 			cmd.SilenceUsage = true
-			fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+			// F5: skip the raw err.Error() line in JSON mode —
+			// renderPartialFailure has already emitted a full JSON body
+			// on stdout (F4) so a trailing wrapped-error line on stderr
+			// would break the "one document per stream" contract. In
+			// text mode keep the wrapped error line so the exit code
+			// context is preserved alongside the human block.
+			if format, ferr := parseSwitchOutput(switchOutputFlag); ferr == nil && format != switchOutputJSON {
+				fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+			}
 			os.Exit(switchExitPartialFailure)
 		}
 		return err
@@ -264,15 +273,31 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Precompute the JSON diff shape from the pre-commit Prepared
+	// slice. NewBytes only exist on PreparedFile — CommitReport does
+	// not carry them — so the JSON success renderer (which delays diff
+	// emission to keep a single top-level document) has to snapshot the
+	// added-value lookups before Commit fires.
+	preCommitDiff := diffToJSON(txn)
+
 	report, commitErr := committer.Commit(ctx, txn)
 	if commitErr != nil {
 		// Partial-failure path. Render the per-file status block so the
 		// operator can see rolled-back / untouched / failed files
 		// without hunting through the wrapped error string, then return
 		// the *PartialFailure so the CLI wrapper exits with code 2.
+		//
+		// F4: JSON mode routes the partial-failure body to STDOUT so
+		// pipeline consumers see exactly one JSON document per stream.
+		// Text mode keeps stderr — human-facing failure text belongs
+		// there, and stdout stays clean for shell composition.
 		var pf *commit.PartialFailure
 		if errors.As(commitErr, &pf) {
-			renderPartialFailure(cmd.ErrOrStderr(), format, profileName, pf)
+			pfWriter := cmd.ErrOrStderr()
+			if format == switchOutputJSON {
+				pfWriter = cmd.OutOrStdout()
+			}
+			renderPartialFailure(pfWriter, format, profileName, pf)
 			return commitErr
 		}
 		return fmt.Errorf("commit: %w", commitErr)
@@ -282,7 +307,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("commit succeeded but state update failed: %w", err)
 	}
 
-	return renderSuccess(cmd.OutOrStdout(), format, profileName, report)
+	return renderSuccess(cmd.OutOrStdout(), format, profileName, report, preCommitDiff)
 }
 
 // parseSwitchOutput validates and normalises the --output flag.
@@ -476,21 +501,20 @@ var isTerminalFn = defaultIsTerminal
 // through isTerminalFn so tests can override deterministically.
 func isTerminal(f *os.File) bool { return isTerminalFn(f) }
 
-// defaultIsTerminal is the production TTY probe. Uses os.Stat +
-// Mode()&os.ModeCharDevice which is portable across Linux/macOS/Windows
-// without a term-package dependency. A stat failure is conservatively
-// reported as false so a session with a broken stdin falls through to
-// the non-interactive abort branch — safer than prompting a user who is
-// not there.
+// defaultIsTerminal is the production TTY probe. Delegates to
+// golang.org/x/term.IsTerminal which distinguishes a real controlling
+// terminal from other character devices — critical because /dev/null
+// carries os.ModeCharDevice on Linux (F3 reviewer finding: the old
+// os.Stat + Mode()&os.ModeCharDevice check misidentifies redirects
+// from /dev/null as an interactive TTY). A nil handle or non-TTY fd
+// conservatively reports false so a broken/redirected stdin falls
+// through to the non-interactive abort branch — safer than prompting a
+// user who is not there.
 func defaultIsTerminal(f *os.File) bool {
 	if f == nil {
 		return false
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return (fi.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(f.Fd()))
 }
 
 // SetIsTerminalForTest overrides the TTY probe. Returns a restore
@@ -565,9 +589,10 @@ func renderPreparedFileText(w io.Writer, pf commit.PreparedFile) {
 		fmt.Fprintln(w)
 		return
 	}
+	flatNew := flattenPreparedNew(pf)
 	changes := 0
 	for _, k := range sortedStrings(pf.Diff.Added) {
-		fmt.Fprintf(w, "  + %s: %s\n", k, redactedValueDisplay(k, findAddedValue(pf.Diff, k)))
+		fmt.Fprintf(w, "  + %s: %s\n", k, redactedValueDisplay(k, findAddedValue(flatNew, k)))
 		changes++
 	}
 	for _, k := range sortedStrings(pf.Diff.Removed) {
@@ -608,14 +633,41 @@ func sortedKeyDeltas(in []writepath.KeyDelta) []writepath.KeyDelta {
 	return out
 }
 
-// findAddedValue is a placeholder for the missing per-key value on
-// Diff.Added — the current DiffResult carries the added key names but
-// no value slot for them (Added is a []string). Returning nil keeps
-// the renderer honest: "added, value not tracked" prints as the
-// redacted-nil sentinel or an empty string, both of which read as
-// "value opaque" to the operator. If future work extends DiffResult
-// with per-add values, replace this shim.
-func findAddedValue(_ writepath.DiffResult, _ string) any { return nil }
+// flattenPreparedNew parses PreparedFile.NewBytes with the plan's
+// Parser and Flattens the result so the renderers can look up the
+// real new value for every Diff.Added key. Returns nil when Parser is
+// unset (rare — writepath validates plans require one) or when the
+// parse / flatten fails; downstream callers treat nil as "no value
+// known" and print an empty (or redacted-nil) marker. This keeps the
+// diff informative without forcing the writepath types to grow a
+// per-add value slot.
+func flattenPreparedNew(pf commit.PreparedFile) map[string]any {
+	if pf.Plan.Parser == nil {
+		return nil
+	}
+	parsed, err := pf.Plan.Parser.Parse(pf.NewBytes)
+	if err != nil {
+		return nil
+	}
+	flat, err := writepath.Flatten(parsed)
+	if err != nil {
+		return nil
+	}
+	return flat
+}
+
+// findAddedValue looks up the added key's value in the flattened
+// map of the post-transform NewBytes. Returns nil when flatNew is nil
+// (unparseable / no Parser) or when the key is absent (should not
+// happen for Diff.Added keys but the nil-safe branch keeps the
+// renderer defensive). The value flows through redactedValueDisplay
+// so secrets stay redacted per NFR-S8 regardless of the raw type.
+func findAddedValue(flatNew map[string]any, key string) any {
+	if flatNew == nil {
+		return nil
+	}
+	return flatNew[key]
+}
 
 // redactedValueDisplay wraps redactValue with the secret-key heuristic
 // switch uses in isolation from the resolver: any key whose last
@@ -657,19 +709,17 @@ func isSecretKey(key string) bool {
 // renderSuccess emits the post-commit summary. Lists every committed
 // file plus the backup path storage.Backup created for it so an
 // operator inspecting the transaction later can find the pre-write
-// bytes.
-func renderSuccess(w io.Writer, format switchOutputFormat, profileName string, report commit.CommitReport) error {
+// bytes. preCommitDiff is the JSON diff snapshot captured before
+// Commit ran — used only for the JSON output path so the wire
+// document carries the same shape a dry-run would.
+func renderSuccess(w io.Writer, format switchOutputFormat, profileName string, report commit.CommitReport, preCommitDiff []jsonSwitchDiff) error {
 	if format == switchOutputJSON {
 		out := jsonSwitch{
 			Profile: profileName,
 			Action:  "commit",
 			Report:  reportToJSON(report),
+			Diff:    preCommitDiff,
 		}
-		// Populate Diff from the per-file reports so JSON pipelines
-		// see the same shape they would from a dry-run. Text mode
-		// already printed the diff before Commit fired; JSON mode
-		// delayed it to keep a single top-level document.
-		out.Diff = diffFromReport(report)
 		return writeJSON(w, out)
 	}
 	fmt.Fprintf(w, "Switched to %q.\n", profileName)
@@ -682,47 +732,6 @@ func renderSuccess(w io.Writer, format switchOutputFormat, profileName string, r
 		}
 	}
 	return nil
-}
-
-// diffFromReport reconstructs a minimal JSON diff shape from a
-// CommitReport's per-file WriteReport slice. The per-file WriteReport
-// carries the same DiffResult that Stage computed, so JSON consumers
-// see the same key set as a dry-run against the same profile — no
-// re-parsing required.
-func diffFromReport(report commit.CommitReport) []jsonSwitchDiff {
-	out := make([]jsonSwitchDiff, 0, len(report.PerFile))
-	for _, pf := range report.PerFile {
-		entry := jsonSwitchDiff{
-			Tool:         pf.Report.Tool,
-			Target:       pf.Target,
-			Skipped:      pf.Status == commit.StatusUntouched,
-			OwnedChanges: []jsonSwitchChange{},
-		}
-		diff := pf.Report.Diff
-		for _, k := range sortedStrings(diff.Added) {
-			entry.OwnedChanges = append(entry.OwnedChanges, jsonSwitchChange{
-				Op:       "added",
-				Key:      k,
-				NewValue: redactedValueDisplay(k, findAddedValue(diff, k)),
-			})
-		}
-		for _, k := range sortedStrings(diff.Removed) {
-			entry.OwnedChanges = append(entry.OwnedChanges, jsonSwitchChange{
-				Op:  "removed",
-				Key: k,
-			})
-		}
-		for _, kd := range sortedKeyDeltas(diff.Changed) {
-			entry.OwnedChanges = append(entry.OwnedChanges, jsonSwitchChange{
-				Op:       "changed",
-				Key:      kd.Key,
-				OldValue: redactedValueDisplay(kd.Key, kd.OldValue),
-				NewValue: redactedValueDisplay(kd.Key, kd.NewValue),
-			})
-		}
-		out = append(out, entry)
-	}
-	return out
 }
 
 // renderPartialFailure writes the partial-failure block to stderr so
@@ -818,10 +827,13 @@ type jsonSwitchPartial struct {
 
 // diffToJSON converts a StagedTxn's Prepared slice into JSON-friendly
 // entries. Preserves adapter-emitted order (Plans order) so the JSON
-// output matches the text output line-for-line.
+// output matches the text output line-for-line. F2: added keys carry
+// the real (redacted) new value now that findAddedValue reads the
+// flattened NewBytes.
 func diffToJSON(txn commit.StagedTxn) []jsonSwitchDiff {
 	out := make([]jsonSwitchDiff, 0, len(txn.Prepared))
 	for _, pf := range txn.Prepared {
+		flatNew := flattenPreparedNew(pf)
 		entry := jsonSwitchDiff{
 			Tool:         pf.Plan.Tool,
 			Target:       pf.Plan.Target,
@@ -832,7 +844,7 @@ func diffToJSON(txn commit.StagedTxn) []jsonSwitchDiff {
 			entry.OwnedChanges = append(entry.OwnedChanges, jsonSwitchChange{
 				Op:       "added",
 				Key:      k,
-				NewValue: redactedValueDisplay(k, findAddedValue(pf.Diff, k)),
+				NewValue: redactedValueDisplay(k, findAddedValue(flatNew, k)),
 			})
 		}
 		for _, k := range sortedStrings(pf.Diff.Removed) {
