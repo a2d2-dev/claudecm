@@ -335,13 +335,33 @@ func ValidatePlan(plan WritePlan) error {
 // rejected with an error wrapping ErrFlattenInvalidKey; such keys
 // cannot legally appear in a config file we manage.
 //
-// A non-map top-level input is treated as a leaf and returned as
-// {"": v}. Adapters whose top-level document is not a map (rare —
-// Codex/Claude configs are all map-shaped) should wrap explicitly
-// with map[string]any{"": value} to make the caller-visible key
-// deliberate rather than relying on this shortcut.
+// Top-level nil handling: a nil top-level input flattens to an empty
+// map. This matches the "absent" semantic that adapters produce when
+// they parse a zero-byte or whitespace-only config file (e.g. the
+// codex TOML parser returns (nil, nil) for empty input). Emitting an
+// empty flat map here — rather than {"": nil} — keeps the write-path
+// TouchesUnowned guard correct on fresh installs: an empty current
+// side has no owned-or-unowned keys to protect, so Diff(next) reports
+// a clean set of Added keys judged against OwnedKeys alone.
+//
+// A non-nil, non-map top-level input is treated as a leaf and
+// returned as {"": v}. Adapters whose top-level document is not a
+// map (rare — Codex/Claude configs are all map-shaped) should wrap
+// explicitly with map[string]any{"": value} to make the caller-
+// visible key deliberate rather than relying on this shortcut.
+//
+// Nested nil leaves (e.g. {"a": nil}) continue to flatten to
+// {"a": nil} — a nil at a known key path is a real value the parser
+// chose to emit and must remain visible to Diff.
 func Flatten(v any) (map[string]any, error) {
 	out := make(map[string]any)
+	if v == nil {
+		// Top-level nil → empty flat map. See godoc rationale above.
+		// The check is explicit rather than delegating to flattenInto
+		// so the empty-string key path stays reserved for the rare
+		// non-nil, non-map leaf case that flattenInto handles below.
+		return out, nil
+	}
 	if err := flattenInto(out, "", v); err != nil {
 		return nil, err
 	}
