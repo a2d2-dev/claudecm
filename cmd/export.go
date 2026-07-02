@@ -284,10 +284,13 @@ func applyRedactionToEnv(env map[string]string) map[string]string {
 	return out
 }
 
-// renderExportShell emits `export VAR=quoted-value` lines. Lines are
-// sorted for reproducibility; values are shell-quoted via strconv-style
-// double-quoting (%q from fmt), which is a valid double-quoted shell
-// literal for every byte range these adapters emit.
+// renderExportShell emits `export VAR='quoted-value'` lines. Lines are
+// sorted for reproducibility; values are shell-quoted using single-quote
+// wrapping with the standard '\” escape for any embedded single quote.
+// Single-quote quoting is the only POSIX-safe form: unlike Go's %q
+// (double-quoted) it does not expand $VAR, backticks, or backslash
+// escapes, so values containing `$`, “ ` “, `\`, or newline round-trip
+// through `sh -c "$LINE"` byte-for-byte.
 func renderExportShell(w io.Writer, p *config.Profile, redact bool) error {
 	env := buildExportEnv(p)
 	if redact {
@@ -299,7 +302,8 @@ func renderExportShell(w io.Writer, p *config.Profile, redact bool) error {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		if _, err := fmt.Fprintf(w, "export %s=%q\n", k, env[k]); err != nil {
+		quoted := strings.ReplaceAll(env[k], "'", `'\''`)
+		if _, err := fmt.Fprintf(w, "export %s='%s'\n", k, quoted); err != nil {
 			return err
 		}
 	}

@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"bytes"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -306,7 +307,7 @@ func TestExport_CodexOverlayAPIKeyOverridesCore(t *testing.T) {
 		t.Errorf("codex overlay API key missing:\n%s", stdout)
 	}
 	// ANTHROPIC_AUTH_TOKEN unchanged from Core.
-	if !strings.Contains(stdout, `export ANTHROPIC_AUTH_TOKEN="sk-coreverylongkey1234"`) {
+	if !strings.Contains(stdout, `export ANTHROPIC_AUTH_TOKEN='sk-coreverylongkey1234'`) {
 		t.Errorf("core ANTHROPIC_AUTH_TOKEN missing or overridden:\n%s", stdout)
 	}
 }
@@ -377,6 +378,59 @@ func TestExport_YAMLRedactsOverlayAPIKeys(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "PLAIN_KNOB: keep") && !strings.Contains(stdout, "PLAIN_KNOB:keep") {
 		t.Errorf("yaml --redact wrongly rewrote non-secret PLAIN_KNOB:\n%s", stdout)
+	}
+}
+
+// TestExport_ShellQuotingSafeForSpecialChars asserts that the shell
+// renderer emits POSIX-safe single-quoted values that round-trip
+// byte-for-byte through `sh -c` for hostile-looking inputs. Go's %q
+// double-quoting was unsafe for `$`, backtick, and backslash — the
+// F2 fix on PR#50 replaced it with single-quote wrapping (with the
+// standard `'\”` escape for embedded quotes).
+func TestExport_ShellQuotingSafeForSpecialChars(t *testing.T) {
+	h := newExportHarness(t)
+	// Embed every metacharacter that a double-quoted shell literal
+	// would expand or escape differently from the raw value:
+	//   `$` (parameter expansion)
+	//   backtick (command substitution)
+	//   `\n` (Go's %q writes literal backslash-n; single-quotes keep it)
+	//   `'` (needs the '\'' escape to survive the wrapper)
+	//   `\` (backslash — %q also escapes this)
+	hostile := "abc$FOO`whoami`\ndef'quo\\ted"
+	p := h.saveProfile("prod", "sk-prodverylongkey1234", "https://api.example.com", "opus")
+	p.Core.ExtraEnv = map[string]string{"CLAUDECM_HOSTILE": hostile}
+	if err := h.mgr.UpdateProfile("prod", p); err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+	h.activate("prod")
+
+	stdout, _, err := runExportInner(t)
+	if err != nil {
+		t.Fatalf("runExport err = %v", err)
+	}
+
+	// The hostile export must appear as a single-quoted literal
+	// beginning with `='abc$FOO`. Under Go's %q it would have started
+	// with `="abc\$FOO"` (backslash-escaped $ or expanded at eval).
+	if !strings.Contains(stdout, `export CLAUDECM_HOSTILE='abc$FOO`) {
+		t.Errorf("hostile export not single-quoted with literal $:\n%s", stdout)
+	}
+	// The line must NOT carry a literal `\n` two-character escape —
+	// %q would emit that, but single quotes preserve the raw byte.
+	if strings.Contains(stdout, `CLAUDECM_HOSTILE='abc$FOO\`+"`whoami`"+`\n`) {
+		t.Errorf("newline emitted as backslash-n escape (Go %%q artifact):\n%s", stdout)
+	}
+
+	// Round-trip through sh: eval the full stdout (multiple export
+	// lines are fine), then echo the hostile var and compare bytes.
+	script := stdout + "\nprintf %s \"$CLAUDECM_HOSTILE\"\n"
+	cmd := exec.Command("sh", "-c", script)
+	got, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("sh -c round-trip failed: %v; script=%q", err, script)
+	}
+	if string(got) != hostile {
+		t.Errorf("round-trip mismatch:\ngot  = %q\nwant = %q", string(got), hostile)
 	}
 }
 

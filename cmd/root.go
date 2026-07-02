@@ -136,11 +136,10 @@ func resetGlobalFlagsForTest() {
 }
 
 // validateGlobalFlags is the PersistentPreRunE for rootCmd. It refuses
-// nonsensical values (zero-only --lock-timeout / --retention were not
-// explicitly rejected because zero means "use default" per flag docs;
-// negative values are rejected). --home is passed through
-// storage.NewResolverWithHome so the NFR-S3 invariants (absolute,
-// exists, not root-owned when non-root, not "/") apply uniformly.
+// nonsensical values on --lock-timeout and --retention, and delegates
+// --home to storage.NewResolverWithHome so the NFR-S3 invariants
+// (absolute, exists, not root-owned when non-root, not "/") apply
+// uniformly.
 //
 // Story AC (E6-S9): "--home /nonexistent → refused; --lock-timeout 0 →
 // invalid; --retention 0 → invalid". The story explicitly labels the

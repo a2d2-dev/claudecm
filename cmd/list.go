@@ -31,9 +31,12 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -178,7 +181,7 @@ func loadAllProfilesStrict(resv *storage.Resolver) ([]*config.Profile, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), storage.ProfileFileExt) {
 			continue
 		}
-		full := dir + string(os.PathSeparator) + entry.Name()
+		full := filepath.Join(dir, entry.Name())
 		body, err := os.ReadFile(full)
 		if err != nil {
 			return nil, fmt.Errorf("read profile file %q: %w", full, err)
@@ -206,11 +209,17 @@ func loadAllProfilesStrict(resv *storage.Resolver) ([]*config.Profile, error) {
 // readActiveName pulls state.yaml's CurrentProfile without going through
 // config.Manager (Manager treats "no state yet" as an error). Missing
 // state is a legitimate "fresh install" case: the list command must
-// still succeed against a bootstrapped-but-empty tree.
+// still succeed against a bootstrapped-but-empty tree, so a
+// not-found error is normalized to ("", nil) here. Every other error
+// (permission denied, malformed YAML, etc.) still propagates so a
+// real problem does not hide behind the fresh-install path.
 func readActiveName(resv *storage.Resolver) (string, error) {
 	store := storage.NewFileStorage(resv)
 	state, err := store.LoadState()
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || os.IsNotExist(err) {
+			return "", nil
+		}
 		return "", err
 	}
 	return state.CurrentProfile, nil

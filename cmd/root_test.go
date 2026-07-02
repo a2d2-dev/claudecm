@@ -252,6 +252,115 @@ func TestGlobalLockTimeout_DefaultsToStorageDefault(t *testing.T) {
 	}
 }
 
+// TestGlobalHome_AllCommandsHonored verifies that every command
+// touching storage honors the --home override rather than reaching
+// through storage.Default() to $HOME. The pre-F1 code path silently
+// ignored --home in add/current/edit/delete/rename/explain/import,
+// so a `HOME=/tmp/real claudecm --home /tmp/sandbox add p1 ...` call
+// would write into the real HOME. This test exercises add / list /
+// switch under a --home pointed at a sandbox tree that is DIFFERENT
+// from $HOME, then asserts:
+//
+//  1. The profile file lands under sandbox/.claudecm/profiles/, and
+//  2. Nothing was written under the real HOME's .claudecm tree.
+//
+// The pattern (real HOME + separate sandbox --home) is exactly the
+// smoke-test invocation the reviewer called out on the PR.
+func TestGlobalHome_AllCommandsHonored(t *testing.T) {
+	pinGlobalFlagsForTest(t)
+	resetAddFlags()
+	resetListFlagsForTest()
+	t.Cleanup(func() {
+		resetAddFlags()
+		resetListFlagsForTest()
+	})
+
+	realHome := t.TempDir()
+	sandbox := t.TempDir()
+
+	// Rewire $HOME to a real tempdir so that a leaked storage.Default()
+	// call writes there — the assertion below catches that leak by
+	// noticing the sandbox stayed empty.
+	t.Setenv("HOME", realHome)
+
+	// Bootstrap the sandbox layout ourselves (mirrors what a real
+	// invocation would do the first time --home is used).
+	sandboxResv, err := storage.NewResolverWithHome(sandbox)
+	if err != nil {
+		t.Fatalf("NewResolverWithHome(sandbox): %v", err)
+	}
+	if err := storage.Bootstrap(sandboxResv); err != nil {
+		t.Fatalf("Bootstrap(sandbox): %v", err)
+	}
+
+	globalHomeFlag = sandbox
+
+	// ---- add ------------------------------------------------------
+	addBaseURLFlag = "https://api.example.com"
+	addAPIKeyFlag = "sk-globalhomehonored-1234"
+	addModelFlag = "opus"
+
+	var addOut, addErr bytes.Buffer
+	addCmd := &cobra.Command{Use: "add"}
+	addCmd.SetOut(&addOut)
+	addCmd.SetErr(&addErr)
+	if err := runAdd(addCmd, []string{"honor"}); err != nil {
+		t.Fatalf("runAdd err = %v; stderr=%s", err, addErr.String())
+	}
+	sandboxProfilePath := filepath.Join(sandbox, ".claudecm", "profiles", "honor.yaml")
+	if _, err := os.Stat(sandboxProfilePath); err != nil {
+		t.Fatalf("add: sandbox profile missing at %q: %v", sandboxProfilePath, err)
+	}
+	realProfilePath := filepath.Join(realHome, ".claudecm", "profiles", "honor.yaml")
+	if _, err := os.Stat(realProfilePath); err == nil {
+		t.Fatalf("add: profile leaked into real HOME at %q — --home ignored", realProfilePath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("add: unexpected error stating real-HOME profile: %v", err)
+	}
+
+	// The real HOME's .claudecm subtree must not have been created by
+	// runAdd. storage.Default() would have called Bootstrap on it —
+	// that would leave a directory behind. Its absence proves nothing
+	// in the write path reached storage.Default().
+	if _, err := os.Stat(filepath.Join(realHome, ".claudecm")); err == nil {
+		t.Errorf("add: bootstrapped real HOME .claudecm tree despite --home")
+	}
+
+	// ---- list -----------------------------------------------------
+	var listOut, listErr bytes.Buffer
+	listCmdTest := &cobra.Command{Use: "list"}
+	listCmdTest.SetOut(&listOut)
+	listCmdTest.SetErr(&listErr)
+	if err := runList(listCmdTest, nil); err != nil {
+		t.Fatalf("runList err = %v; stderr=%s", err, listErr.String())
+	}
+	if !strings.Contains(listOut.String(), "honor") {
+		t.Errorf("list: expected the sandbox-only profile 'honor'; got:\n%s", listOut.String())
+	}
+
+	// ---- switch ---------------------------------------------------
+	// runSwitch flips state.yaml under --home; verify the state file
+	// lands in sandbox, not real HOME.
+	switchCmd := &cobra.Command{Use: "switch"}
+	var switchOut, switchErr bytes.Buffer
+	switchCmd.SetOut(&switchOut)
+	switchCmd.SetErr(&switchErr)
+	// switch honors --yes to skip the confirmation prompt in test.
+	switchYesFlag = true
+	t.Cleanup(func() { switchYesFlag = false })
+	if err := runSwitch(switchCmd, []string{"honor"}); err != nil {
+		t.Fatalf("runSwitch err = %v; stderr=%s", err, switchErr.String())
+	}
+	sandboxStatePath := filepath.Join(sandbox, ".claudecm", "state.yaml")
+	if _, err := os.Stat(sandboxStatePath); err != nil {
+		t.Fatalf("switch: sandbox state.yaml missing at %q: %v", sandboxStatePath, err)
+	}
+	realStatePath := filepath.Join(realHome, ".claudecm", "state.yaml")
+	if _, err := os.Stat(realStatePath); err == nil {
+		t.Fatalf("switch: state.yaml leaked into real HOME at %q — --home ignored", realStatePath)
+	}
+}
+
 // TestGlobalRevealActive_ORLogic asserts globalRevealActive's OR
 // semantics: local || global wins.
 func TestGlobalRevealActive_ORLogic(t *testing.T) {

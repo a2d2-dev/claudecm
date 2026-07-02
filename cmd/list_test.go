@@ -299,6 +299,37 @@ func TestList_LocalRevealFlagPlaintextToo(t *testing.T) {
 	}
 }
 
+// TestList_MissingStateTreatsAsNoActiveProfile asserts that a
+// bootstrapped tree whose state.yaml is missing (delete + reload)
+// still yields a successful list run with no active marker. The
+// reviewer's F7 finding: pre-fix readActiveName propagated the
+// "file does not exist" error, breaking list on any tree that had
+// never called SetActive.
+func TestList_MissingStateTreatsAsNoActiveProfile(t *testing.T) {
+	h := newListHarness(t)
+	h.saveProfile("solo", "sk-soloverylongkey12345", "https://api.example.com", "opus", "anthropic")
+	// Explicitly delete state.yaml — a fresh install would not have
+	// it yet.
+	statePath := filepath.Join(h.home, ".claudecm", "state.yaml")
+	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("remove state.yaml: %v", err)
+	}
+
+	stdout, _, err := runListInner(t)
+	if err != nil {
+		t.Fatalf("runList err = %v; expected success on missing state.yaml", err)
+	}
+	if !strings.Contains(stdout, "solo") {
+		t.Errorf("stdout missing profile row for %q:\n%s", "solo", stdout)
+	}
+	// No line should carry the active marker — there is nothing active.
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(strings.TrimRight(line, " "), listActiveMarker+" ") {
+			t.Errorf("list surfaced an active marker despite missing state.yaml: %q", line)
+		}
+	}
+}
+
 // TestList_InvalidOutputRefused: --output yaml → error.
 func TestList_InvalidOutputRefused(t *testing.T) {
 	newListHarness(t)

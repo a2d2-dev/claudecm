@@ -690,6 +690,29 @@ func TestExplain_UnknownToolInFilterProducesEmptyToolList(t *testing.T) {
 	}
 }
 
+// TestExplain_GlobalRevealFlagSurfacesPlaintext pins root-level
+// --reveal (globalRevealFlag) rather than the per-command test seam
+// and asserts runExplain still emits plaintext + stderr warning.
+// Symmetric with TestCurrent_GlobalRevealFlagSurfacesPlaintext.
+func TestExplain_GlobalRevealFlagSurfacesPlaintext(t *testing.T) {
+	h := newExplainHarness(t)
+	pinGlobalFlagsForTest(t)
+	h.saveProfile("prod", "sk-globalexplain-secret-xyz", "https://api.anthropic.com", "opus")
+	h.activate("prod")
+
+	globalRevealFlag = true
+	stdout, stderr, err := runExplainCmd(t, nil)
+	if err != nil {
+		t.Fatalf("runExplain err = %v", err)
+	}
+	if !strings.Contains(stdout, "sk-globalexplain-secret-xyz") {
+		t.Errorf("global --reveal did not surface plaintext:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "WARNING: --reveal") {
+		t.Errorf("global --reveal missing stderr warning: %q", stderr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Compile-time sanity — surface the packages the tests use so the file
 // gets flagged when a downstream refactor removes something we depend on.

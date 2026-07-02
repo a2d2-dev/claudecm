@@ -137,7 +137,7 @@ func runExplain(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build storage + manager (same bootstrap pattern as other cmd/* entries).
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}

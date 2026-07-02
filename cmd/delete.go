@@ -67,7 +67,7 @@ func runDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("profile name cannot be empty")
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}

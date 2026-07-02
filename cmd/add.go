@@ -213,7 +213,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// still needs a Resolver to exist (and, for parity with every other
 	// command, we do not want a machine without ~/.claudecm to succeed
 	// silently and then fail later on the first non-dry-run add).
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}

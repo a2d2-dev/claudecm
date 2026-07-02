@@ -132,7 +132,7 @@ func runCurrent(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
