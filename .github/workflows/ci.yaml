@@ -63,6 +63,14 @@ jobs:
     - name: Run tests
       run: go test -v -race -coverprofile=coverage.out ./...
 
+    - name: Enforce per-package coverage floors (E8-S2)
+      # Gates internal/writepath, internal/commit, internal/resolver at
+      # >=80% statement coverage per PRD NFR-T1 / SM-3 and Architecture
+      # §11. Runs on every matrix cell so a floor breach in any Go
+      # version / OS combination is caught, not just the codecov upload
+      # cell.
+      run: bash scripts/check-coverage.sh coverage.out
+
     - name: Upload coverage
       if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.21'
       uses: codecov/codecov-action@v4
@@ -89,6 +97,14 @@ jobs:
 
     - name: Project-scope discipline
       run: bash scripts/lint-project-scope.sh
+
+    - name: AES-claim scrub (E8-S6, NFR-D1)
+      # Fails on any AES-256 / secure storage / encryption-at-rest claim
+      # outside scripts/lint-aes-claims-allowlist.txt, and on any
+      # crypto/aes import under cmd/, internal/, or pkg/. v1 stores
+      # plaintext at 0600; introducing crypto requires an explicit
+      # post-v1 ADR.
+      run: bash scripts/lint-aes-claims.sh
 
     - name: Run golangci-lint
       uses: golangci/golangci-lint-action@v4

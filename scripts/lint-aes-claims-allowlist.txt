@@ -1,0 +1,40 @@
+# lint-aes-claims-allowlist.txt — regex allowlist for lint-aes-claims.sh.
+#
+# One extended-regex per line. Lines matching any of these patterns are
+# excluded from the "forbidden AES claim" grep. Blank lines and lines
+# starting with '#' are treated as comments and ignored by the linter.
+#
+# Membership policy: each entry must correspond to prose that
+# LEGITIMATELY names the forbidden strings in order to say "we do NOT
+# do this" — an ADR §Locked Decisions clause, the release-gate story
+# that defines the guard, the PRD §Non-Goals row, the coding-standards
+# "no cryptographic claims" rule, or the readiness-checklist row that
+# lists AES re-introduction as a fail condition. Marketing prose that
+# actually claims AES / secure storage is NOT permissible and must be
+# scrubbed instead of allowlisted.
+#
+# The linter runs `grep -REni` and pipes matches through
+# `grep -Evf <this-file>`, so patterns are extended-regex, case
+# insensitive, and matched against grep's `<path>:<lineno>:<content>`
+# output shape.
+
+# ADR-0001 §Locked Decisions — the source of the "encryption deferred"
+# rule; legitimately names the strings to specify what is deferred.
+^docs/decisions/0001-direction-lock\.md:
+
+# PRD v1 — §Non-Goals + NFR-D1 reiterate the deferral and define the
+# release gate. These are the load-bearing "we do NOT ship this"
+# clauses that E8-S6 was written to protect; scrubbing them would
+# defeat the guard's purpose.
+^docs/prd/prd-v1\.md:
+
+# Coding standards rule 14 — the invariant that E8-S6 enforces in CI.
+^docs/architecture/coding-standards\.md:
+
+# Story files — E8-S6 defines this very guard (grep pattern is literal),
+# E9-S1 lists AES-claim absence as an out-of-scope constraint for the
+# README rewrite, and the sprint plan cross-references E8-S6 by name.
+^docs/plan/stories/E8-S6\.md:
+^docs/plan/stories/E9-S1\.md:
+^docs/plan/sprint-plan\.md:
+^docs/plan/readiness-checklist\.md:
