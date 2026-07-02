@@ -1,240 +1,91 @@
-# claudecm - Claude Code Environment Manager
+# claudecm
 
-`claudecm` is a CLI tool for managing Claude Code environment configurations. Easily switch between multiple API configurations for different environments, providers, or projects.
+**One-command switch between your Claude Code and Codex CLI configurations.**
 
-## Features
+## What it does
 
-- 🚀 **Fast switching** - Change environments in milliseconds
-- 📝 **Human-readable** - YAML configuration format
-- 🎨 **Interactive UI** - Beautiful terminal prompts and selection
-- 💻 **Cross-platform** - Works on macOS, Linux, and Windows
+- Switches between named "profiles" of Claude Code + Codex configuration.
+- Direct-writes to `~/.claude/settings.json` and `~/.codex/{config.toml,auth.json}` — no shims, no wrappers, no proxy.
+- Merge-preserves unknown keys: anything claudecm doesn't own stays byte-for-byte where you left it (comments and key ordering preserved where the parser allows).
+- Atomic two-phase commit with automatic rollback if any target fails post-write reparse.
+- `explain` shows exactly which env var / on-disk value / profile field wins for each key, layer by layer.
 
-> **Storage:** Profiles stored as plaintext YAML in `~/.claudecm/` with file mode `0600`. Encryption is deferred post-v1.
+## Who it's for
 
-## Installation
+People juggling multiple Anthropic or OpenAI accounts, relay endpoints, or work-vs-personal setups: freelancers with several clients, teams routing through a paid API relay, contributors switching between an org key and a personal key, or anyone testing model behavior across regions or providers. If you've been hand-editing `~/.claude/settings.json` or `~/.codex/config.toml` and lost track of which key was active, this is for you.
 
-### From Source
+## Not for
 
-```bash
-git clone https://github.com/a2d2-dev/claudecm
-cd claudecm
-make install
-```
+claudecm does **not** sync your configuration to the cloud, is **not** a proxy or gateway (it never sees a request), does **not** support Gemini CLI / Cursor / Windsurf / other IDE plugins in v1, and does **not** encrypt profiles at rest — they are plaintext YAML at file mode `0600` under `~/.claudecm/` (deferred post-v1 per ADR-0001 and PRD NFR-D1). If you need vault-grade secret storage, wire claudecm's `import`/`export` around your existing secret manager instead.
 
-### Using Go
+## Install
 
 ```bash
 go install github.com/a2d2-dev/claudecm@latest
 ```
 
-## Quick Start
+## Quickstart
 
-### 1. Add your first profile
-
-```bash
-claudecm add
-```
-
-The `add` command will:
-1. Extract current Claude environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`)
-2. Display them for review
-3. Allow you to edit the values
-4. Prompt for a profile name
-5. Save the profile and show the profile list
-
-### 2. List all profiles
+Target: **≤ 3 minutes** from install to first successful switch (PRD SM-5).
 
 ```bash
-claudecm list
+# 1. Import whatever config you already have on disk into a starting profile.
+claudecm import claude-code --name existing --yes
+# or:  claudecm import codex --name existing --yes
+
+# 2. Add a second profile for the other account/endpoint.
+claudecm add work \
+  --base-url https://api.anthropic.com \
+  --api-key sk-ant-xxxxxxxx \
+  --model claude-opus-4-5
+
+# 3. Switch.
+claudecm switch work --yes
+
+# 4. Confirm what's live.
+claudecm current
+
+# 5. Ask claudecm to prove where every effective key came from.
+claudecm explain work
 ```
 
-### 3. Switch between profiles
-
-```bash
-claudecm switch
-```
-
-Or switch directly:
-
-```bash
-claudecm switch anthropic-us
-```
-
-### 4. Export environment variables
-
-```bash
-eval $(claudecm export)
-```
-
-This will set the following environment variables:
-- `ANTHROPIC_BASE_URL`
-- `ANTHROPIC_AUTH_TOKEN`
-- `ANTHROPIC_MODEL` (if configured)
-- `ANTHROPIC_SMALL_FAST_MODEL` (if configured)
-- Any custom environment variables
-
-### 5. Delete a profile
-
-```bash
-claudecm delete
-```
+See [docs/quickstart.md](docs/quickstart.md) for a longer walk-through with expected output per step and a "what went wrong?" panel.
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `claudecm add` | Add a new profile from current environment |
-| `claudecm list` | List all profiles |
-| `claudecm switch [name]` | Switch active profile (with tab completion) |
-| `claudecm export` | Export environment variables |
-| `claudecm delete [name]` | Delete a profile (with tab completion) |
-| `claudecm completion [bash\|zsh\|fish\|powershell]` | Generate shell completion script |
-| `claudecm version` | Show version information |
-| `claudecm help` | Show help |
+| Command | What it does |
+|---|---|
+| `claudecm add <name> [flags]` | Create a profile in the unified schema. |
+| `claudecm list` | List every profile with the active one marked. |
+| `claudecm current` | Compact per-tool summary of the active profile. |
+| `claudecm switch <name>` | Two-phase commit both tool files to the named profile. |
+| `claudecm explain <name>` | Full per-tool resolution chain (winning + shadowed layers). |
+| `claudecm import claude-code\|codex` | Seed a profile from existing on-disk tool config. |
+| `claudecm edit <name>` | Open profile in `$EDITOR`, or use `--set key=value`. |
+| `claudecm rename <old> <new>` | Rename a profile. |
+| `claudecm delete <name>` | Delete a profile. |
+| `claudecm restore` | List backups or revert owned files to a chosen snapshot. |
+| `claudecm export [name]` | Emit shell exports or YAML (read-only secondary activation). |
+| `claudecm completion <shell>` | Emit a shell completion script. |
+| `claudecm version` | Print version, commit, and build date. |
 
-## Shell Completion
+Global flags: `--home <dir>` (override `$HOME` for sandboxed runs), `--yes`, `--dry-run` (write commands).
 
-`claudecm` supports shell completion for all major shells. This enables tab completion for commands and profile names.
+## Deeper reading
 
-### Quick Setup (Recommended)
-
-```bash
-claudecm completion install
-```
-
-This will automatically detect your shell and install the appropriate completion script.
-
-### Manual Setup
-
-### Zsh (Recommended for macOS)
-
-Add to your `~/.zshrc`:
-
-```bash
-# Enable completion
-autoload -U compinit; compinit
-
-# Load claudecm completion
-source <(claudecm completion zsh)
-```
-
-Or install permanently:
-
-```bash
-claudecm completion zsh > "${fpath[1]}/_claudecm"
-```
-
-Then restart your shell or run `source ~/.zshrc`.
-
-### Bash
-
-```bash
-# Load for current session
-source <(claudecm completion bash)
-
-# Load permanently (Linux)
-claudecm completion bash > /etc/bash_completion.d/claudecm
-
-# Load permanently (macOS with Homebrew)
-claudecm completion bash > $(brew --prefix)/etc/bash_completion.d/claudecm
-```
-
-### Fish
-
-```bash
-# Load for current session
-claudecm completion fish | source
-
-# Load permanently
-claudecm completion fish > ~/.config/fish/completions/claudecm.fish
-```
-
-### PowerShell
-
-```powershell
-# Load for current session
-claudecm completion powershell | Out-String | Invoke-Expression
-
-# Add to your PowerShell profile for permanent loading
-```
-
-After setting up completion, you can:
-- Press `Tab` after `claudecm switch` to see available profiles
-- Press `Tab` after `claudecm delete` to see available profiles
-- Press `Tab` after `claudecm` to see all available commands
-
-## Configuration
-
-Configurations are stored in `~/.claudecm/`:
-
-```
-~/.claudecm/
-├── profiles/
-│   ├── anthropic-us.yaml
-│   ├── anthropic-cn.yaml
-│   └── moonshot-dev.yaml
-└── state.yaml
-```
-
-### Profile File Format
-
-```yaml
-name: anthropic-us
-base_url: https://api.anthropic.com
-auth_token: sk-ant-api03-xxxxx
-model: claude-sonnet-4
-description: "Anthropic US Production API"
-custom_env:
-  ANTHROPIC_TIMEOUT: "60"
-  ANTHROPIC_MAX_RETRIES: "3"
-created_at: 2025-10-31T10:30:00Z
-updated_at: 2025-10-31T10:30:00Z
-```
-
-## Development
-
-### Prerequisites
-
-- Go 1.21+
-- Make
-
-### Build
-
-```bash
-make build
-```
-
-### Run Tests
-
-```bash
-make test
-```
-
-### Run Linter
-
-```bash
-make lint
-```
-
-### Development Build (format + vet + test + build)
-
-```bash
-make dev-build
-```
-
-## Architecture
-
-See [docs/architecture.md](docs/architecture.md) for detailed architecture documentation.
+- [`docs/prd/prd-v1.md`](docs/prd/prd-v1.md) — v1 PRD, functional + non-functional requirements, decision log.
+- [`docs/architecture.md`](docs/architecture.md) — package layout, write-path invariants, adapter model.
+- [`docs/decisions/`](docs/decisions/) — ADRs, starting with ADR-0001 (Direction Lock).
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+PRs welcome. Two guardrails to know:
+
+- `scripts/lint-aes-claims.sh` runs in CI (story E8-S6, NFR-D1). It scrubs any reintroduction of cryptographic marketing claims in `README.md`, `docs/`, `cmd/`, `internal/`, or `pkg/`. v1 is plaintext at `0600`; if you need to say otherwise, land an ADR first.
+- `scripts/lint-project-scope.sh` and `scripts/lint-osrename.sh` enforce ADR-0001 scope and the atomic-rename invariant respectively.
+
+Run `make dev-build` before pushing.
 
 ## License
 
-[MIT License](LICENSE)
-
-## Acknowledgments
-
-- Inspired by [kubecm](https://github.com/sunny0826/kubecm)
-- Built with [Cobra](https://github.com/spf13/cobra) and [Survey](https://github.com/AlecAivazis/survey)
+[MIT](LICENSE)
