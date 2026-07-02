@@ -60,10 +60,16 @@ per_pkg="$(awk '
     n = index($1, ":")
     if (n == 0) next
     file = substr($1, 1, n - 1)
-    # strip trailing /<name>.go
-    m = match(file, /\/[^/]+\.go$/)
-    if (m == 0) next
-    pkg = substr(file, 1, m - 1)
+    # strip trailing /<name>.go — walk back to the last "/" ourselves
+    # so we do not depend on awk regex-in-charclass semantics (BSD awk
+    # on macOS rejects "/" inside [^...] with a "nonterminated
+    # character class" error).
+    slash = 0
+    for (i = length(file); i > 0; i--) {
+      if (substr(file, i, 1) == "/") { slash = i; break }
+    }
+    if (slash == 0) next
+    pkg = substr(file, 1, slash - 1)
     stmts = $2 + 0
     cnt   = $3 + 0
     total[pkg] += stmts
