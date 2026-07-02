@@ -180,7 +180,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(cmd.ErrOrStderr(), "NOTE: --yes is ignored under --dry-run (nothing will be committed).")
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
@@ -201,7 +201,12 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	// Honor --lock-timeout: wrap the base context with a deadline so
+	// commit.Committer picks up ctx.Deadline() and hands it to the
+	// per-target storage.Acquire calls. lockTimeoutContext is a no-op
+	// when --lock-timeout is unset.
+	ctx, cancel := lockTimeoutContext(context.Background())
+	defer cancel()
 	plans, planErrors, err := collectSwitchPlans(ctx, resv, tools, *profile)
 	if err != nil {
 		return err
@@ -305,6 +310,17 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 
 	if err := updateStateOnSuccess(resv, store, profileName, &report); err != nil {
 		return fmt.Errorf("commit succeeded but state update failed: %w", err)
+	}
+
+	// NFR-R1: enforce backup retention after every successful switch.
+	// storage.PruneAll is a no-op when the (tool, basename) backup
+	// count is at or below the retention target (default 10), so a
+	// single-write session under a fresh HOME does not touch the
+	// audit log. Any prune error surfaces here — the commit already
+	// succeeded, so it is a "the write worked but housekeeping failed"
+	// condition an operator wants to see.
+	if err := pruneAllAfterWrite(resv); err != nil {
+		return fmt.Errorf("commit succeeded but backup pruning failed: %w", err)
 	}
 
 	return renderSuccess(cmd.OutOrStdout(), format, profileName, report, preCommitDiff)

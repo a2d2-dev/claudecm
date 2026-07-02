@@ -77,9 +77,12 @@ var diagnosticEnvPrefixes = []string{
 
 var (
 	explainOutputFlag string
-	explainRevealFlag bool
 	explainToolFlag   string
 	explainAllEnvFlag bool
+	// explainRevealFlag is a test-only seam retained after E6-S9
+	// promoted --reveal to a persistent flag on rootCmd. See
+	// cmd/current.go for the symmetric rationale.
+	explainRevealFlag bool
 )
 
 var explainCmd = &cobra.Command{
@@ -117,7 +120,11 @@ EXAMPLES
 
 func init() {
 	explainCmd.Flags().StringVarP(&explainOutputFlag, "output", "o", "text", "Output format (text|json)")
-	explainCmd.Flags().BoolVar(&explainRevealFlag, "reveal", false, "Reveal secret values in plaintext (prints stderr warning)")
+	// --reveal was previously registered as a local flag here. E6-S9
+	// promoted it to a persistent flag on rootCmd (cmd/root.go); the
+	// local explainRevealFlag var survives as a test-only seam OR'd
+	// into the effective reveal via globalRevealActive at every use
+	// site.
 	explainCmd.Flags().StringVar(&explainToolFlag, "tool", "", "Restrict to a comma-separated list of tool IDs (default all)")
 	explainCmd.Flags().BoolVar(&explainAllEnvFlag, "all-env", false, "Also list extant process env vars matching per-tool prefixes")
 	rootCmd.AddCommand(explainCmd)
@@ -130,7 +137,7 @@ func runExplain(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build storage + manager (same bootstrap pattern as other cmd/* entries).
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
@@ -156,10 +163,11 @@ func runExplain(cmd *cobra.Command, args []string) error {
 	// NFR-S8: --reveal must be loud. Emit the notice BEFORE any stdout
 	// output so a piped consumer that only reads stdout does not miss it,
 	// and so a user watching the terminal sees the warning next to the
-	// plaintext they asked for.
-	if explainRevealFlag {
-		fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: --reveal exposes secret values on your terminal and in scrollback.")
-	}
+	// plaintext they asked for. Effective reveal is the OR of the
+	// global --reveal (root persistent flag) and the legacy
+	// explainRevealFlag test seam.
+	effectiveReveal := globalRevealActive(explainRevealFlag)
+	emitRevealNoticeIfNeeded(cmd.ErrOrStderr(), effectiveReveal)
 
 	var diagnostic map[string]string
 	if explainAllEnvFlag {
@@ -168,9 +176,9 @@ func runExplain(cmd *cobra.Command, args []string) error {
 
 	switch format {
 	case explainOutputJSON:
-		return renderExplainJSON(cmd.OutOrStdout(), view, diagnostic, explainRevealFlag)
+		return renderExplainJSON(cmd.OutOrStdout(), view, diagnostic, effectiveReveal)
 	default:
-		return renderExplainText(cmd.OutOrStdout(), view, diagnostic, explainRevealFlag)
+		return renderExplainText(cmd.OutOrStdout(), view, diagnostic, effectiveReveal)
 	}
 }
 

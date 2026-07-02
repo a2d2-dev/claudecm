@@ -213,7 +213,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// still needs a Resolver to exist (and, for parity with every other
 	// command, we do not want a machine without ~/.claudecm to succeed
 	// silently and then fail later on the first non-dry-run add).
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
@@ -478,20 +478,9 @@ func writeAddJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-// ---------------------------------------------------------------------------
-// Legacy helpers used by other cmd/* files
-// ---------------------------------------------------------------------------
-
-// maskToken masks the authentication token for display. Kept here (not
-// deleted alongside the pre-E6-S3 command body) because cmd/list.go
-// still calls into it for its detailed view — moving it out is scope
-// creep for this story.
-func maskToken(token string) string {
-	if token == "" {
-		return "(not set)"
-	}
-	if len(token) <= 8 {
-		return "****"
-	}
-	return token[:4] + "..." + token[len(token)-4:]
-}
+// maskToken was retained here until the E6-S10 cmd/list rewrite migrated
+// list off the legacy detailed view. The E6-S10 refactor uses redactValue
+// (cmd/explain.go) uniformly, so maskToken has no callers and is
+// removed to keep the linter's "unused" gate honest. Any future need
+// for a "…" style mask should route through redactValue rather than
+// resurrect a competing helper.

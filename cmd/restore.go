@@ -178,7 +178,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--list, --latest, and --id are mutually exclusive")
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
@@ -231,7 +231,11 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	ctx := context.Background()
+	// Honor --lock-timeout: wrap the base context with a deadline so
+	// commit.Committer picks it up. See cmd/switch.go for the symmetric
+	// wiring rationale.
+	ctx, cancel := lockTimeoutContext(context.Background())
+	defer cancel()
 	committer := commit.NewCommitter()
 	txn, err := committer.Stage(ctx, resv, plans)
 	if err != nil {
@@ -267,6 +271,15 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		); err != nil {
 			return fmt.Errorf("record applied for %s: %w", pf.Target, err)
 		}
+	}
+
+	// NFR-R1: enforce backup retention after every successful restore.
+	// storage.PruneAll is a no-op when the (tool, basename) backup
+	// count is at or below the retention target; a broken audit log
+	// surfaces here as a "restore worked but housekeeping failed"
+	// condition an operator sees rather than a silent swallow.
+	if err := pruneAllAfterWrite(resv); err != nil {
+		return fmt.Errorf("restore succeeded but backup pruning failed: %w", err)
 	}
 
 	return renderRestoreSuccess(cmd.OutOrStdout(), format, toolArg, report, sources, skipped)

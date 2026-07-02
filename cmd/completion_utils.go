@@ -17,13 +17,21 @@ import (
 // footgun (invisible mkdir + chmod on interactive input). Instead, we
 // probe for the profiles directory and return "no completions" if it
 // does not exist yet. Real commands still call Bootstrap explicitly.
+//
+// --home wiring: cobra's completion runtime parses the persistent flag
+// set before invoking this callback, so globalHomeFlag is populated by
+// the time we run. We therefore consult resolverFromGlobals directly —
+// that helper honors --home when set and falls back to storage.Default
+// otherwise. If flag parsing was skipped for some reason (older cobra,
+// custom shell wiring) globalHomeFlag stays at its "" zero value and
+// the helper still degrades to the default resolver.
 func profileNamesCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	// Don't complete if we already have an argument
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	resolver, err := storage.Default()
+	resolver, err := resolverFromGlobals()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveError
 	}

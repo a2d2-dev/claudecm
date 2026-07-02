@@ -80,7 +80,7 @@ func runRename(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("old and new names are identical (%q); nothing to do", oldName)
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}

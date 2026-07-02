@@ -614,3 +614,27 @@ func TestJSONCurrentValue_Cases(t *testing.T) {
 		})
 	}
 }
+
+// TestCurrent_GlobalRevealFlagSurfacesPlaintext pins the root-level
+// --reveal (globalRevealFlag) rather than the per-command test seam
+// and verifies runCurrent still emits the plaintext key + stderr
+// warning. Guards against a regression where the global flag stops
+// propagating into the current-command reveal decision.
+func TestCurrent_GlobalRevealFlagSurfacesPlaintext(t *testing.T) {
+	h := newCurrentHarness(t)
+	pinGlobalFlagsForTest(t)
+	h.saveProfile("prod", "sk-globalcurrent-secret-xyz", "https://api.anthropic.com", "opus")
+	h.activate("prod")
+
+	globalRevealFlag = true
+	stdout, stderr, err := runCurrentCmd(t)
+	if err != nil {
+		t.Fatalf("runCurrent err = %v", err)
+	}
+	if !strings.Contains(stdout, "sk-globalcurrent-secret-xyz") {
+		t.Errorf("global --reveal did not surface plaintext:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "WARNING: --reveal") {
+		t.Errorf("global --reveal missing stderr warning: %q", stderr)
+	}
+}

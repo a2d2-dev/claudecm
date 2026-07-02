@@ -166,7 +166,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--yes requires --name (non-interactive mode has no way to prompt for a name)")
 	}
 
-	resv, err := storage.Default()
+	resv, err := resolverFromGlobals()
 	if err != nil {
 		return fmt.Errorf("failed to resolve HOME: %w", err)
 	}
