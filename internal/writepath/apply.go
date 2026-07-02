@@ -253,11 +253,12 @@ func applyLocked(r *storage.Resolver, plan WritePlan) (WriteReport, error) {
 
 	// Step 3 (parse) + Step 5 (diff): parse current + new. Skipped entirely when Parser is nil.
 	// When the file did not exist, the "current" side is an empty flat
-	// map (not the result of Flatten(nil), which yields {"": nil} — see
-	// Flatten's non-map top-level rule). Skipping parse+flatten on the
-	// current side keeps the first-write diff clean: every key on the
-	// next side is a legitimate Added, and TouchesUnowned is decided
-	// against next's keys alone.
+	// map. Flatten(nil) also returns an empty map (see Flatten godoc:
+	// top-level nil → empty flat map), so a parser that yields nil for
+	// a zero-byte existing file — e.g. codex tomlParser via
+	// treatAsEmpty — takes the same clean-slate path as the !exists
+	// branch: every key on the next side is a legitimate Added and
+	// TouchesUnowned is decided against next's keys alone.
 	var diff DiffResult
 	if plan.Parser != nil {
 		curFlat := map[string]any{}

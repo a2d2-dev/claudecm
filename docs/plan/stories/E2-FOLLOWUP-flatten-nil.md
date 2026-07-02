@@ -1,6 +1,17 @@
 # E2-FOLLOWUP — writepath Flatten(nil) surfaces `""` key on empty current
 
-**Status.** Placeholder — filed from the E3-S7 fixture matrix review.
+**Status.** Fixed on branch `fix/flatten-nil-contract` — resolution
+chose the writepath-only fix (option 1 below, narrowed): `Flatten(nil)`
+now returns an empty map by explicit contract, matching the intent that
+a nil parsed value carries no keys. The read-side policy split
+(`treatAsEmpty` upstream of Flatten) remains untouched. Tests pin
+top-level nil vs. nested-nil-leaf behaviour and the end-to-end
+`Diff({}, {"a":1}, ["a"])` clean-guard shape. Commit-side regression
+`TestStage_NilCurrentBytesNoDrift` exercises the cmd/switch fresh-install
+scenario that motivated this stub. Fixture matrix hydration
+(dropping `profile.yaml` into `edge/empty/` and `edge/whitespace-only/`
+and regenerating goldens) remains out of scope for this hotfix and can
+be picked up in a follow-up.
 
 ## Problem
 

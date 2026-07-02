@@ -284,6 +284,134 @@ func TestFlatten_TopLevelEmptyMap(t *testing.T) {
 	}
 }
 
+// TestFlatten_TopLevelNilReturnsEmptyMap pins the contract that a nil
+// top-level input flattens to an empty map (not {"": nil}). This is
+// the fix path for E2-FOLLOWUP-flatten-nil: on a fresh install where
+// the parser returns (nil, nil) for a zero-byte config, writepath and
+// commit must see an empty current-side flat map so the
+// TouchesUnowned guard is decided against next's keys alone. Emitting
+// {"": nil} would fabricate an "" key that is never in any adapter's
+// OwnedKeys and would refuse every first-write with
+// ErrDryRunUnownedTouched, blocking cmd/switch on fresh installs.
+func TestFlatten_TopLevelNilReturnsEmptyMap(t *testing.T) {
+	got, err := Flatten(nil)
+	if err != nil {
+		t.Fatalf("Flatten(nil) err = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Flatten(nil) = nil map; want non-nil empty map")
+	}
+	if len(got) != 0 {
+		t.Fatalf("Flatten(nil) = %+v (len=%d); want empty map", got, len(got))
+	}
+	if _, hasEmptyKey := got[""]; hasEmptyKey {
+		t.Fatalf("Flatten(nil) unexpectedly emitted the empty-string key; want no key at all")
+	}
+}
+
+// TestFlatten_NestedNilLeafStillEmitsKey pins the split between the
+// top-level nil case (see TestFlatten_TopLevelNilReturnsEmptyMap) and
+// nested nil leaves. A nil at a known key path is a real value the
+// parser chose to emit and must remain visible to Diff — otherwise a
+// caller that removes a key by nulling it out would be
+// indistinguishable from a caller that never set it. Only the
+// top-level nil short-circuits to an empty map.
+func TestFlatten_NestedNilLeafStillEmitsKey(t *testing.T) {
+	in := map[string]any{"a": nil, "b": 1}
+	got, err := Flatten(in)
+	if err != nil {
+		t.Fatalf("Flatten err = %v", err)
+	}
+	want := map[string]any{"a": nil, "b": 1}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Flatten = %+v; want %+v", got, want)
+	}
+	if v, ok := got["a"]; !ok || v != nil {
+		t.Fatalf("Flatten[a] = %v, ok=%v; want (nil, true)", v, ok)
+	}
+}
+
+// TestFlatten_NonMapNonNilLeafEmitsEmptyKey pins the remaining edge:
+// a non-nil, non-map top-level input is still returned as {"": v}.
+// This shortcut is intentional (see Flatten godoc) and no adapter in
+// v1 relies on it, but the test locks the shape so a future change
+// that removes it must do so deliberately.
+func TestFlatten_NonMapNonNilLeafEmitsEmptyKey(t *testing.T) {
+	got, err := Flatten("scalar")
+	if err != nil {
+		t.Fatalf("Flatten err = %v", err)
+	}
+	want := map[string]any{"": "scalar"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Flatten(\"scalar\") = %+v; want %+v", got, want)
+	}
+}
+
+// TestDiff_EmptyCurrentAgainstEmptyNext validates that the end-to-end
+// TouchesUnowned guard is clean on a truly no-op fresh-install case:
+// nil parsed current -> Flatten -> empty map; nil parsed new ->
+// Flatten -> empty map; Diff -> zero DiffResult, TouchesUnowned=false.
+// This is the writepath-level regression for cmd/switch on a fresh
+// install where the codex TOML parser returns (nil, nil) both sides.
+func TestDiff_EmptyCurrentAgainstEmptyNext(t *testing.T) {
+	curFlat, err := Flatten(nil)
+	if err != nil {
+		t.Fatalf("Flatten(nil) current err = %v", err)
+	}
+	nextFlat, err := Flatten(nil)
+	if err != nil {
+		t.Fatalf("Flatten(nil) next err = %v", err)
+	}
+	got := Diff(curFlat, nextFlat, nil)
+	if !reflect.DeepEqual(got, DiffResult{}) {
+		t.Fatalf("Diff(empty, empty, nil) = %+v; want zero DiffResult", got)
+	}
+	if got.TouchesUnowned {
+		t.Fatalf("TouchesUnowned = true; want false (no keys on either side)")
+	}
+}
+
+// TestDiff_EmptyCurrentAgainstAddedKey_TouchesUnownedWhenNotOwned
+// pins the "fresh install, adapter writes a new key not in
+// OwnedKeys" edge: an empty flat current side plus a next side with
+// one key that is NOT in OwnedKeys must report Added=["a"] and
+// TouchesUnowned=true. This proves the guard fires the way it
+// should — the fix must not silently disable it, only stop it
+// firing on the phantom "" key.
+func TestDiff_EmptyCurrentAgainstAddedKey_TouchesUnownedWhenNotOwned(t *testing.T) {
+	curFlat, err := Flatten(nil)
+	if err != nil {
+		t.Fatalf("Flatten(nil) err = %v", err)
+	}
+	nextFlat := map[string]any{"a": 1}
+	got := Diff(curFlat, nextFlat, nil)
+	if !reflect.DeepEqual(got.Added, []string{"a"}) {
+		t.Fatalf("Added = %v; want [a]", got.Added)
+	}
+	if !got.TouchesUnowned {
+		t.Fatalf("TouchesUnowned = false; want true (a not in OwnedKeys)")
+	}
+}
+
+// TestDiff_EmptyCurrentAgainstAddedKey_ClearWhenOwned mirrors the
+// previous test but with "a" declared in OwnedKeys. This is the
+// end-to-end shape cmd/switch relies on: an adapter writing an owned
+// key against a fresh install must pass the guard cleanly.
+func TestDiff_EmptyCurrentAgainstAddedKey_ClearWhenOwned(t *testing.T) {
+	curFlat, err := Flatten(nil)
+	if err != nil {
+		t.Fatalf("Flatten(nil) err = %v", err)
+	}
+	nextFlat := map[string]any{"a": 1}
+	got := Diff(curFlat, nextFlat, []string{"a"})
+	if !reflect.DeepEqual(got.Added, []string{"a"}) {
+		t.Fatalf("Added = %v; want [a]", got.Added)
+	}
+	if got.TouchesUnowned {
+		t.Fatalf("TouchesUnowned = true; want false (a is owned)")
+	}
+}
+
 func TestDiff_NestedInputFlattenedBeforeCall_Realistic(t *testing.T) {
 	// Mimics real adapter usage: parse -> flatten -> diff.
 	current := map[string]any{

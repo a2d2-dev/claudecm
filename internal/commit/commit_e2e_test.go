@@ -1077,3 +1077,88 @@ func TestCommit_NilResolverRefused(t *testing.T) {
 		t.Fatalf("Commit: want error on nil resolver, got nil")
 	}
 }
+
+// nilOnEmptyParser mirrors codex tomlParser's empty-input policy: it
+// returns (nil, nil) for zero-byte input and delegates to jsonParser
+// otherwise. Used to reproduce the cmd/switch fresh-install scenario
+// where the parser hands writepath a nil parsed value.
+var nilOnEmptyParser = writepath.ParserFunc(func(data []byte) (any, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	return jsonParser.Parse(data)
+})
+
+// TestStage_NilCurrentBytesNoDrift is the commit-level regression for
+// E2-FOLLOWUP-flatten-nil. Scenario mirrors cmd/switch on a fresh
+// install with the codex TOML parser:
+//
+//   - Target file exists but is zero bytes (or whitespace-only).
+//   - Parser.Parse(current) returns (nil, nil).
+//   - New bytes render an owned key.
+//
+// Before the fix, writepath.Flatten(nil) surfaced a phantom "" key on
+// the current side; Diff reported TouchesUnowned=true because "" is
+// not in any OwnedKeys allowlist; Stage refused with
+// ErrDryRunUnownedTouched. That refusal was what broke cmd/switch
+// (PR #45) on fresh installs.
+//
+// After the fix, Flatten(nil) → empty map; Diff sees Added=["a"] with
+// "a" in OwnedKeys; TouchesUnowned=false; Stage proceeds cleanly and
+// the plan is queued for Commit.
+func TestStage_NilCurrentBytesNoDrift(t *testing.T) {
+	r, home := newTestHome(t)
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	mkdirParent(t, settingsPath)
+	// Seed the target as an existing but zero-byte file so the Stage
+	// pipeline takes the exists=true branch AND the parser returns
+	// (nil, nil) — the exact shape codex tomlParser produces for an
+	// empty ~/.codex/config.toml on a fresh install.
+	if err := os.WriteFile(settingsPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("seed zero-byte file: %v", err)
+	}
+
+	plan := writepath.WritePlan{
+		Tool:       string(adapter.ToolClaudeCode),
+		Target:     settingsPath,
+		NewContent: []byte(`{"a":1}`),
+		Parser:     nilOnEmptyParser,
+		OwnedKeys:  []string{"a"},
+	}
+
+	c := NewCommitter()
+	txn, err := c.Stage(context.Background(), r, []writepath.WritePlan{plan})
+	if err != nil {
+		t.Fatalf("Stage: %v (want clean stage; a Flatten(nil) regression would surface ErrDryRunUnownedTouched here)", err)
+	}
+	defer func() { _ = c.Abort(txn) }()
+
+	if len(txn.Prepared) != 1 {
+		t.Fatalf("Prepared len = %d, want 1", len(txn.Prepared))
+	}
+	pf := txn.Prepared[0]
+	if pf.Skipped {
+		t.Errorf("Skipped = true, want false (bytes differ from zero-byte current)")
+	}
+	if pf.Diff.TouchesUnowned {
+		t.Errorf("Diff.TouchesUnowned = true; want false (a is in OwnedKeys, no phantom '' key on current)")
+	}
+	if _, hasEmpty := indexOf(pf.Diff.Added, ""); hasEmpty {
+		t.Errorf("Diff.Added contains empty-string key: %v (Flatten(nil) regression)", pf.Diff.Added)
+	}
+	wantAdded := []string{"a"}
+	if len(pf.Diff.Added) != 1 || pf.Diff.Added[0] != wantAdded[0] {
+		t.Errorf("Diff.Added = %v; want %v", pf.Diff.Added, wantAdded)
+	}
+}
+
+// indexOf reports whether s contains needle. Local helper so the
+// regression test above stays self-contained.
+func indexOf(s []string, needle string) (int, bool) {
+	for i, v := range s {
+		if v == needle {
+			return i, true
+		}
+	}
+	return -1, false
+}
