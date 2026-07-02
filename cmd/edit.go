@@ -184,23 +184,58 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	var edited *config.Profile
+	// tmpPath is the path to the interactive editor's scratch file when
+	// the editor mode ran. Empty for --set mode. The F3 review finding
+	// requires that on ParseProfile failure or schema drift refusal the
+	// file be preserved (not silently deleted) so the operator can retry
+	// manually without losing their edits.
+	var tmpPath string
 	if len(editSetFlag) > 0 {
 		edited, err = applyEditSetEntries(original, editSetFlag)
 		if err != nil {
 			return err
 		}
 	} else {
-		edited, err = editViaEditor(resv, name, originalYAML)
-		if err != nil {
-			return err
+		var eErr error
+		edited, tmpPath, eErr = editViaEditor(resv, name, originalYAML)
+		if eErr != nil {
+			// Parse rejection returns a non-empty tmpPath — preserve so
+			// the operator can fix the YAML and re-run edit against it
+			// (or manually copy the salvageable bits out). Editor-runner
+			// failure / read failure return tmpPath="" and are cleaned
+			// up inside editViaEditor already.
+			if tmpPath != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"Your edits are preserved at %s; re-run edit with the corrected content or manually copy.\n",
+					tmpPath)
+			}
+			return eErr
 		}
 	}
+
+	// From here on, the tmp file (if any) will be removed on function
+	// exit unless a later refusal flips preserveTmp. Keeping cleanup at
+	// the caller means the schema-drift / name-change branches below can
+	// preserve deterministically instead of racing os.Remove.
+	preserveTmp := false
+	defer func() {
+		if tmpPath == "" || preserveTmp {
+			return
+		}
+		_ = os.Remove(tmpPath)
+	}()
 
 	// Schema drift refusal: never let the operator downgrade / upgrade
 	// the on-disk schema through an interactive edit or a scripted
 	// --set. cmd/edit is not the migration surface — that lives in
 	// config.ParseProfile.
 	if edited.SchemaVersion != config.CurrentProfileSchemaVersion {
+		if tmpPath != "" {
+			preserveTmp = true
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"Your edits are preserved at %s; re-run edit with the corrected content or manually copy.\n",
+				tmpPath)
+		}
 		return fmt.Errorf("refusing edit: schema_version changed to %d (expected %d)",
 			edited.SchemaVersion, config.CurrentProfileSchemaVersion)
 	}
@@ -219,7 +254,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	edited.UpdatedAt = nowFn().UTC()
 
 	if editDryRunFlag {
-		return renderEditDryRun(cmd.OutOrStdout(), name, originalYAML, edited)
+		return renderEditDryRun(cmd.OutOrStdout(), name, original, edited)
 	}
 
 	if err := store.SaveProfile(edited); err != nil {
@@ -231,43 +266,62 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 // editViaEditor writes originalYAML to a per-invocation temp file
 // under ~/.claudecm/tmp/, launches the configured editor, reads the
-// temp file back, and parses it. The temp file is removed before
-// returning regardless of success or failure — a save-then-fail cycle
-// does not litter the tmp dir. Refuses on parse error so a mistyped
-// YAML never round-trips to SaveProfile (NFR-S1).
-func editViaEditor(resv *storage.Resolver, name string, originalYAML []byte) (*config.Profile, error) {
+// temp file back, and parses it.
+//
+// Return contract (F3 review finding):
+//
+//   - On success: returns (profile, tmpPath, nil). The caller owns
+//     tmpPath cleanup so schema / name-change refusals downstream can
+//     preserve the file on rejection without racing os.Remove.
+//   - On ParseProfile failure: returns (nil, tmpPath, err). Caller
+//     prints the preservation hint and does NOT remove the file — the
+//     operator's edits must survive the rejection so they can fix the
+//     YAML and retry.
+//   - On write / editor-runner / read failure: returns (nil, "", err)
+//     after removing tmpPath in-place, because those failures mean the
+//     editor never saw the file or the user did not save anything worth
+//     preserving.
+//
+// Refuses on parse error so a mistyped YAML never round-trips to
+// SaveProfile (NFR-S1).
+func editViaEditor(resv *storage.Resolver, name string, originalYAML []byte) (*config.Profile, string, error) {
 	tmpDir := filepath.Join(resv.ConfigDir(), "tmp")
 	if err := storage.EnsureDir(resv, tmpDir); err != nil {
-		return nil, fmt.Errorf("ensure tmp dir: %w", err)
+		return nil, "", fmt.Errorf("ensure tmp dir: %w", err)
 	}
 	suffix, err := randomEditSuffix()
 	if err != nil {
-		return nil, fmt.Errorf("random suffix: %w", err)
+		return nil, "", fmt.Errorf("random suffix: %w", err)
 	}
 	tmpPath := filepath.Join(tmpDir, name+"."+suffix+".yaml")
 	// mode 0600 for parity with SaveProfile: the temp file carries the
 	// same secrets as the persisted profile, so it must not be group-
 	// or world-readable even for the seconds it lives on disk.
 	if err := os.WriteFile(tmpPath, originalYAML, 0o600); err != nil {
-		return nil, fmt.Errorf("write tmp file %q: %w", tmpPath, err)
+		return nil, "", fmt.Errorf("write tmp file %q: %w", tmpPath, err)
 	}
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
 
 	if err := editorRunnerFn(tmpPath); err != nil {
-		return nil, fmt.Errorf("editor %q exited non-zero: %w", os.Getenv(editorEnvVar), err)
+		// Editor crashed / did not save — the pre-editor bytes on disk
+		// are identical to what the caller already has, so preserving
+		// tmpPath would leak unused garbage into ~/.claudecm/tmp/.
+		_ = os.Remove(tmpPath)
+		return nil, "", fmt.Errorf("editor %q exited non-zero: %w", os.Getenv(editorEnvVar), err)
 	}
 
 	edited, err := os.ReadFile(tmpPath)
 	if err != nil {
-		return nil, fmt.Errorf("read tmp file %q: %w", tmpPath, err)
+		_ = os.Remove(tmpPath)
+		return nil, "", fmt.Errorf("read tmp file %q: %w", tmpPath, err)
 	}
 	profile, err := config.ParseProfile(edited)
 	if err != nil {
-		return nil, fmt.Errorf("edited YAML rejected: %w", err)
+		// Preserve the file so the operator does not lose work on a
+		// syntax slip — F3 review finding on PR #49. Caller prints
+		// the recovery hint with tmpPath.
+		return nil, tmpPath, fmt.Errorf("edited YAML rejected: %w", err)
 	}
-	return profile, nil
+	return profile, tmpPath, nil
 }
 
 // randomEditSuffix returns a hex-encoded random string used as the
@@ -395,8 +449,23 @@ func sortStrings(s []string) {
 // profile YAML to w. Produces no diff (and empty output body beyond
 // the header) when the two are byte-identical — the AC treats a no-op
 // edit as a legitimate outcome.
-func renderEditDryRun(w io.Writer, name string, originalYAML []byte, edited *config.Profile) error {
-	editedYAML, err := config.MarshalProfile(edited)
+//
+// F2 (PR#49 review): both sides of the diff are re-marshalled from
+// profile copies whose core.api_key has been passed through redactValue
+// first, so a --dry-run cannot leak a plaintext key to stdout / a
+// shell log. The on-disk profiles are unaffected — this redaction only
+// applies to the dry-run rendering path. A future story may wire
+// --reveal through this surface.
+func renderEditDryRun(w io.Writer, name string, original, edited *config.Profile) error {
+	originalRedacted := original.Clone()
+	originalRedacted.Core.APIKey = redactValue(originalRedacted.Core.APIKey)
+	originalYAML, err := config.MarshalProfile(originalRedacted)
+	if err != nil {
+		return fmt.Errorf("marshal original profile: %w", err)
+	}
+	editedRedacted := edited.Clone()
+	editedRedacted.Core.APIKey = redactValue(editedRedacted.Core.APIKey)
+	editedYAML, err := config.MarshalProfile(editedRedacted)
 	if err != nil {
 		return fmt.Errorf("marshal edited profile: %w", err)
 	}

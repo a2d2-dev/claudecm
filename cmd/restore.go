@@ -200,7 +200,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 
 	// Restore path (either --latest or --id).
-	plans, sources, err := planRestore(resv, toolID, toolArg, owned)
+	plans, sources, skipped, err := planRestore(resv, toolID, toolArg, owned)
 	if err != nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 	}
 
 	if restoreDryRunFlag {
-		return renderRestoreDryRun(cmd.OutOrStdout(), format, toolArg, sources)
+		return renderRestoreDryRun(cmd.OutOrStdout(), format, toolArg, sources, skipped)
 	}
 
 	// Interactive confirm unless --yes. Non-interactive session without
@@ -218,7 +218,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		if !isTerminal(os.Stdin) {
 			return fmt.Errorf("non-interactive session: pass --yes to confirm the restore or --dry-run to preview")
 		}
-		renderRestoreConfirmSummary(cmd.OutOrStdout(), toolArg, sources)
+		renderRestoreConfirmSummary(cmd.OutOrStdout(), toolArg, sources, skipped)
 		ok, promptErr := promptConfirm(cmd.OutOrStdout(), os.Stdin, "Apply the above restore?")
 		if promptErr != nil {
 			return fmt.Errorf("read confirmation: %w", promptErr)
@@ -269,7 +269,7 @@ func runRestore(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return renderRestoreSuccess(cmd.OutOrStdout(), format, toolArg, report, sources)
+	return renderRestoreSuccess(cmd.OutOrStdout(), format, toolArg, report, sources, skipped)
 }
 
 // parseRestoreOutput validates and normalises the --output flag.
@@ -323,9 +323,14 @@ func runRestoreList(w io.Writer, format restoreOutputFormat, resv *storage.Resol
 			})
 		}
 	}
-	// Newest first across ALL owned files. BackupPath sorts
-	// chronologically thanks to the fixed-width timestamp suffix.
-	sort.Slice(entries, func(i, j int) bool { return entries[i].BackupPath > entries[j].BackupPath })
+	// Newest first across ALL owned files. Sort by the ISO-8601
+	// Timestamp string — it is fixed-width so lexicographic and
+	// chronological order agree, and the timestamp field is independent
+	// of the basename prefix. Sorting by BackupPath would let the
+	// basename dominate the ordering (e.g. "auth.json.bak.*" always
+	// sorting after "config.toml.bak.*"), which is the F1 review
+	// finding.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp > entries[j].Timestamp })
 
 	if format == restoreOutputJSON {
 		return writeRestoreJSON(w, jsonRestoreList{
@@ -371,39 +376,50 @@ type restoreSource struct {
 	CurrentHas bool
 }
 
+// restoreSkipped records an owned file that --latest could not restore
+// because no backups exist for it. Surfaced to text output as a warning
+// line and to JSON output under a "skipped" array so operators do not
+// misread partial restores as full ones (F5 review finding).
+type restoreSkipped struct {
+	OwnedFile string `json:"file"`
+	Reason    string `json:"reason"`
+}
+
 // planRestore resolves the restore intent into a slice of WritePlans
 // + a parallel slice of restoreSource metadata used by the renderers.
 // For --latest: one WritePlan per owned file that has at least one
 // backup. For --id: exactly one WritePlan, matching whichever owned
 // file's backup dir contains the id.
-func planRestore(resv *storage.Resolver, toolID adapter.ToolID, toolArg string, owned adapter.OwnedFiles) ([]writepath.WritePlan, []restoreSource, error) {
+func planRestore(resv *storage.Resolver, toolID adapter.ToolID, toolArg string, owned adapter.OwnedFiles) ([]writepath.WritePlan, []restoreSource, []restoreSkipped, error) {
 	var plans []writepath.WritePlan
 	var sources []restoreSource
+	var skipped []restoreSkipped
 
 	if restoreLatestFlag {
 		for _, of := range owned {
 			basename := filepath.Base(of.Path)
 			recs, err := storage.ListBackups(resv, string(toolID), basename)
 			if err != nil {
-				return nil, nil, fmt.Errorf("list backups for %s: %w", of.Path, err)
+				return nil, nil, nil, fmt.Errorf("list backups for %s: %w", of.Path, err)
 			}
 			if len(recs) == 0 {
 				// A tool with multiple owned files (Codex) may have
-				// backups for only one. Skip the ones with no backups
-				// rather than fail — a partial restore is still a
-				// legitimate outcome, and the summary calls out what
-				// was and was not restored.
+				// backups for only one. Record the skip so runRestore
+				// can surface a warning line to the operator — silent
+				// skips let partial restores masquerade as full ones
+				// (F5 review finding).
+				skipped = append(skipped, restoreSkipped{OwnedFile: of.Path, Reason: "no backups"})
 				continue
 			}
 			latest := recs[0]
 			plan, src, err := buildRestorePlan(resv, toolID, of, latest)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			plans = append(plans, plan)
 			sources = append(sources, src)
 		}
-		return plans, sources, nil
+		return plans, sources, skipped, nil
 	}
 
 	// --id path. Iterate owned files, look for a backup filename that
@@ -412,7 +428,7 @@ func planRestore(resv *storage.Resolver, toolID adapter.ToolID, toolArg string, 
 	// ambiguous.
 	id := strings.TrimSpace(restoreIDFlag)
 	if id == "" {
-		return nil, nil, fmt.Errorf("--id is empty")
+		return nil, nil, nil, fmt.Errorf("--id is empty")
 	}
 	type match struct {
 		of  adapter.OwnedFile
@@ -423,7 +439,7 @@ func planRestore(resv *storage.Resolver, toolID adapter.ToolID, toolArg string, 
 		basename := filepath.Base(of.Path)
 		recs, err := storage.ListBackups(resv, string(toolID), basename)
 		if err != nil {
-			return nil, nil, fmt.Errorf("list backups for %s: %w", of.Path, err)
+			return nil, nil, nil, fmt.Errorf("list backups for %s: %w", of.Path, err)
 		}
 		for _, rec := range recs {
 			bn := filepath.Base(rec.BackupPath)
@@ -434,20 +450,20 @@ func planRestore(resv *storage.Resolver, toolID adapter.ToolID, toolArg string, 
 	}
 	switch len(matches) {
 	case 0:
-		return nil, nil, fmt.Errorf("no backup matching --id %q found for tool %q", id, toolArg)
+		return nil, nil, nil, fmt.Errorf("no backup matching --id %q found for tool %q", id, toolArg)
 	case 1:
 		plan, src, err := buildRestorePlan(resv, toolID, matches[0].of, matches[0].rec)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return []writepath.WritePlan{plan}, []restoreSource{src}, nil
+		return []writepath.WritePlan{plan}, []restoreSource{src}, nil, nil
 	default:
 		names := make([]string, 0, len(matches))
 		for _, m := range matches {
 			names = append(names, filepath.Base(m.rec.BackupPath))
 		}
 		sort.Strings(names)
-		return nil, nil, fmt.Errorf("--id %q matches multiple backups (%s); pass the full filename to disambiguate", id, strings.Join(names, ", "))
+		return nil, nil, nil, fmt.Errorf("--id %q matches multiple backups (%s); pass the full filename to disambiguate", id, strings.Join(names, ", "))
 	}
 }
 
@@ -501,18 +517,20 @@ func buildRestorePlan(resv *storage.Resolver, toolID adapter.ToolID, of adapter.
 // the size + SHA256 fingerprint of both current and backup states so
 // the operator can confirm which snapshot is about to land without
 // exposing the payload.
-func renderRestoreDryRun(w io.Writer, format restoreOutputFormat, toolArg string, sources []restoreSource) error {
+func renderRestoreDryRun(w io.Writer, format restoreOutputFormat, toolArg string, sources []restoreSource, skipped []restoreSkipped) error {
 	if format == restoreOutputJSON {
 		return writeRestoreJSON(w, jsonRestoreDryRun{
 			Action:  "dry-run",
 			Tool:    toolArg,
 			Sources: sourcesToJSON(sources),
+			Skipped: skipped,
 		})
 	}
 	fmt.Fprintf(w, "--- dry-run: restore tool %q (not written) ---\n", toolArg)
 	for _, s := range sources {
 		renderRestoreSourceText(w, s)
 	}
+	renderRestoreSkippedText(w, skipped)
 	fmt.Fprintln(w, "--dry-run: nothing will be written.")
 	return nil
 }
@@ -520,10 +538,22 @@ func renderRestoreDryRun(w io.Writer, format restoreOutputFormat, toolArg string
 // renderRestoreConfirmSummary prints the human-readable pre-apply
 // summary before the y/N prompt fires. Same body as the dry-run
 // renderer but without the "--dry-run" framing.
-func renderRestoreConfirmSummary(w io.Writer, toolArg string, sources []restoreSource) {
+func renderRestoreConfirmSummary(w io.Writer, toolArg string, sources []restoreSource, skipped []restoreSkipped) {
 	fmt.Fprintf(w, "Restore plan for tool %q:\n", toolArg)
 	for _, s := range sources {
 		renderRestoreSourceText(w, s)
+	}
+	renderRestoreSkippedText(w, skipped)
+}
+
+// renderRestoreSkippedText prints one warning line per skipped owned
+// file so operators see the whole picture — a --latest against Codex
+// with backups for only one of the two owned files is a legitimate
+// partial restore, but silence would let the operator misread it as
+// a full one.
+func renderRestoreSkippedText(w io.Writer, skipped []restoreSkipped) {
+	for _, s := range skipped {
+		fmt.Fprintf(w, "Warning: no backups available for %s — skipped\n", s.OwnedFile)
 	}
 }
 
@@ -542,7 +572,7 @@ func renderRestoreSourceText(w io.Writer, s restoreSource) {
 // renderRestoreSuccess prints the post-commit summary. Backup paths of
 // the pre-restore state (FR-5) are surfaced so the operator can undo
 // the restore by feeding those back to a subsequent `restore --id`.
-func renderRestoreSuccess(w io.Writer, format restoreOutputFormat, toolArg string, report commit.CommitReport, sources []restoreSource) error {
+func renderRestoreSuccess(w io.Writer, format restoreOutputFormat, toolArg string, report commit.CommitReport, sources []restoreSource, skipped []restoreSkipped) error {
 	committed := 0
 	newBackups := []string{}
 	for _, pf := range report.PerFile {
@@ -560,6 +590,7 @@ func renderRestoreSuccess(w io.Writer, format restoreOutputFormat, toolArg strin
 			Committed:  committed,
 			NewBackups: newBackups,
 			Sources:    sourcesToJSON(sources),
+			Skipped:    skipped,
 		})
 	}
 	fmt.Fprintf(w, "Restored %d file(s) for tool %q.\n", committed, toolArg)
@@ -576,6 +607,9 @@ func renderRestoreSuccess(w io.Writer, format restoreOutputFormat, toolArg strin
 			fmt.Fprintf(w, "  untouched %s (already at backup bytes)\n", pf.Target)
 		}
 	}
+	// Warn about owned files with no backups to restore from — these
+	// were silently skipped before F5.
+	renderRestoreSkippedText(w, skipped)
 	return nil
 }
 
@@ -655,6 +689,7 @@ type jsonRestoreDryRun struct {
 	Action  string              `json:"action"`
 	Tool    string              `json:"tool"`
 	Sources []jsonRestoreSource `json:"sources"`
+	Skipped []restoreSkipped    `json:"skipped,omitempty"`
 }
 
 type jsonRestoreSuccess struct {
@@ -663,6 +698,7 @@ type jsonRestoreSuccess struct {
 	Committed  int                 `json:"committed"`
 	NewBackups []string            `json:"new_backups,omitempty"`
 	Sources    []jsonRestoreSource `json:"sources"`
+	Skipped    []restoreSkipped    `json:"skipped,omitempty"`
 }
 
 type jsonRestorePartial struct {

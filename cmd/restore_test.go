@@ -678,6 +678,154 @@ func TestRestore_UntouchedWhenBackupMatchesCurrent(t *testing.T) {
 	}
 }
 
+// TestRestore_ListNewestFirstAcrossFiles exercises the F1 review
+// finding: when --list enumerates backups spanning two different owned
+// files (Codex's auth.json + config.toml), the ordering must be by
+// TIMESTAMP not by BackupPath — otherwise the basename dominates the
+// sort and one file's older backups render as if they were the newer
+// ones. Seed alternating timestamps and assert strict chronological
+// (newest-first) order across both files.
+func TestRestore_ListNewestFirstAcrossFiles(t *testing.T) {
+	h := newRestoreHarness(t)
+	auth := codexadapter.AuthPath(h.resv)
+	config := codexadapter.ConfigPath(h.resv)
+
+	// Alternating writes so each backup captures a distinct timestamp.
+	// The sleep gaps guarantee the backup timestamp suffixes differ at
+	// nanosecond resolution — good enough for the fixed-width lexicographic
+	// sort to produce a well-defined order.
+	h.seedFile(auth, []byte(`{"OPENAI_API_KEY":"sk-auth-01"}`))
+	authFirst := h.backupNow(adapter.ToolCodex, auth)
+	time.Sleep(2 * time.Millisecond)
+
+	h.seedFile(config, []byte("model = \"config-01\"\n"))
+	configFirst := h.backupNow(adapter.ToolCodex, config)
+	time.Sleep(2 * time.Millisecond)
+
+	h.seedFile(auth, []byte(`{"OPENAI_API_KEY":"sk-auth-02"}`))
+	authSecond := h.backupNow(adapter.ToolCodex, auth)
+	time.Sleep(2 * time.Millisecond)
+
+	h.seedFile(config, []byte("model = \"config-02\"\n"))
+	configSecond := h.backupNow(adapter.ToolCodex, config)
+
+	restoreToolFlag = "codex"
+	restoreListFlag = true
+	stdout, _, err := runRestoreInner(t)
+	if err != nil {
+		t.Fatalf("runRestore --list err=%v", err)
+	}
+
+	// All four backup paths must appear.
+	for _, p := range []string{authFirst.BackupPath, authSecond.BackupPath, configFirst.BackupPath, configSecond.BackupPath} {
+		if !strings.Contains(stdout, p) {
+			t.Errorf("stdout missing backup path %q:\n%s", p, stdout)
+		}
+	}
+
+	// Chronological order (newest first): configSecond > authSecond >
+	// configFirst > authFirst.
+	order := []string{configSecond.BackupPath, authSecond.BackupPath, configFirst.BackupPath, authFirst.BackupPath}
+	prev := -1
+	for _, p := range order {
+		idx := strings.Index(stdout, p)
+		if idx < 0 {
+			t.Fatalf("path %q not present in stdout:\n%s", p, stdout)
+		}
+		if idx <= prev {
+			t.Errorf("backups not newest-first: %q appeared at index %d, expected after previous index %d\nfull stdout:\n%s",
+				p, idx, prev, stdout)
+		}
+		prev = idx
+	}
+}
+
+// TestRestore_LatestReportsSkippedFilesWithoutBackups exercises the F5
+// review finding: --latest on a multi-file tool must surface a warning
+// line for each owned file that has no backups to restore from, rather
+// than silently dropping them. Seed backups for auth.json only, then
+// verify the text output warns about config.toml and the file itself
+// remains unwritten.
+func TestRestore_LatestReportsSkippedFilesWithoutBackups(t *testing.T) {
+	h := newRestoreHarness(t)
+	auth := codexadapter.AuthPath(h.resv)
+	config := codexadapter.ConfigPath(h.resv)
+
+	authOriginal := []byte(`{"OPENAI_API_KEY":"sk-auth-orig"}`)
+	h.seedFile(auth, authOriginal)
+	h.backupNow(adapter.ToolCodex, auth)
+	// Seed config on disk but NEVER back it up.
+	configCurrent := []byte("model = \"config-current\"\n")
+	h.seedFile(config, configCurrent)
+	// Overwrite auth so restore has bytes to change.
+	h.seedFile(auth, []byte(`{"OPENAI_API_KEY":"sk-auth-changed"}`))
+
+	restoreToolFlag = "codex"
+	restoreLatestFlag = true
+	restoreYesFlag = true
+	stdout, _, err := runRestoreInner(t)
+	if err != nil {
+		t.Fatalf("runRestore --latest err=%v", err)
+	}
+	if !strings.Contains(stdout, "Restored 1 file") {
+		t.Errorf("stdout missing 1-file success line:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "Warning: no backups available for "+config) {
+		t.Errorf("stdout missing skipped-file warning:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "skipped") {
+		t.Errorf("stdout missing 'skipped' marker:\n%s", stdout)
+	}
+	// auth.json restored, config.toml untouched.
+	gotAuth, _ := os.ReadFile(auth)
+	if !bytes.Equal(gotAuth, authOriginal) {
+		t.Errorf("auth.json not restored:\ngot=%s\nwant=%s", gotAuth, authOriginal)
+	}
+	gotConfig, _ := os.ReadFile(config)
+	if !bytes.Equal(gotConfig, configCurrent) {
+		t.Errorf("config.toml unexpectedly mutated:\ngot=%s\nwant=%s", gotConfig, configCurrent)
+	}
+}
+
+// TestRestore_LatestReportsSkippedJSON verifies the JSON view of the F5
+// warning: a "skipped" array carrying the owned-file path and the
+// "no backups" reason so machine consumers can distinguish partial
+// from full restores.
+func TestRestore_LatestReportsSkippedJSON(t *testing.T) {
+	h := newRestoreHarness(t)
+	auth := codexadapter.AuthPath(h.resv)
+	config := codexadapter.ConfigPath(h.resv)
+	h.seedFile(auth, []byte(`{"OPENAI_API_KEY":"sk-auth-json"}`))
+	h.backupNow(adapter.ToolCodex, auth)
+	h.seedFile(config, []byte("model = \"c\"\n"))
+	h.seedFile(auth, []byte(`{"OPENAI_API_KEY":"sk-auth-json-changed"}`))
+
+	restoreToolFlag = "codex"
+	restoreLatestFlag = true
+	restoreYesFlag = true
+	restoreOutputFlag = "json"
+	stdout, _, err := runRestoreInner(t)
+	if err != nil {
+		t.Fatalf("runRestore --latest json err=%v", err)
+	}
+	var body jsonRestoreSuccess
+	if err := json.Unmarshal([]byte(stdout), &body); err != nil {
+		t.Fatalf("json parse: %v\n%s", err, stdout)
+	}
+	if body.Committed != 1 {
+		t.Errorf("Committed=%d; want 1", body.Committed)
+	}
+	if len(body.Skipped) != 1 {
+		t.Fatalf("Skipped len=%d; want 1: %+v", len(body.Skipped), body.Skipped)
+	}
+	if body.Skipped[0].OwnedFile != config {
+		t.Errorf("Skipped[0].OwnedFile=%q; want %q", body.Skipped[0].OwnedFile, config)
+	}
+	if body.Skipped[0].Reason != "no backups" {
+		t.Errorf("Skipped[0].Reason=%q; want 'no backups'", body.Skipped[0].Reason)
+	}
+}
+
 func TestRestore_SuccessJSON(t *testing.T) {
 	h := newRestoreHarness(t)
 	settings := claudecodeadapter.SettingsPath(h.resv)

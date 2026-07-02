@@ -491,6 +491,172 @@ func TestEdit_SetEnvVarInvalid(t *testing.T) {
 	}
 }
 
+// TestEdit_DryRunRedactsAPIKey exercises the F2 review finding: the
+// dry-run diff MUST NOT contain the plaintext api_key. We seed a
+// distinctive plaintext key, apply an unrelated model change via --set,
+// then assert that neither side of the unified diff leaks the key —
+// only the redacted first4***last4 form appears.
+func TestEdit_DryRunRedactsAPIKey(t *testing.T) {
+	h := newEditHarness(t)
+	// The key is 21 chars — long enough that redactValue's first4***last4
+	// shape fires ("sk-p***BBBB") instead of the "***"-only short form.
+	plaintextKey := "sk-plaintext-AAAABBBB"
+	h.seedProfile("work", plaintextKey, "https://api.example.com", "opus")
+
+	// Any dry-run edit will do; use a --set that leaves api_key intact
+	// so both sides of the diff still carry the sensitive field.
+	editSetFlag = []string{"core.model=new-model"}
+	editDryRunFlag = true
+	stdout, _, err := runEditInner(t, "work")
+	if err != nil {
+		t.Fatalf("runEdit --dry-run err=%v", err)
+	}
+	if strings.Contains(stdout, plaintextKey) {
+		t.Errorf("dry-run leaked plaintext api_key:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "***") {
+		t.Errorf("dry-run missing redaction marker '***':\n%s", stdout)
+	}
+}
+
+// TestEdit_DryRunRedactsAPIKeyOnKeyChange also covers the case where
+// the --set flag rewrites core.api_key itself. Both the "before" plaintext
+// and the "after" plaintext must be absent from the dry-run diff.
+func TestEdit_DryRunRedactsAPIKeyOnKeyChange(t *testing.T) {
+	h := newEditHarness(t)
+	oldKey := "sk-oldplain-AAAABBBB"
+	newKey := "sk-plaintext-AAAABBBB"
+	h.seedProfile("work", oldKey, "https://api.example.com", "opus")
+
+	editSetFlag = []string{"core.api_key=" + newKey}
+	editDryRunFlag = true
+	stdout, _, err := runEditInner(t, "work")
+	if err != nil {
+		t.Fatalf("runEdit --dry-run err=%v", err)
+	}
+	if strings.Contains(stdout, newKey) {
+		t.Errorf("dry-run leaked new plaintext api_key:\n%s", stdout)
+	}
+	if strings.Contains(stdout, oldKey) {
+		t.Errorf("dry-run leaked old plaintext api_key:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "***") {
+		t.Errorf("dry-run missing redaction marker '***':\n%s", stdout)
+	}
+}
+
+// TestEdit_ParseFailurePreservesTempFile exercises the F3 review
+// finding: on ParseProfile rejection, the tmp file MUST remain on disk
+// with the operator's edits so they can retry manually. The path is
+// printed to stderr so the operator does not have to hunt for it.
+func TestEdit_ParseFailurePreservesTempFile(t *testing.T) {
+	h := newEditHarness(t)
+	h.seedProfile("work", "sk-preserve-test-1234", "https://api.example.com", "opus")
+
+	malformed := []byte("this: is: not: valid: yaml: [\nunterminated\n")
+	restore := SetEditorRunnerForTest(func(path string) error {
+		return os.WriteFile(path, malformed, 0o600)
+	})
+	t.Cleanup(restore)
+
+	_, stderr, err := runEditInner(t, "work")
+	if err == nil {
+		t.Fatal("expected error on parse rejection")
+	}
+	if !strings.Contains(stderr, "preserved at") {
+		t.Errorf("stderr missing preservation hint:\n%s", stderr)
+	}
+	// Extract the reported path from stderr and verify it exists with the
+	// operator's malformed bytes intact.
+	reportedPath := extractPreservedPath(stderr)
+	if reportedPath == "" {
+		t.Fatalf("could not extract preserved path from stderr:\n%s", stderr)
+	}
+	body, readErr := os.ReadFile(reportedPath)
+	if readErr != nil {
+		t.Fatalf("preserved tmp file gone: %v (path=%q)", readErr, reportedPath)
+	}
+	if !bytes.Equal(body, malformed) {
+		t.Errorf("preserved tmp file body drifted:\ngot=%q\nwant=%q", body, malformed)
+	}
+	// Path lives under ~/.claudecm/tmp/ so it does not litter the
+	// operator's cwd.
+	if !strings.HasPrefix(reportedPath, h.home) {
+		t.Errorf("preserved path outside HOME: %q", reportedPath)
+	}
+}
+
+// TestEdit_SchemaDriftPreservesTempFile: schema_version drift is the
+// second refusal that F3 requires the tmp file to survive. ParseProfile
+// itself rejects schema>Current, so the "drift" path exercised here is
+// the runEdit-level guard against a schema downgrade — write
+// schema_version:0 which ParseProfile accepts via migration but leaves
+// edited.SchemaVersion != Current if it did not migrate; we simulate
+// drift by having the runEdit-level check fire.
+//
+// Note: ParseProfile normalises schema_version to current on parse for
+// legitimate migration paths. The runEdit check is defensive. To fire
+// it deterministically we synthesise a Profile whose SchemaVersion has
+// been forced off the current value AFTER parse. Simpler: pin
+// SchemaVersion to a future value the parser rejects and verify the
+// tmp file survives.
+func TestEdit_SchemaDriftPreservesTempFile(t *testing.T) {
+	h := newEditHarness(t)
+	h.seedProfile("work", "sk-drift-test-1234", "https://api.example.com", "opus")
+
+	// ParseProfile rejects schema_version>current, so the rejection
+	// path is technically a ParseProfile failure — same F3 preservation
+	// contract applies.
+	restore := SetEditorRunnerForTest(func(path string) error {
+		body := []byte(`schema_version: 99
+name: work
+created_at: 2026-01-01T00:00:00Z
+updated_at: 2026-01-01T00:00:00Z
+core:
+  base_url: https://api.example.com
+  api_key: sk-drift-test-1234
+  model: opus
+`)
+		return os.WriteFile(path, body, 0o600)
+	})
+	t.Cleanup(restore)
+
+	_, stderr, err := runEditInner(t, "work")
+	if err == nil {
+		t.Fatal("expected schema-drift error")
+	}
+	if !strings.Contains(stderr, "preserved at") {
+		t.Errorf("stderr missing preservation hint on schema drift:\n%s", stderr)
+	}
+	reportedPath := extractPreservedPath(stderr)
+	if reportedPath == "" {
+		t.Fatalf("could not extract preserved path:\n%s", stderr)
+	}
+	if _, err := os.Stat(reportedPath); err != nil {
+		t.Errorf("preserved tmp file missing after schema drift: %v", err)
+	}
+}
+
+// extractPreservedPath pulls the "<path>;" segment out of the preservation
+// hint. The hint format is:
+//
+//	Your edits are preserved at <path>; re-run edit ...
+//
+// so we look for "preserved at " and slice to the next ';'.
+func extractPreservedPath(stderr string) string {
+	const marker = "preserved at "
+	i := strings.Index(stderr, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := stderr[i+len(marker):]
+	j := strings.IndexByte(rest, ';')
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
 // TestEdit_SetCodexRawEmptyKey: tools.codex.raw. with no key part → error.
 func TestEdit_SetCodexRawEmptyKey(t *testing.T) {
 	h := newEditHarness(t)
