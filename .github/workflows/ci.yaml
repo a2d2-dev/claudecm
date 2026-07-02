@@ -63,6 +63,14 @@ jobs:
     - name: Run tests
       run: go test -v -race -coverprofile=coverage.out ./...
 
+    - name: Run test-tagged suite (E8-S3/S4/S5 e2e + storage hooks)
+      # Executes every test guarded by `//go:build test` — the internal/e2e
+      # round-trip / concurrent-edit / two-phase-rollback matrix plus the
+      # storage / envextract / writepath test hooks. Kept as a separate
+      # step so a failure here signals a test-tag surface regression
+      # distinct from the untagged pipeline.
+      run: go test -count=1 -race -tags=test ./...
+
     - name: Enforce per-package coverage floors (E8-S2)
       # Gates internal/writepath, internal/commit, internal/resolver at
       # >=80% statement coverage per PRD NFR-T1 / SM-3 and Architecture
