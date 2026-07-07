@@ -968,7 +968,7 @@ func TestSwitch_UpdateStateOnSuccessRecordsCommittedOnly(t *testing.T) {
 			},
 		},
 	}
-	if err := updateStateOnSuccess(h.resv, h.store, "prod", &report); err != nil {
+	if err := updateStateOnSuccess(h.resv, "prod", &report); err != nil {
 		t.Fatalf("updateStateOnSuccess: %v", err)
 	}
 	state, err := h.store.LoadState()

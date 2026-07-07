@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"gopkg.in/yaml.v3"
@@ -47,7 +49,17 @@ type Storage interface {
 
 	// LoadState reads the state file
 	LoadState() (*config.State, error)
+
+	// UpdateState performs a locked state read-modify-write.
+	UpdateState(mutate func(*config.State) (bool, error)) error
 }
+
+const stateLockTimeout = 5 * time.Second
+
+var (
+	stateLockRelTarget = filepath.Join(ConfigDirName, StateFileName)
+	stateMu            sync.Mutex
+)
 
 // FileStorage implements Storage using the local filesystem. It routes every
 // path through the injected *Resolver — the only source of HOME truth.
@@ -236,6 +248,41 @@ func (fs *FileStorage) SaveState(state *config.State) error {
 	}
 
 	return nil
+}
+
+// UpdateState runs mutate against state.yaml and, when mutate reports a change,
+// persists the result while holding the state lock across the full
+// load → mutate → save cycle. The in-process mutex covers Linux flock's
+// per-process semantics so sibling goroutines cannot open competing
+// same-process flock descriptors for state.yaml.
+func (fs *FileStorage) UpdateState(mutate func(*config.State) (bool, error)) error {
+	if fs == nil || fs.r == nil {
+		return errors.New("update state: storage resolver is nil")
+	}
+	if mutate == nil {
+		return errors.New("update state: mutate is nil")
+	}
+
+	stateMu.Lock()
+	defer stateMu.Unlock()
+
+	return WithLock(fs.r, stateLockRelTarget, LockOptions{Timeout: stateLockTimeout}, func() error {
+		state, err := fs.LoadState()
+		if err != nil {
+			return fmt.Errorf("load state: %w", err)
+		}
+		changed, err := mutate(state)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if err := fs.SaveState(state); err != nil {
+			return fmt.Errorf("save state: %w", err)
+		}
+		return nil
+	})
 }
 
 // LoadState reads the state file

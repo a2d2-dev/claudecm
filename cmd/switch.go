@@ -216,7 +216,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 	// profile pointer moves — a no-op switch is a legitimate outcome
 	// when the profile matches the current on-disk intent.
 	if len(plans) == 0 {
-		if err := updateStateOnSuccess(resv, store, profileName, nil); err != nil {
+		if err := updateStateOnSuccess(resv, profileName, nil); err != nil {
 			return fmt.Errorf("no plans to commit but state update failed: %w", err)
 		}
 		return renderNoOp(cmd.OutOrStdout(), format, profileName, planErrors)
@@ -308,7 +308,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("commit: %w", commitErr)
 	}
 
-	if err := updateStateOnSuccess(resv, store, profileName, &report); err != nil {
+	if err := updateStateOnSuccess(resv, profileName, &report); err != nil {
 		return fmt.Errorf("commit succeeded but state update failed: %w", err)
 	}
 
@@ -447,33 +447,25 @@ func isNoConfigErr(err error) bool {
 // report != nil, records the (path, sha256, appliedAt) tuple for every
 // committed file so external-drift detection has a fresh anchor. On
 // the empty-plan path (report == nil) only the pointer moves.
-func updateStateOnSuccess(r *storage.Resolver, store *storage.FileStorage, profileName string, report *commit.CommitReport) error {
-	state, err := store.LoadState()
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-	state.SetCurrentProfile(profileName)
-	if err := store.SaveState(state); err != nil {
-		return fmt.Errorf("save state: %w", err)
-	}
-	if report == nil {
-		return nil
-	}
-	for _, pf := range report.PerFile {
-		if pf.Status != commit.StatusCommitted {
-			continue
+func updateStateOnSuccess(r *storage.Resolver, profileName string, report *commit.CommitReport) error {
+	return stateio.UpdateState(r, func(state *config.State) (bool, error) {
+		state.SetCurrentProfile(profileName)
+		if report == nil {
+			return true, nil
 		}
-		if err := stateio.RecordApplied(
-			r,
-			config.ToolID(pf.Report.Tool),
-			pf.Target,
-			pf.Report.PostFingerprint.SHA256,
-			pf.Report.AppliedAt,
-		); err != nil {
-			return fmt.Errorf("record applied for %s: %w", pf.Target, err)
+		for _, pf := range report.PerFile {
+			if pf.Status != commit.StatusCommitted {
+				continue
+			}
+			state.RecordApplied(
+				config.ToolID(pf.Report.Tool),
+				pf.Target,
+				pf.Report.PostFingerprint.SHA256,
+				pf.Report.AppliedAt,
+			)
 		}
-	}
-	return nil
+		return true, nil
+	})
 }
 
 // promptConfirm prints a y/N question and reads a single line from in.

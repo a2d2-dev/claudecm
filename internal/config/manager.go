@@ -14,6 +14,7 @@ type Storage interface {
 	ProfileExists(name string) (bool, error)
 	SaveState(state *State) error
 	LoadState() (*State, error)
+	UpdateState(mutate func(*State) (bool, error)) error
 }
 
 // Manager handles all configuration management operations
@@ -138,18 +139,14 @@ func (m *Manager) DeleteProfile(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if this is the active profile
-	state, err := m.storage.LoadState()
-	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
-	}
-
-	if state.CurrentProfile == name {
-		// Clear active profile if deleting it
-		state.CurrentProfile = ""
-		if err := m.storage.SaveState(state); err != nil {
-			return fmt.Errorf("failed to update state: %w", err)
+	if err := m.storage.UpdateState(func(state *State) (bool, error) {
+		if state.CurrentProfile != name {
+			return false, nil
 		}
+		state.CurrentProfile = ""
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("failed to update state: %w", err)
 	}
 
 	// Delete profile
@@ -178,17 +175,10 @@ func (m *Manager) SetActive(name string) error {
 		return fmt.Errorf("profile %q not found", name)
 	}
 
-	// Load current state
-	state, err := m.storage.LoadState()
-	if err != nil {
-		return fmt.Errorf("failed to load state: %w", err)
-	}
-
-	// Update active profile
-	state.SetCurrentProfile(name)
-
-	// Save state
-	if err := m.storage.SaveState(state); err != nil {
+	if err := m.storage.UpdateState(func(state *State) (bool, error) {
+		state.SetCurrentProfile(name)
+		return true, nil
+	}); err != nil {
 		return fmt.Errorf("failed to save state: %w", err)
 	}
 

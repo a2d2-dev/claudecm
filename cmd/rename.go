@@ -26,6 +26,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -143,16 +144,11 @@ func runRename(cmd *cobra.Command, args []string) error {
 // active" branch — no state I/O has to fire when the pointer already
 // pointed elsewhere.
 func maybeUpdateStateAfterRename(store *storage.FileStorage, oldName, newName string) error {
-	state, err := store.LoadState()
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-	if state.CurrentProfile != oldName {
-		return nil
-	}
-	state.SetCurrentProfile(newName)
-	if err := store.SaveState(state); err != nil {
-		return fmt.Errorf("save state after rename: %w", err)
-	}
-	return nil
+	return store.UpdateState(func(state *config.State) (bool, error) {
+		if state.CurrentProfile != oldName {
+			return false, nil
+		}
+		state.SetCurrentProfile(newName)
+		return true, nil
+	})
 }
