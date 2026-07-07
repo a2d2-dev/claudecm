@@ -24,10 +24,11 @@ import (
 // ~/.codex/config.toml (Architecture §3.1, PRD §4.7).
 //
 // Concrete flat keys matching writepath.Flatten output. v1 supports
-// 'openai' and 'anthropic' provider entries; other custom provider
-// names (e.g. 'my-relay') are considered non-owned by claudecm and
-// preserved via FR-5 merge-preserve. Post-v1: dynamic provider
-// ownership.
+// 'openai' and 'anthropic' provider entries plus the closed v1.1
+// provider-preset names admitted by ADR-0002 (deepseek, glm,
+// moonshot, qwen). Other custom provider names (e.g. 'my-relay') are
+// considered non-owned by claudecm and preserved via FR-5
+// merge-preserve. No wildcard provider ownership.
 //
 // Kept in sorted order so:
 //   - The init() invariant check below stays a one-liner.
@@ -45,10 +46,26 @@ var OwnedKeysConfigTOML = []string{
 	"model_providers.anthropic.env_key",
 	"model_providers.anthropic.name",
 	"model_providers.anthropic.wire_api",
+	"model_providers.deepseek.base_url",
+	"model_providers.deepseek.env_key",
+	"model_providers.deepseek.name",
+	"model_providers.deepseek.wire_api",
+	"model_providers.glm.base_url",
+	"model_providers.glm.env_key",
+	"model_providers.glm.name",
+	"model_providers.glm.wire_api",
+	"model_providers.moonshot.base_url",
+	"model_providers.moonshot.env_key",
+	"model_providers.moonshot.name",
+	"model_providers.moonshot.wire_api",
 	"model_providers.openai.base_url",
 	"model_providers.openai.env_key",
 	"model_providers.openai.name",
 	"model_providers.openai.wire_api",
+	"model_providers.qwen.base_url",
+	"model_providers.qwen.env_key",
+	"model_providers.qwen.name",
+	"model_providers.qwen.wire_api",
 }
 
 // OwnedKeysAuthJSON is the frozen v1 owned-key allowlist for
