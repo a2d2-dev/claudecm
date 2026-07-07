@@ -15,6 +15,7 @@ builds:
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -30,6 +31,10 @@ archives:
       - claudecm
     formats:
       - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -41,6 +46,47 @@ archives:
 
 checksum:
   name_template: checksums.txt
+
+brews:
+  - name: claudecm
+    ids:
+      - claudecm
+    repository:
+      owner: a2d2-dev
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: a2d2-dev release bot
+      email: release-bot@a2d2.dev
+    commit_msg_template: "brew: update claudecm to {{ .Tag }}"
+    homepage: "https://github.com/a2d2-dev/claudecm"
+    description: "One-command switch between Claude Code and Codex CLI configurations."
+    license: MIT
+    skip_upload: auto
+    install: |
+      bin.install "claudecm"
+    test: |
+      system "#{bin}/claudecm", "version"
+      system "#{bin}/claudecm", "--help"
+
+scoops:
+  - name: claudecm
+    ids:
+      - claudecm
+    repository:
+      owner: a2d2-dev
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: a2d2-dev release bot
+      email: release-bot@a2d2.dev
+    commit_msg_template: "scoop: update claudecm to {{ .Tag }}"
+    homepage: "https://github.com/a2d2-dev/claudecm"
+    description: "One-command switch between Claude Code and Codex CLI configurations."
+    license: MIT
+    skip_upload: auto
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
