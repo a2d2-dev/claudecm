@@ -103,7 +103,13 @@ func (s interactiveSwitchSelector) SelectProfile(cmd *cobra.Command, resv *stora
 		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
 		return "", cmd.Help()
 	}
-	return "", noSwitchSelectionError{}
+	return tui.SelectProfile(context.Background(), resv, tui.Selector{
+		Terminal: s.Terminal,
+		Loader:   loadSwitchSelectorProfiles,
+		Stdin:    os.Stdin,
+		Stdout:   os.Stdout,
+		Writer:   cmd.OutOrStdout(),
+	})
 }
 
 // switchCmd is the cobra binding. The RunE closure wraps runSwitch so
@@ -380,9 +386,18 @@ func runBareSwitch(cmd *cobra.Command, selector switchProfileSelector) error {
 	name, err := selector.SelectProfile(cmd, resv, globalRevealActive(false))
 	if err != nil {
 		var cancel noSwitchSelectionError
-		if errors.As(err, &cancel) {
+		if errors.As(err, &cancel) || errors.Is(err, tui.ErrCanceled) {
 			if switchOutputFlag == "" || trimAndLower(switchOutputFlag) == string(switchOutputText) {
 				fmt.Fprintln(cmd.OutOrStdout(), "interactive switch canceled; no changes made.")
+			}
+			return nil
+		}
+		if errors.Is(err, tui.ErrAlreadyActive) {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				fmt.Fprintln(cmd.OutOrStdout(), "Selected profile is already active; no switch needed.")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "%q is already active; no switch needed.\n", name)
 			}
 			return nil
 		}
@@ -396,6 +411,18 @@ func runBareSwitch(cmd *cobra.Command, selector switchProfileSelector) error {
 		return nil
 	}
 	return runSwitch(cmd, []string{name})
+}
+
+func loadSwitchSelectorProfiles(resv *storage.Resolver) ([]*config.Profile, string, error) {
+	profiles, err := loadAllProfilesStrict(resv)
+	if err != nil {
+		return nil, "", err
+	}
+	active, err := readActiveName(resv)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read active profile: %w", err)
+	}
+	return profiles, active, nil
 }
 
 // parseSwitchOutput validates and normalises the --output flag.

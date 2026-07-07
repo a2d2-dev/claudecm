@@ -36,6 +36,7 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/presets"
 	"github.com/a2d2-dev/claudecm/internal/storage"
+	"github.com/a2d2-dev/claudecm/internal/tui"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
@@ -277,6 +278,36 @@ func TestSwitchBareTTYCancellationNoWrites(t *testing.T) {
 	}
 	if _, err := os.Stat(claudecodeadapter.SettingsPath(h.resv)); !os.IsNotExist(err) {
 		t.Fatalf("settings.json exists after cancellation; err=%v", err)
+	}
+}
+
+func TestSwitchBareTTYSelectingActiveNoWrites(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+	h.activate("prod")
+	defer SetIsTerminalForTest(func(*os.File) bool { return true })()
+
+	var out, errBuf bytes.Buffer
+	cmd := &cobra.Command{Use: "switch"}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	err := runBareSwitch(cmd, &fakeSwitchSelector{name: "prod", err: tui.ErrAlreadyActive})
+	stdout := out.String()
+	if err != nil {
+		t.Fatalf("active selection err=%v", err)
+	}
+	if !strings.Contains(stdout, `"prod" is already active; no switch needed.`) {
+		t.Fatalf("stdout missing already-active message:\n%s", stdout)
+	}
+	if _, err := os.Stat(claudecodeadapter.SettingsPath(h.resv)); !os.IsNotExist(err) {
+		t.Fatalf("settings.json exists after already-active selection; err=%v", err)
+	}
+	state, err := h.store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.CurrentProfile != "prod" {
+		t.Fatalf("state.CurrentProfile = %q; want prod", state.CurrentProfile)
 	}
 }
 
