@@ -47,7 +47,14 @@ type Storage interface {
 
 	// LoadState reads the state file
 	LoadState() (*config.State, error)
+
+	// UpdateState performs a locked state read-modify-write.
+	UpdateState(mutate func(*config.State) (bool, error)) error
 }
+
+var (
+	stateLockRelTarget = filepath.Join(ConfigDirName, StateFileName)
+)
 
 // FileStorage implements Storage using the local filesystem. It routes every
 // path through the injected *Resolver — the only source of HOME truth.
@@ -236,6 +243,36 @@ func (fs *FileStorage) SaveState(state *config.State) error {
 	}
 
 	return nil
+}
+
+// UpdateState runs mutate against state.yaml and, when mutate reports a change,
+// persists the result while holding the state lock across the full
+// load → mutate → save cycle.
+func (fs *FileStorage) UpdateState(mutate func(*config.State) (bool, error)) error {
+	if fs == nil || fs.r == nil {
+		return errors.New("update state: storage resolver is nil")
+	}
+	if mutate == nil {
+		return errors.New("update state: mutate is nil")
+	}
+
+	return WithLock(fs.r, stateLockRelTarget, LockOptions{}, func() error {
+		state, err := fs.LoadState()
+		if err != nil {
+			return fmt.Errorf("load state: %w", err)
+		}
+		changed, err := mutate(state)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		if err := fs.SaveState(state); err != nil {
+			return fmt.Errorf("save state: %w", err)
+		}
+		return nil
+	})
 }
 
 // LoadState reads the state file

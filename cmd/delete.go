@@ -28,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -128,16 +129,17 @@ func runDelete(cmd *cobra.Command, args []string) error {
 // name. Returns (true, nil) when the pointer was cleared, (false, nil)
 // otherwise. Any I/O error surfaces as-is.
 func maybeClearActivePointer(store *storage.FileStorage, name string) (bool, error) {
-	state, err := store.LoadState()
+	var cleared bool
+	err := store.UpdateState(func(state *config.State) (bool, error) {
+		if state.CurrentProfile != name {
+			return false, nil
+		}
+		state.CurrentProfile = ""
+		cleared = true
+		return true, nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("load state: %w", err)
+		return false, err
 	}
-	if state.CurrentProfile != name {
-		return false, nil
-	}
-	state.CurrentProfile = ""
-	if err := store.SaveState(state); err != nil {
-		return false, fmt.Errorf("save state after delete: %w", err)
-	}
-	return true, nil
+	return cleared, nil
 }

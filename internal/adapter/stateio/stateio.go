@@ -51,28 +51,12 @@ package stateio
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
-
-// stateLockTimeout is the flock timeout for the state.yaml
-// read-modify-write critical section. Kept short so a stuck adapter
-// surfaces as ErrLockTimeout instead of hanging Apply indefinitely.
-// The state-file write itself is a few KB of YAML; the practical hold
-// time is sub-millisecond, so 5 seconds is generous.
-const stateLockTimeout = 5 * time.Second
-
-// stateLockRelTarget is the HOME-relative path to state.yaml used as
-// the flock target. storage.Acquire refuses absolute paths. The literal
-// mirrors storage.ConfigDirName / storage.StateFileName; kept as a
-// package-level string so any future rename lands in one spot.
-var stateLockRelTarget = filepath.Join(storage.ConfigDirName, storage.StateFileName)
 
 // Sha256Hex returns the lowercase hex-encoded SHA-256 digest of data.
 // Kept in one place so every adapter that hashes a file for drift or
@@ -136,23 +120,16 @@ func LoadLastApplied(r *storage.Resolver, tool config.ToolID, filePath string) (
 // condition. Silently swallowing would leave the drift detector in a
 // permanent false-positive state after the next external edit.
 func RecordApplied(r *storage.Resolver, tool config.ToolID, filePath, sha256 string, appliedAt time.Time) error {
-	if r == nil {
-		return errors.New("stateio: RecordApplied: resolver is nil")
-	}
-	fs := storage.NewFileStorage(r)
-	return storage.WithLock(r, stateLockRelTarget, storage.LockOptions{Timeout: stateLockTimeout}, func() error {
-		state, err := fs.LoadState()
-		if err != nil {
-			return fmt.Errorf("stateio: load state: %w", err)
-		}
-		// LoadState returns config.NewState() on a missing file, so
-		// state is never nil when err is nil. No defensive guard here.
+	return UpdateState(r, func(state *config.State) (bool, error) {
 		state.RecordApplied(tool, filePath, sha256, appliedAt)
-		if err := fs.SaveState(state); err != nil {
-			return fmt.Errorf("stateio: save state: %w", err)
-		}
-		return nil
+		return true, nil
 	})
+}
+
+// UpdateState delegates to storage.FileStorage.UpdateState so every state.yaml
+// writer shares one locked read-modify-write implementation.
+func UpdateState(r *storage.Resolver, mutate func(*config.State) (bool, error)) error {
+	return storage.NewFileStorage(r).UpdateState(mutate)
 }
 
 // DriftForFile checks a single owned file for external drift. Returns

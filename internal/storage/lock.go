@@ -2,9 +2,8 @@ package storage
 
 // lock.go is the flock primitive that the FR-5 write-path (writepath.Apply)
 // and the FR-16 two-phase commit will call. This file is deliberately a pure
-// primitive: no SaveProfile/SaveState wiring, no adapter integration, no
-// package-level mutable state (coding-standards rule 12). Later stories under
-// E7 tie it into the write-path.
+// primitive: no SaveProfile/SaveState wiring and no adapter integration. Later
+// stories under E7 tie it into the write-path.
 //
 // Design choices (per docs/plan/stories/E1-S6.md and architecture §4 step 1):
 //
@@ -25,6 +24,14 @@ package storage
 //     via checkUnderHome on the sidecar path itself after creation. The
 //     second check catches an attacker-planted symlink at the sidecar path.
 //
+//   - Same-process callers are serialized through processLocks, the documented
+//     coding-standards rule-12 exception for this package. The registry is
+//     keyed by resolved sidecar path before flock acquisition because Linux
+//     flock semantics are per-process enough that sibling goroutines can
+//     otherwise acquire distinct descriptors for the same sidecar and enter the
+//     protected section together. The scope must be process-wide; per-instance
+//     state would not serialize goroutines holding different Resolver instances.
+//
 //   - The Resolver is required. Passing nil is refused with a clear error —
 //     symmetric with AtomicWrite / EnsureDir in atomic.go.
 
@@ -35,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -62,6 +70,11 @@ const lockRetryDelay = 25 * time.Millisecond
 // the resolved sidecar path.
 var ErrLockTimeout = errors.New("claudecm: lock acquisition timed out")
 
+// processLocks is intentionally process-local and keyed by resolved sidecar
+// path. It complements the filesystem flock; it does not replace the
+// cross-process lock.
+var processLocks sync.Map // map[string]chan struct{}
+
 // LockOptions carries the per-call knobs. Zero-value Timeout maps to
 // DefaultLockTimeout — see Acquire.
 type LockOptions struct {
@@ -75,9 +88,10 @@ type LockOptions struct {
 // process exits. Handle carries no package-level state; every field is
 // unexported so callers cannot manipulate the underlying fd out of band.
 type Handle struct {
-	fl       *flock.Flock
-	path     string
-	released bool
+	fl             *flock.Flock
+	processRelease func()
+	path           string
+	released       bool
 }
 
 // Acquire takes an exclusive advisory lock (flock LOCK_EX) on a sidecar
@@ -181,24 +195,50 @@ func Acquire(r *Resolver, target string, opts LockOptions) (*Handle, error) {
 		return nil, fmt.Errorf("lock acquire: sidecar %q: %w", sidecar, err)
 	}
 
+	processCtx := context.Background()
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		processCtx, cancel = context.WithTimeout(context.Background(), opts.Timeout)
+		defer cancel()
+	}
+	releaseProcessLock, err := acquireProcessLock(processCtx, sidecar)
+	if err != nil {
+		return nil, err
+	}
+
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultLockTimeout
 	}
-	fl := flock.New(sidecar)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	flockCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	locked, lockErr := fl.TryLockContext(ctx, lockRetryDelay)
+	fl := flock.New(sidecar)
+	locked, lockErr := fl.TryLockContext(flockCtx, lockRetryDelay)
 	if lockErr != nil {
+		_ = fl.Close()
+		releaseProcessLock()
 		if errors.Is(lockErr, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("%w: %s", ErrLockTimeout, sidecar)
 		}
 		return nil, fmt.Errorf("lock acquire: flock %q: %w", sidecar, lockErr)
 	}
 	if !locked {
+		_ = fl.Close()
+		releaseProcessLock()
 		return nil, fmt.Errorf("%w: %s", ErrLockTimeout, sidecar)
 	}
-	return &Handle{fl: fl, path: sidecar}, nil
+	return &Handle{fl: fl, processRelease: releaseProcessLock, path: sidecar}, nil
+}
+
+func acquireProcessLock(ctx context.Context, sidecar string) (func(), error) {
+	chAny, _ := processLocks.LoadOrStore(sidecar, make(chan struct{}, 1))
+	ch := chAny.(chan struct{})
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w: %s", ErrLockTimeout, sidecar)
+	}
 }
 
 // Path returns the resolved sidecar path this Handle owns. Exposed for
@@ -223,10 +263,16 @@ func (h *Handle) Release() error {
 	}
 	h.released = true
 	if h.fl == nil {
+		if h.processRelease != nil {
+			h.processRelease()
+		}
 		return nil
 	}
 	unlockErr := h.fl.Unlock()
 	closeErr := h.fl.Close()
+	if h.processRelease != nil {
+		h.processRelease()
+	}
 	// errors.Join is nil-safe: returns nil when both args are nil, and a
 	// single non-nil arg when only one errored. This ensures a closeErr is
 	// never silently dropped just because unlockErr fired first.
