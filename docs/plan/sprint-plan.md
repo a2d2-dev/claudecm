@@ -79,3 +79,41 @@
 ## BLOCKED at queue creation
 
 None. Every story above has a path to dev-ready once its `blockedBy` deps clear. Re-evaluate after each sprint.
+
+---
+
+## v1.1 queue
+
+> Source of truth for v1.1 scope: ADR-0002 (`docs/decisions/0002-v1_1-scope.md`). v1.1 stories must preserve the v1 write-path invariants unless ADR-0002 explicitly amends the scope.
+
+### v1.1 ordering rationale
+
+1. **E12 release/distribution stories land first.** v1.0.0 must be shippable and installable before new v1.1 features are promoted. The `v1.0.0` tag itself is owned by the separate release-engineering effort, but this queue documents the full release path.
+2. **E10 presets land before E11 fuzzy switch.** Presets improve profile creation and generate more realistic profile sets for selector testing. They do not require the fuzzy selector.
+3. **E11 fuzzy switch lands last.** It depends on the stable v1 switch pipeline and should be validated against the broader profile inventory created by v1 plus presets. It is terminal UX only; named and non-TTY switch behavior stays stable.
+
+### Numbered v1.1 implementation queue
+
+56. **E12-S1** — Version metadata and ldflags contract
+57. **E12-S2** — GoReleaser config plan
+58. **E12-S3** — GitHub release workflow and `v1.0.0` tag runbook
+59. **E12-S4** — Homebrew tap distribution plan
+60. **E12-S5** — Scoop manifest distribution plan
+61. **E10-S1** — Built-in provider preset catalog
+62. **E10-S2** — `cmd/add --preset` profile draft expansion
+63. **E10-S3** — Preset override, activation, and write-path invariants
+64. **E10-S4** — Preset docs, help text, and no-official-support boundary
+65. **E11-S1** — Interactive TTY detection and `switch` dispatch
+66. **E11-S2** — Fuzzy profile selector with active marker
+67. **E11-S3** — Selector preview with redacted effective context
+68. **E11-S4** — Selector handoff to existing switch pipeline
+
+### v1.1 parallelism notes
+
+- E12-S4 and E12-S5 can proceed in parallel after E12-S2/E12-S3 define artifact names, checksums, and release URLs.
+- E10-S4 can draft docs after E10-S1 fixes preset names and disclaimers, but final examples wait for E10-S2 behavior.
+- E11-S2 and E11-S3 can share selector fixtures after E11-S1 establishes TTY dispatch. E11-S4 waits for the selector and preview to stabilize.
+
+### BLOCKED for v1.1
+
+None. Deferrals from ADR-0002 (`doctor`, profile copy/merge, shell prompt integration, Gemini CLI adapter) are intentionally outside this queue.

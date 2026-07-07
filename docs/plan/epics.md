@@ -1,10 +1,10 @@
-# claudecm v1 — Epics
+# claudecm v1 / v1.1 — Epics
 
-> Authority chain: ADR-0001 (`docs/decisions/0001-direction-lock.md`) > PRD v1 (`docs/prd/prd-v1.md`) > Architecture (`docs/architecture.md`). If anything here drifts from those, those win and this file is the bug.
+> Authority chain: ADR-0002 (`docs/decisions/0002-v1_1-scope.md`) for v1.1 decisions; otherwise ADR-0001 (`docs/decisions/0001-direction-lock.md`) > PRD v1 (`docs/prd/prd-v1.md`) > Architecture (`docs/architecture.md`). If anything here drifts from those, those win and this file is the bug.
 
 This file is the high-level map of the v1 implementation. Each epic has a goal, acceptance criteria, and the list of story IDs it contains. Story-level detail (user story, AC, test plan, complexity, deps) lives in `docs/plan/stories/E#-S#.md`. Execution order lives in `docs/plan/sprint-plan.md`. Per-story dev-readiness gates live in `docs/plan/readiness-checklist.md`.
 
-No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cursor / Windsurf / IDE plugins, no AES / encryption claims, no project-scope Claude Code settings.
+No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cursor / Windsurf / IDE plugins, no AES / encryption claims, no project-scope Claude Code settings. ADR-0002 explicitly amends v1.1 for provider presets, one optional terminal-only fuzzy `switch` selector, and release/distribution planning.
 
 ---
 
@@ -154,6 +154,55 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 
 ---
 
+## E10. Provider Preset Templates
+
+**Goal.** Add `claudecm add --preset <name>` as a transparent template path for Anthropic-compatible provider profiles. Built-in presets include `moonshot`, `deepseek`, `glm`, and `qwen` at minimum. Presets pre-fill base URL, model, and provider fields; users supply only secrets; generated fields are displayed and overridable before save. Public docs and CLI copy state that presets are convenience templates and do not imply official provider support.
+
+**Acceptance criteria.**
+- A closed built-in preset catalog exists with at least `moonshot`, `deepseek`, `glm`, and `qwen`; each entry declares display name, provider key, base URL, default model, supported tool overlays, and expected secret field names.
+- `claudecm add --preset <name>` expands into the normal profile schema (`schema_version: 1`, core fields, sparse tool overlays) and reuses existing `add` validation, redaction, `--dry-run`, overwrite, and prompt behavior.
+- Secrets are never embedded in presets. Interactive and non-interactive flows collect or require secrets through existing `add` inputs only.
+- Generated preset fields are shown before save, can be overridden, and are visible in `--dry-run` output with secrets redacted by default.
+- Preset-backed activation, if requested, still routes through `internal/commit` and `internal/writepath`; no preset code writes Claude Code or Codex files directly.
+- Docs and help text explicitly say presets are convenience templates, not official-provider support, certification, endorsement, or compatibility guarantees.
+
+**Stories.** E10-S1, E10-S2, E10-S3, E10-S4.
+
+---
+
+## E11. Interactive Fuzzy Switch
+
+**Goal.** Make bare `claudecm switch` in an interactive TTY open a kubecm-style fuzzy profile selector with active marker and preview, while keeping `claudecm switch <name> --yes` script-stable and preserving existing non-TTY behavior.
+
+**Acceptance criteria.**
+- Bare `switch` opens the fuzzy selector only when stdin and stdout are interactive TTYs and no profile name argument is provided.
+- Non-TTY behavior is unchanged: bare `switch` in a pipe, redirected shell, CI, or cron exits as it does in v1 and never blocks on an interactive selector.
+- Named switching remains stable: `claudecm switch <name> --yes` performs the existing non-interactive path, and `switch <name>` keeps the existing confirmation semantics.
+- The selector lists profiles with a clear active marker, supports fuzzy filtering, preserves deterministic ordering before filtering, and lets the user cancel without side effects.
+- The preview shows enough redacted profile/effective context to distinguish choices, without revealing secrets unless the existing `--reveal` policy explicitly permits it.
+- Selecting a profile enters the same pre-apply diff, confirmation, commit, backup, rollback, and reporting path as named `switch`; the selector is terminal UX only, not a second activation engine or GUI.
+
+**Stories.** E11-S1, E11-S2, E11-S3, E11-S4.
+
+---
+
+## E12. Release & Distribution
+
+**Goal.** Plan the v1.0.0 and v1.1 distribution path: GoReleaser config, GitHub release workflow, version injection via ldflags, tag `v1.0.0`, then Homebrew tap and Scoop manifest. The actual `v1.0.0` tagging is owned by a separate release-engineering effort, but the stories document the full plan and acceptance surface.
+
+**Acceptance criteria.**
+- Version metadata is injected via ldflags and visible through `claudecm version`, including version, commit, date, and dirty/build metadata where available.
+- GoReleaser packaging plan covers supported OS/arch archives, checksums, SBOM/provenance decision, changelog generation, and dry-run validation.
+- GitHub release workflow plan defines tag-triggered release, required secrets, permissions, artifact upload, rollback/retry notes, and release-note expectations.
+- The `v1.0.0` tag sequence is documented end-to-end while clearly noting that the tag operation itself is handled by the separate release-engineering effort.
+- Homebrew tap plan covers formula ownership, URL/checksum updates, install smoke, upgrade smoke, and rollback.
+- Scoop manifest plan covers bucket location, manifest fields, checksum update, install smoke, upgrade smoke, and rollback.
+- No release story changes product scope: no new commands beyond existing `version`, no cloud service, no telemetry, and no package-manager auto-update daemon.
+
+**Stories.** E12-S1, E12-S2, E12-S3, E12-S4, E12-S5.
+
+---
+
 ## Story count
 
 - E1: 7 stories
@@ -165,4 +214,7 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - E7: 5 stories
 - E8: 6 stories
 - E9: 4 stories
-- **Total: 9 epics, 56 stories.**
+- E10: 4 stories
+- E11: 4 stories
+- E12: 5 stories
+- **Total: 12 epics, 69 stories.**
