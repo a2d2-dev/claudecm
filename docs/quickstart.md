@@ -94,6 +94,8 @@ Expected: a pre-apply diff summary, followed by `Switched to "work".`. Behind th
 
 > **First switch.** The first `switch` for each tool creates the first entry in `~/.claudecm/backups/`. `claudecm restore --list` will surface them.
 
+> **Interactive switch.** In a real terminal, bare `claudecm switch` opens an optional fuzzy profile selector with a redacted preview. This is terminal-only convenience UX; scripts, CI, non-TTY stdin/stdout, and `claudecm switch <name> --yes` keep the stable v1 command behavior.
+
 ## 5. Verify
 
 ```bash
