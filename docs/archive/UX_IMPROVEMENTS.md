@@ -1,3 +1,5 @@
+Archived note: this is an aspirational UX proposal, and parts of it are unimplemented.
+
 # claudecm CLI UX 优化总结
 
 ## 概述

@@ -2,20 +2,22 @@
 .bmad-core/
 
 # Binaries for programs and plugins
+/main
+/claudecm
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 bin/
-dist/
+/dist/
 
 # Test binary, built with `go test -c`
 *.test
 
 # Output of the go coverage tool
 *.out
-coverage.out
+/coverage.out
 coverage.html
 
 # Dependency directories
