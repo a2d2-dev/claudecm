@@ -58,6 +58,7 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/commit"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/storage"
+	"github.com/a2d2-dev/claudecm/internal/tui"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
 
@@ -81,6 +82,36 @@ var (
 	switchYesFlag    bool
 	switchToolFlag   string
 )
+
+type switchProfileSelector interface {
+	SelectProfile(cmd *cobra.Command, resv *storage.Resolver, reveal bool) (string, error)
+}
+
+type noSwitchSelectionError struct{}
+
+func (noSwitchSelectionError) Error() string { return "interactive switch canceled" }
+
+type interactiveSwitchSelector struct {
+	Terminal tui.Terminal
+}
+
+func (s interactiveSwitchSelector) SelectProfile(cmd *cobra.Command, resv *storage.Resolver, reveal bool) (string, error) {
+	if s.Terminal == nil {
+		s.Terminal = tui.XTerm{}
+	}
+	if err := tui.CheckCapabilities(s.Terminal, os.Stdout); err != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), err.Error())
+		return "", cmd.Help()
+	}
+	return tui.SelectProfile(context.Background(), resv, tui.Selector{
+		Terminal: s.Terminal,
+		Loader:   loadSwitchSelectorProfiles,
+		Stdin:    os.Stdin,
+		Stdout:   os.Stdout,
+		Writer:   cmd.OutOrStdout(),
+		Reveal:   reveal,
+	})
+}
 
 // switchCmd is the cobra binding. The RunE closure wraps runSwitch so
 // commit.PartialFailure can be mapped to exit code 2 without leaking
@@ -119,7 +150,7 @@ EXAMPLES
 
   # Emit machine-readable JSON
   claudecm switch prod --output json --dry-run`,
-	Args:              cobra.ExactArgs(1),
+	Args:              switchArgs,
 	ValidArgsFunction: profileNamesCompletion,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		err := runSwitch(cmd, args)
@@ -162,6 +193,9 @@ func init() {
 // CLI wrapper to exit with switchExitPartialFailure (2); every other
 // non-nil return maps to cobra's default exit 1.
 func runSwitch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return runBareSwitch(cmd, interactiveSwitchSelector{Terminal: tui.XTerm{}})
+	}
 	profileName := strings.TrimSpace(args[0])
 	if profileName == "" {
 		return fmt.Errorf("profile name cannot be empty")
@@ -324,6 +358,72 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 	}
 
 	return renderSuccess(cmd.OutOrStdout(), format, profileName, report, preCommitDiff)
+}
+
+func switchArgs(cmd *cobra.Command, args []string) error {
+	if len(args) == 1 {
+		return nil
+	}
+	if len(args) == 0 && CanOpenInteractiveSwitchSelector(os.Stdin, os.Stdout) {
+		return nil
+	}
+	return cobra.ExactArgs(1)(cmd, args)
+}
+
+func runBareSwitch(cmd *cobra.Command, selector switchProfileSelector) error {
+	if !CanOpenInteractiveSwitchSelector(os.Stdin, os.Stdout) {
+		return fmt.Errorf("accepts 1 arg(s), received 0")
+	}
+	if selector == nil {
+		return fmt.Errorf("interactive switch selector is not configured")
+	}
+	resv, err := resolverFromGlobals()
+	if err != nil {
+		return fmt.Errorf("failed to resolve HOME: %w", err)
+	}
+	if err := storage.Bootstrap(resv); err != nil {
+		return fmt.Errorf("failed to bootstrap ~/.claudecm layout: %w", err)
+	}
+	name, err := selector.SelectProfile(cmd, resv, globalRevealActive(false))
+	if err != nil {
+		var cancel noSwitchSelectionError
+		if errors.As(err, &cancel) || errors.Is(err, tui.ErrCanceled) {
+			if switchOutputFlag == "" || trimAndLower(switchOutputFlag) == string(switchOutputText) {
+				fmt.Fprintln(cmd.OutOrStdout(), "interactive switch canceled; no changes made.")
+			}
+			return nil
+		}
+		if errors.Is(err, tui.ErrAlreadyActive) {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				fmt.Fprintln(cmd.OutOrStdout(), "Selected profile is already active; no switch needed.")
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "%q is already active; no switch needed.\n", name)
+			}
+			return nil
+		}
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		if switchOutputFlag == "" || trimAndLower(switchOutputFlag) == string(switchOutputText) {
+			fmt.Fprintln(cmd.OutOrStdout(), "interactive switch canceled; no changes made.")
+		}
+		return nil
+	}
+	return runSwitch(cmd, []string{name})
+}
+
+func loadSwitchSelectorProfiles(resv *storage.Resolver) ([]*config.Profile, string, error) {
+	profiles, err := loadAllProfilesStrict(resv)
+	if err != nil {
+		return nil, "", err
+	}
+	active, err := readActiveName(resv)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read active profile: %w", err)
+	}
+	return profiles, active, nil
 }
 
 // parseSwitchOutput validates and normalises the --output flag.
@@ -533,6 +633,10 @@ func SetIsTerminalForTest(fn func(*os.File) bool) func() {
 	prev := isTerminalFn
 	isTerminalFn = fn
 	return func() { isTerminalFn = prev }
+}
+
+func CanOpenInteractiveSwitchSelector(stdin, stdout *os.File) bool {
+	return isTerminal(stdin) && isTerminal(stdout)
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,8 @@ claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
 
 # 3. Switch.
 claudecm switch work --yes
+# In an interactive terminal, bare `claudecm switch` opens a fuzzy
+# profile selector. Scripts should keep using `claudecm switch <name> --yes`.
 
 # 4. Confirm what's live.
 claudecm current
@@ -65,6 +67,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a longer walk-through with expe
 | `claudecm list` | List every profile with the active one marked. |
 | `claudecm current` | Compact per-tool summary of the active profile. |
 | `claudecm switch <name>` | Two-phase commit both tool files to the named profile. |
+| `claudecm switch` | Optional terminal-only fuzzy selector; non-TTY scripts keep the v1 usage error. |
 | `claudecm explain <name>` | Full per-tool resolution chain (winning + shadowed layers). |
 | `claudecm import claude-code\|codex` | Seed a profile from existing on-disk tool config. |
 | `claudecm edit <name>` | Open profile in `$EDITOR`, or use `--set key=value`. |

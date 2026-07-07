@@ -36,8 +36,20 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/presets"
 	"github.com/a2d2-dev/claudecm/internal/storage"
+	"github.com/a2d2-dev/claudecm/internal/tui"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
+
+type fakeSwitchSelector struct {
+	name  string
+	err   error
+	calls int
+}
+
+func (s *fakeSwitchSelector) SelectProfile(cmd *cobra.Command, resv *storage.Resolver, reveal bool) (string, error) {
+	s.calls++
+	return s.name, s.err
+}
 
 // resetSwitchFlags restores the package-level flag vars to their init()
 // defaults. Every test calls this before mutating them.
@@ -68,6 +80,23 @@ func runSwitchInner(t *testing.T, args ...string) (stdout, stderr string, err er
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
 	err = runSwitch(cmd, args)
+	return out.String(), errBuf.String(), err
+}
+
+func runSwitchCommandInner(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errBuf bytes.Buffer
+	cmd := &cobra.Command{
+		Use:  "switch [profile-name]",
+		Args: switchArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return nil
+		},
+	}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	cmd.SetArgs(args)
+	err = cmd.Execute()
 	return out.String(), errBuf.String(), err
 }
 
@@ -168,6 +197,117 @@ func TestSwitch_HappyBothTools(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "after-model") {
 		t.Errorf("settings.json did not receive after values:\n%s", raw)
+	}
+}
+
+func TestSwitchArgsBareNonTTYPreservesUsageError(t *testing.T) {
+	newSwitchHarness(t)
+	defer SetIsTerminalForTest(func(*os.File) bool { return false })()
+
+	_, _, err := runSwitchCommandInner(t)
+	if err == nil {
+		t.Fatalf("bare switch non-TTY err=nil; want usage error")
+	}
+	if !strings.Contains(err.Error(), "accepts 1 arg(s), received 0") {
+		t.Fatalf("err = %v; want exact args error", err)
+	}
+}
+
+func TestSwitchBareTTYInvokesSelector(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+	defer SetIsTerminalForTest(func(*os.File) bool { return true })()
+	selector := &fakeSwitchSelector{name: "prod"}
+
+	switchDryRunFlag = true
+	var out, errBuf bytes.Buffer
+	cmd := &cobra.Command{Use: "switch"}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	err := runBareSwitch(cmd, selector)
+	stdout := out.String()
+	if err != nil {
+		t.Fatalf("bare runSwitch err=%v stdout=%s", err, stdout)
+	}
+	if selector.calls != 1 {
+		t.Fatalf("selector calls = %d; want 1", selector.calls)
+	}
+	if !strings.Contains(stdout, "Pre-apply diff:") {
+		t.Fatalf("stdout missing named switch pipeline diff:\n%s", stdout)
+	}
+}
+
+func TestSwitchNamedBypassesSelector(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+	selector := &fakeSwitchSelector{name: "prod"}
+	switchDryRunFlag = true
+
+	stdout, _, err := runSwitchInner(t, "prod")
+	if err != nil {
+		t.Fatalf("named runSwitch err=%v stdout=%s", err, stdout)
+	}
+	if selector.calls != 0 {
+		t.Fatalf("named switch selector calls = %d; want 0", selector.calls)
+	}
+}
+
+func TestSwitchBareTTYCancellationNoWrites(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+	defer SetIsTerminalForTest(func(*os.File) bool { return true })()
+
+	var out, errBuf bytes.Buffer
+	cmd := &cobra.Command{Use: "switch"}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	err := runBareSwitch(cmd, &fakeSwitchSelector{err: noSwitchSelectionError{}})
+	stdout := out.String()
+	if err != nil {
+		t.Fatalf("canceled bare switch err=%v", err)
+	}
+	if !strings.Contains(stdout, "interactive switch canceled; no changes made.") {
+		t.Fatalf("stdout missing cancel message:\n%s", stdout)
+	}
+	state, err := h.store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.CurrentProfile != "" {
+		t.Fatalf("state.CurrentProfile = %q; want empty", state.CurrentProfile)
+	}
+	if _, err := os.Stat(claudecodeadapter.SettingsPath(h.resv)); !os.IsNotExist(err) {
+		t.Fatalf("settings.json exists after cancellation; err=%v", err)
+	}
+}
+
+func TestSwitchBareTTYSelectingActiveNoWrites(t *testing.T) {
+	h := newSwitchHarness(t)
+	h.saveProfile("prod", "sk-prodtoken-1234abcd", "https://prod.example.com", "prod-model")
+	h.activate("prod")
+	defer SetIsTerminalForTest(func(*os.File) bool { return true })()
+
+	var out, errBuf bytes.Buffer
+	cmd := &cobra.Command{Use: "switch"}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errBuf)
+	err := runBareSwitch(cmd, &fakeSwitchSelector{name: "prod", err: tui.ErrAlreadyActive})
+	stdout := out.String()
+	if err != nil {
+		t.Fatalf("active selection err=%v", err)
+	}
+	if !strings.Contains(stdout, `"prod" is already active; no switch needed.`) {
+		t.Fatalf("stdout missing already-active message:\n%s", stdout)
+	}
+	if _, err := os.Stat(claudecodeadapter.SettingsPath(h.resv)); !os.IsNotExist(err) {
+		t.Fatalf("settings.json exists after already-active selection; err=%v", err)
+	}
+	state, err := h.store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.CurrentProfile != "prod" {
+		t.Fatalf("state.CurrentProfile = %q; want prod", state.CurrentProfile)
 	}
 }
 
