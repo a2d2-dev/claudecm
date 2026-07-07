@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -90,7 +91,7 @@ func TestRenderSelectorShowsActiveMarkerAndTruncates(t *testing.T) {
 	}
 	state := selectorState{items: items, filtered: items, selected: 0}
 	var buf bytes.Buffer
-	renderSelector(&buf, state, 34, 8)
+	renderSelector(&buf, state, nil, 34, 12)
 	out := buf.String()
 	if !strings.Contains(out, "> * official") {
 		t.Fatalf("render missing selected active marker:\n%s", out)
@@ -102,6 +103,32 @@ func TestRenderSelectorShowsActiveMarkerAndTruncates(t *testing.T) {
 		if len([]rune(line)) > 34 {
 			t.Fatalf("line longer than width: %q", line)
 		}
+	}
+}
+
+func TestBuildPreviewLinesRedactsSecretsAndShowsContext(t *testing.T) {
+	p := testProfile("relay-a", "moonshot", "https://relay.example.com", "kimi-k2", "fast relay")
+	lines := BuildPreviewLines(context.Background(), nil, *p, true, false)
+	out := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"Profile: relay-a (active)",
+		"Notes: fast relay",
+		"Provider: moonshot",
+		"Base URL: https://relay.example.com",
+		"Model: kimi-k2",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("preview missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, p.Core.APIKey) {
+		t.Fatalf("preview leaked api key:\n%s", out)
+	}
+	if got := previewValue("sk-secret-token", true, false); got != "sk-s***oken" {
+		t.Fatalf("previewValue redacted = %q", got)
+	}
+	if got := previewValue("sk-secret-token", true, true); got != "sk-secret-token" {
+		t.Fatalf("previewValue reveal = %q", got)
 	}
 }
 

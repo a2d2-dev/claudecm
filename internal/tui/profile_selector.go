@@ -12,7 +12,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/a2d2-dev/claudecm/internal/adapter"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/resolver"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -28,6 +30,7 @@ type ProfileItem struct {
 	BaseURL     string
 	Model       string
 	Active      bool
+	Profile     config.Profile
 }
 
 type ProfileLoader func(*storage.Resolver) ([]*config.Profile, string, error)
@@ -38,6 +41,7 @@ type Selector struct {
 	Stdin    *os.File
 	Stdout   *os.File
 	Writer   io.Writer
+	Reveal   bool
 }
 
 func BuildProfileItems(profiles []*config.Profile, active string) ([]ProfileItem, error) {
@@ -57,6 +61,7 @@ func BuildProfileItems(profiles []*config.Profile, active string) ([]ProfileItem
 			BaseURL:     p.Core.BaseURL,
 			Model:       p.Core.Model,
 			Active:      p.Name == active,
+			Profile:     *p.Clone(),
 		}
 		if item.Active {
 			activeFound = true
@@ -208,7 +213,7 @@ func SelectProfile(ctx context.Context, r *storage.Resolver, opts Selector) (str
 	fmt.Fprint(writer, "\x1b[?25l")
 	defer fmt.Fprint(writer, "\x1b[?25h\x1b[0m\n")
 
-	state := selectorState{items: items, filtered: FilterProfileItems(items, ""), selected: 0}
+	state := selectorState{items: items, filtered: FilterProfileItems(items, ""), selected: 0, reveal: opts.Reveal}
 	reader := bufio.NewReader(stdin)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -218,7 +223,7 @@ func SelectProfile(ctx context.Context, r *storage.Resolver, opts Selector) (str
 		if err != nil {
 			return "", fmt.Errorf("read terminal size: %w", err)
 		}
-		renderSelector(writer, state, width, height)
+		renderSelector(writer, state, r, width, height)
 		key, err := readKey(reader)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -265,9 +270,10 @@ type selectorState struct {
 	filtered []ProfileItem
 	query    string
 	selected int
+	reveal   bool
 }
 
-func renderSelector(w io.Writer, state selectorState, width, height int) {
+func renderSelector(w io.Writer, state selectorState, r *storage.Resolver, width, height int) {
 	if width <= 0 {
 		width = minTerminalWidth
 	}
@@ -278,7 +284,8 @@ func renderSelector(w io.Writer, state selectorState, width, height int) {
 	fmt.Fprintln(w, truncate(fmt.Sprintf("Select profile: %s", state.query), width))
 	fmt.Fprintln(w, truncate("Type to filter, Up/Down to move, Enter to switch, Esc/Ctrl-C to cancel", width))
 	fmt.Fprintln(w)
-	rows := height - 4
+	previewLines := renderPreviewLines(state, r)
+	rows := height - 4 - len(previewLines)
 	if rows < 1 {
 		rows = 1
 	}
@@ -310,6 +317,101 @@ func renderSelector(w io.Writer, state selectorState, width, height int) {
 		}
 		fmt.Fprintln(w, truncate(fmt.Sprintf("%s %s %s%s", cursor, active, item.Name, context), width))
 	}
+	if len(previewLines) > 0 {
+		fmt.Fprintln(w)
+		for _, line := range previewLines {
+			fmt.Fprintln(w, truncate(line, width))
+		}
+	}
+}
+
+func renderPreviewLines(state selectorState, r *storage.Resolver) []string {
+	if len(state.filtered) == 0 || state.selected >= len(state.filtered) {
+		return nil
+	}
+	item := state.filtered[state.selected]
+	return BuildPreviewLines(context.Background(), r, item.Profile, item.Active, state.reveal)
+}
+
+func BuildPreviewLines(ctx context.Context, r *storage.Resolver, profile config.Profile, active bool, reveal bool) []string {
+	lines := []string{"Preview:"}
+	marker := ""
+	if active {
+		marker = " (active)"
+	}
+	lines = append(lines, fmt.Sprintf("  Profile: %s%s", profile.Name, marker))
+	if profile.Description != "" {
+		lines = append(lines, "  Notes: "+profile.Description)
+	}
+	if profile.Core.Provider != "" {
+		lines = append(lines, "  Provider: "+profile.Core.Provider)
+	}
+	if profile.Core.BaseURL != "" {
+		lines = append(lines, "  Base URL: "+profile.Core.BaseURL)
+	}
+	if profile.Core.Model != "" {
+		lines = append(lines, "  Model: "+profile.Core.Model)
+	}
+	if r == nil {
+		return lines
+	}
+	view, err := resolver.Resolve(ctx, r, adapter.DefaultRegistry, profile, resolver.Filter{})
+	if err != nil {
+		return append(lines, "  Preview error: "+err.Error())
+	}
+	for _, tv := range view.Tools {
+		lines = append(lines, fmt.Sprintf("  %s:", tv.Tool))
+		if len(tv.Errors) > 0 {
+			for _, te := range tv.Errors {
+				lines = append(lines, fmt.Sprintf("    Preview error: %s: %s", te.Kind, te.Message))
+			}
+			continue
+		}
+		fields := append([]adapter.EffectiveField(nil), tv.Effective.Fields...)
+		adapter.SortFields(fields)
+		if len(fields) == 0 {
+			lines = append(lines, "    (no effective fields)")
+			continue
+		}
+		for _, field := range fields {
+			if !previewField(field.Key) {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("    %s: %s", field.Key, previewValue(field.Value, field.Secret, reveal)))
+		}
+	}
+	return lines
+}
+
+func previewField(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "provider") ||
+		strings.Contains(lower, "base_url") ||
+		strings.Contains(lower, "api_key") ||
+		strings.Contains(lower, "auth_token") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "model")
+}
+
+func previewValue(value any, secret bool, reveal bool) string {
+	if secret && !reveal {
+		return redactPreviewValue(value)
+	}
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
+func redactPreviewValue(value any) string {
+	if value == nil {
+		return "***"
+	}
+	s := fmt.Sprint(value)
+	if len(s) >= 8 {
+		return s[:4] + "***" + s[len(s)-4:]
+	}
+	return "***"
 }
 
 func nonEmptyStrings(values ...string) []string {

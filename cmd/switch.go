@@ -109,6 +109,7 @@ func (s interactiveSwitchSelector) SelectProfile(cmd *cobra.Command, resv *stora
 		Stdin:    os.Stdin,
 		Stdout:   os.Stdout,
 		Writer:   cmd.OutOrStdout(),
+		Reveal:   reveal,
 	})
 }
 
