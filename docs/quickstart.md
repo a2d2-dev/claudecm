@@ -42,7 +42,7 @@ claudecm add work \
   --model claude-opus-4-5
 ```
 
-Expected: `created profile "work"`.
+Expected: `Profile "work" created.`.
 
 > **Name rules.** Profile names must match `^[a-z0-9][a-z0-9._-]{0,63}$` (NFR-S5). If `claudecm add` fails with a profile-name error, that regex is the reason — no uppercase, no leading dot/dash, ≤ 64 characters.
 
@@ -52,7 +52,7 @@ Expected: `created profile "work"`.
 claudecm switch work --yes
 ```
 
-Expected: a pre-apply diff summary, followed by `switched to "work"`. Behind the scenes claudecm has:
+Expected: a pre-apply diff summary, followed by `Switched to "work".`. Behind the scenes claudecm has:
 
 1. Locked the target tool files.
 2. Backed up the current contents to `~/.claudecm/backups/<tool>/<file>/<timestamp>`.
