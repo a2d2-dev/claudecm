@@ -44,6 +44,39 @@ claudecm add work \
 
 Expected: `Profile "work" created.`.
 
+You can also start from a built-in provider preset. Presets are convenience templates, not official provider support, certification, endorsement, or compatibility guarantees. They fill generated fields such as `base_url`, `model`, `provider`, and supported tool overlays; you still supply the secret, and every generated field can be overridden.
+
+```bash
+claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx --dry-run
+```
+
+Expected: a redacted profile draft, not a write. The generated fields are visible:
+
+```yaml
+core:
+  provider: moonshot
+  base_url: https://api.moonshot.cn/v1
+  api_key: sk-a***xxxx
+  model: kimi-k2-0711-preview
+tools:
+  codex:
+    raw:
+      model: kimi-k2-0711-preview
+      model_provider: moonshot
+      model_providers.moonshot.base_url: https://api.moonshot.cn/v1
+      model_providers.moonshot.env_key: OPENAI_API_KEY
+      model_providers.moonshot.name: Moonshot AI
+      model_providers.moonshot.wire_api: chat
+```
+
+Then save it:
+
+```bash
+claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
+```
+
+Available presets: `moonshot`, `deepseek`, `glm`, `qwen`. Use `claudecm add --list-presets` to inspect the current catalog. Endpoint and model names can drift, so override with `--base-url`, `--model`, `--provider`, or `--set` when a provider changes its API.
+
 > **Name rules.** Profile names must match `^[a-z0-9][a-z0-9._-]{0,63}$` (NFR-S5). If `claudecm add` fails with a profile-name error, that regex is the reason — no uppercase, no leading dot/dash, ≤ 64 characters.
 
 ## 4. Switch to the second profile
