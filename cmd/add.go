@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/presets"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
@@ -66,7 +67,11 @@ const (
 // this set is refused so a typo does not silently write a bad file.
 var addProviderAllowed = map[string]struct{}{
 	"anthropic":     {},
+	"deepseek":      {},
+	"glm":           {},
+	"moonshot":      {},
 	"openai-compat": {},
+	"qwen":          {},
 	"custom":        {},
 }
 
@@ -78,6 +83,8 @@ var (
 	addModelFlag          string
 	addSmallFastModelFlag string
 	addSetFlag            []string
+	addPresetFlag         string
+	addListPresetsFlag    bool
 	addDryRunFlag         bool
 	addOverwriteFlag      bool
 	addOutputFlag         string
@@ -118,6 +125,12 @@ Any other --set path is refused. The profile name is validated against
 the NFR-S5 allowlist (^[a-z0-9][a-z0-9._-]{0,63}$ plus reserved-name
 protection).
 
+Provider presets are convenience templates only. --preset <name> fills
+base_url, model, provider, and supported tool overlays from the built-in
+catalog; users still supply secrets, every generated value can be
+overridden by an explicit flag or --set, and presets are not official
+provider support, certification, endorsement, or compatibility guarantees.
+
 EXAMPLES
   # Minimal core fields
   claudecm add work \
@@ -137,6 +150,14 @@ EXAMPLES
     --api-key sk-... \
     --set tools.codex.raw.model=gpt-5
 
+  # Start from a built-in provider preset; generated fields are visible
+  # in dry-run output and can be overridden.
+  claudecm add work --preset moonshot --api-key sk-... --dry-run
+  claudecm add work --preset moonshot --api-key sk-... --model kimi-k2-latest
+
+  # Discover built-in presets
+  claudecm add --list-presets
+
   # Preview only — no writes
   claudecm add work --base-url ... --api-key ... --dry-run
 
@@ -145,7 +166,12 @@ EXAMPLES
 
 add does NOT auto-activate the new profile. Use 'claudecm switch <name>'
 to make it the active profile.`,
-	Args: cobra.ExactArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if addListPresetsFlag {
+			return cobra.NoArgs(cmd, args)
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
 	RunE: runAdd,
 }
 
@@ -156,6 +182,8 @@ func init() {
 	addCmd.Flags().StringVar(&addAPIKeyFlag, "api-key", "", "Core API key")
 	addCmd.Flags().StringVar(&addModelFlag, "model", "", "Core model name")
 	addCmd.Flags().StringVar(&addSmallFastModelFlag, "small-fast-model", "", "Core small/fast auxiliary model name")
+	addCmd.Flags().StringVar(&addPresetFlag, "preset", "", "Built-in provider preset name (run --list-presets to discover)")
+	addCmd.Flags().BoolVar(&addListPresetsFlag, "list-presets", false, "List built-in provider presets and exit")
 	addCmd.Flags().StringArrayVar(&addSetFlag, "set", nil,
 		"Sparse overlay entry (repeatable). Format: tools.<tool>.<sub>=<value>. "+
 			"Supported: tools.claude_code.env.<VAR>=<value>, tools.codex.raw.<key>=<value>")
@@ -171,6 +199,14 @@ func init() {
 // call this directly with a synthetic cobra.Command whose Out/Err are
 // bytes.Buffers.
 func runAdd(cmd *cobra.Command, args []string) error {
+	if addListPresetsFlag {
+		format, err := parseAddOutput(addOutputFlag)
+		if err != nil {
+			return err
+		}
+		return renderPresetList(cmd.OutOrStdout(), format)
+	}
+
 	name := strings.TrimSpace(args[0])
 	if err := storage.ValidateProfileName(name); err != nil {
 		return err
@@ -181,16 +217,52 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := validateProvider(addProviderFlag); err != nil {
+	providerFlagSet := flagWasExplicit(cmd, "provider", addProviderFlag != addProviderDefault)
+	baseURLFlagSet := flagWasExplicit(cmd, "base-url", addBaseURLFlag != "")
+	modelFlagSet := flagWasExplicit(cmd, "model", addModelFlag != "")
+
+	preset, hasPreset, err := resolveAddPreset(addPresetFlag)
+	if err != nil {
 		return err
+	}
+
+	provider := addProviderFlag
+	baseURL := addBaseURLFlag
+	model := addModelFlag
+	var tools map[config.ToolID]config.ToolOverlay
+	if hasPreset {
+		provider = preset.ProviderKey
+		baseURL = preset.BaseURL
+		model = preset.Model
+		tools = cloneToolMap(preset.Tools)
+	}
+	if providerFlagSet {
+		provider = addProviderFlag
+	}
+	if baseURLFlagSet {
+		baseURL = addBaseURLFlag
+	}
+	if modelFlagSet {
+		model = addModelFlag
+	}
+	if hasPreset {
+		applyExplicitPresetFlagOverrides(tools, preset.Name, provider, baseURL, model, providerFlagSet, baseURLFlagSet, modelFlagSet)
+	}
+
+	if err := validateProvider(provider); err != nil {
+		return err
+	}
+	if hasPreset && addAPIKeyFlag == "" {
+		return fmt.Errorf("preset %q requires --api-key in non-interactive add", preset.Name)
 	}
 
 	// Build tools overlay from --set entries. Parsing is a pure
 	// function so an invalid entry surfaces before any I/O.
-	tools, err := parseSetEntries(addSetFlag)
+	setTools, err := parseSetEntries(addSetFlag)
 	if err != nil {
 		return err
 	}
+	tools = mergeToolMaps(tools, setTools)
 
 	now := nowFn().UTC()
 	profile := &config.Profile{
@@ -200,10 +272,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Core: config.CoreConfig{
-			Provider:       addProviderFlag,
-			BaseURL:        addBaseURLFlag,
+			Provider:       provider,
+			BaseURL:        baseURL,
 			APIKey:         addAPIKeyFlag,
-			Model:          addModelFlag,
+			Model:          model,
 			SmallFastModel: addSmallFastModelFlag,
 		},
 		Tools: tools,
@@ -255,6 +327,50 @@ func parseAddOutput(raw string) (addOutputFormat, error) {
 	default:
 		return "", fmt.Errorf("invalid --output %q (want text|json)", raw)
 	}
+}
+
+func resolveAddPreset(raw string) (presets.Preset, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return presets.Preset{}, false, nil
+	}
+	p, err := presets.Lookup(raw)
+	if err != nil {
+		return presets.Preset{}, false, err
+	}
+	return p, true, nil
+}
+
+func flagWasExplicit(cmd *cobra.Command, name string, fallback bool) bool {
+	if cmd != nil && cmd.Flags() != nil {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			return true
+		}
+	}
+	return fallback
+}
+
+func applyExplicitPresetFlagOverrides(
+	tools map[config.ToolID]config.ToolOverlay,
+	presetName, provider, baseURL, model string,
+	providerFlagSet, baseURLFlagSet, modelFlagSet bool,
+) {
+	if tools == nil {
+		return
+	}
+	ov, ok := tools[config.ToolCodex]
+	if !ok || ov.Raw == nil {
+		return
+	}
+	if providerFlagSet {
+		ov.Raw["model_provider"] = provider
+	}
+	if modelFlagSet {
+		ov.Raw["model"] = model
+	}
+	if baseURLFlagSet {
+		ov.Raw["model_providers."+presetName+".base_url"] = baseURL
+	}
+	tools[config.ToolCodex] = ov
 }
 
 // validateProvider enforces the closed enum on --provider. Empty is
@@ -329,6 +445,86 @@ func parseSetEntries(entries []string) (map[config.ToolID]config.ToolOverlay, er
 	return out, nil
 }
 
+func mergeToolMaps(base, override map[config.ToolID]config.ToolOverlay) map[config.ToolID]config.ToolOverlay {
+	out := cloneToolMap(base)
+	if len(override) == 0 {
+		return out
+	}
+	if out == nil {
+		out = map[config.ToolID]config.ToolOverlay{}
+	}
+	for id, ov := range override {
+		out[id] = mergeOverlay(out[id], ov)
+	}
+	return out
+}
+
+func mergeOverlay(base, override config.ToolOverlay) config.ToolOverlay {
+	out := cloneOverlay(base)
+	if override.BaseURL != "" {
+		out.BaseURL = override.BaseURL
+	}
+	if override.APIKey != "" {
+		out.APIKey = override.APIKey
+	}
+	if override.Model != "" {
+		out.Model = override.Model
+	}
+	if override.SmallFastModel != "" {
+		out.SmallFastModel = override.SmallFastModel
+	}
+	if len(override.ExtraEnv) > 0 {
+		if out.ExtraEnv == nil {
+			out.ExtraEnv = map[string]string{}
+		}
+		for k, v := range override.ExtraEnv {
+			out.ExtraEnv[k] = v
+		}
+	}
+	if len(override.Raw) > 0 {
+		if out.Raw == nil {
+			out.Raw = map[string]any{}
+		}
+		for k, v := range override.Raw {
+			out.Raw[k] = v
+		}
+	}
+	return out
+}
+
+func cloneToolMap(in map[config.ToolID]config.ToolOverlay) map[config.ToolID]config.ToolOverlay {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[config.ToolID]config.ToolOverlay, len(in))
+	for id, ov := range in {
+		out[id] = cloneOverlay(ov)
+	}
+	return out
+}
+
+func cloneOverlay(ov config.ToolOverlay) config.ToolOverlay {
+	out := config.ToolOverlay{
+		BaseURL:        ov.BaseURL,
+		APIKey:         ov.APIKey,
+		Model:          ov.Model,
+		SmallFastModel: ov.SmallFastModel,
+	}
+	if ov.ExtraEnv != nil {
+		out.ExtraEnv = make(map[string]string, len(ov.ExtraEnv))
+		for k, v := range ov.ExtraEnv {
+			out.ExtraEnv[k] = v
+		}
+	}
+	if ov.Raw != nil {
+		out.Raw = make(map[string]any, len(ov.Raw))
+		for k, v := range ov.Raw {
+			out.Raw[k] = v
+		}
+	}
+	return out
+}
+
 // validateEnvVarName enforces the "UPPER_SNAKE_CASE, no funny chars"
 // convention on env vars set via the claude_code overlay. We do not
 // forbid every possible env name here (that is the resolver's business)
@@ -354,14 +550,15 @@ func validateEnvVarName(name string) error {
 // JSON mode encodes a JSON snapshot of the same struct so shell
 // consumers can jq the output.
 func renderAddDryRun(w io.Writer, format addOutputFormat, profile *config.Profile) error {
-	body, err := config.MarshalProfile(profile)
+	redacted := redactProfileForAddOutput(profile)
+	body, err := config.MarshalProfile(redacted)
 	if err != nil {
 		return fmt.Errorf("marshal profile for dry-run: %w", err)
 	}
 	if format == addOutputJSON {
 		out := jsonAddDryRun{
 			Action:  "dry-run",
-			Profile: profileToJSON(profile),
+			Profile: profileToJSON(redacted),
 			YAML:    string(body),
 		}
 		return writeAddJSON(w, out)
@@ -380,12 +577,60 @@ func renderAddSuccess(w io.Writer, format addOutputFormat, profile *config.Profi
 	if format == addOutputJSON {
 		out := jsonAddSuccess{
 			Action:  "created",
-			Profile: profileToJSON(profile),
+			Profile: profileToJSON(redactProfileForAddOutput(profile)),
 		}
 		return writeAddJSON(w, out)
 	}
 	fmt.Fprintf(w, "Profile %q created.\n", profile.Name)
 	return nil
+}
+
+func renderPresetList(w io.Writer, format addOutputFormat) error {
+	switch format {
+	case addOutputJSON:
+		out := jsonAddPresetList{
+			Action:  "list-presets",
+			Presets: presetListToJSON(),
+		}
+		return writeAddJSON(w, out)
+	default:
+		fmt.Fprintln(w, "Built-in provider presets (convenience templates only; not official provider support or endorsement):")
+		for _, p := range presets.Catalog {
+			fmt.Fprintf(w, "  %s\t%s\tbase_url=%s\tmodel=%s\tprovider=%s\n",
+				p.Name, p.DisplayName, p.BaseURL, p.Model, p.ProviderKey)
+		}
+		return nil
+	}
+}
+
+func redactProfileForAddOutput(profile *config.Profile) *config.Profile {
+	if profile == nil {
+		return nil
+	}
+	out := profile.Clone()
+	out.Core.APIKey = redactValue(out.Core.APIKey)
+	for id, ov := range out.Tools {
+		if ov.APIKey != "" {
+			ov.APIKey = redactValue(ov.APIKey)
+		}
+		for k, v := range ov.ExtraEnv {
+			if isSecretKey(k) {
+				ov.ExtraEnv[k] = redactValue(v)
+			}
+		}
+		for k, v := range ov.Raw {
+			if s, ok := v.(string); ok && isSecretKey(k) {
+				ov.Raw[k] = redactValue(s)
+			}
+		}
+		out.Tools[id] = ov
+	}
+	for k, v := range out.Core.ExtraEnv {
+		if isSecretKey(k) {
+			out.Core.ExtraEnv[k] = redactValue(v)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +669,17 @@ type jsonAddOverlay struct {
 	Raw            map[string]any    `json:"raw,omitempty"`
 }
 
+type jsonAddPreset struct {
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	ProviderKey string   `json:"provider_key"`
+	BaseURL     string   `json:"base_url"`
+	Model       string   `json:"model"`
+	Tools       []string `json:"tools"`
+	Secrets     []string `json:"expected_secret_fields"`
+	Disclaimer  string   `json:"disclaimer"`
+}
+
 // jsonAddDryRun is the top-level document for --dry-run --output json.
 // YAML carries the marshaled bytes (so a consumer can pipe the exact
 // wire form SaveProfile would have written), while Profile carries a
@@ -438,6 +694,11 @@ type jsonAddDryRun struct {
 type jsonAddSuccess struct {
 	Action  string         `json:"action"`
 	Profile jsonAddProfile `json:"profile"`
+}
+
+type jsonAddPresetList struct {
+	Action  string          `json:"action"`
+	Presets []jsonAddPreset `json:"presets"`
 }
 
 func profileToJSON(p *config.Profile) jsonAddProfile {
@@ -468,6 +729,32 @@ func profileToJSON(p *config.Profile) jsonAddProfile {
 				Raw:            ov.Raw,
 			}
 		}
+	}
+	return out
+}
+
+func presetListToJSON() []jsonAddPreset {
+	out := make([]jsonAddPreset, 0, len(presets.Catalog))
+	for _, p := range presets.Catalog {
+		tools := make([]string, 0, len(p.Tools))
+		for id := range p.Tools {
+			tools = append(tools, string(id))
+		}
+		sort.Strings(tools)
+		secrets := make([]string, 0, len(p.Secrets))
+		for _, s := range p.Secrets {
+			secrets = append(secrets, s.Name)
+		}
+		out = append(out, jsonAddPreset{
+			Name:        p.Name,
+			DisplayName: p.DisplayName,
+			ProviderKey: p.ProviderKey,
+			BaseURL:     p.BaseURL,
+			Model:       p.Model,
+			Tools:       tools,
+			Secrets:     secrets,
+			Disclaimer:  p.Disclaimer,
+		})
 	}
 	return out
 }
