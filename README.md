@@ -20,6 +20,19 @@ claudecm does **not** sync your configuration to the cloud, is **not** a proxy o
 
 ## Install
 
+Package-manager installs are available from the next tagged release onward.
+
+macOS with Homebrew:
+
+```bash
+brew tap a2d2-dev/tap
+brew install claudecm
+claudecm version
+claudecm --help
+```
+
+From source:
+
 ```bash
 go install github.com/a2d2-dev/claudecm@latest
 ```

@@ -42,6 +42,29 @@ archives:
 checksum:
   name_template: checksums.txt
 
+brews:
+  - name: claudecm
+    ids:
+      - claudecm
+    repository:
+      owner: a2d2-dev
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: a2d2-dev release bot
+      email: release-bot@a2d2.dev
+    commit_msg_template: "brew: update claudecm to {{ .Tag }}"
+    homepage: "https://github.com/a2d2-dev/claudecm"
+    description: "One-command switch between Claude Code and Codex CLI configurations."
+    license: MIT
+    skip_upload: auto
+    install: |
+      bin.install "claudecm"
+    test: |
+      system "#{bin}/claudecm", "version"
+      system "#{bin}/claudecm", "--help"
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
