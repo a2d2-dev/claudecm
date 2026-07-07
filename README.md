@@ -31,6 +31,15 @@ claudecm version
 claudecm --help
 ```
 
+Windows with Scoop:
+
+```powershell
+scoop bucket add a2d2-dev https://github.com/a2d2-dev/homebrew-tap
+scoop install claudecm
+claudecm version
+claudecm --help
+```
+
 From source:
 
 ```bash
