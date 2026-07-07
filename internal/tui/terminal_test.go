@@ -10,11 +10,12 @@ import (
 )
 
 type fakeTerminal struct {
-	tty     bool
-	width   int
-	height  int
-	sizeErr error
-	env     map[string]string
+	tty        bool
+	width      int
+	height     int
+	sizeErr    error
+	restoreErr error
+	env        map[string]string
 }
 
 func (f fakeTerminal) IsTerminal(*os.File) bool { return f.tty }
@@ -28,7 +29,7 @@ func (f fakeTerminal) Size(*os.File) (int, int, error) {
 
 func (f fakeTerminal) MakeRaw(*os.File) (*term.State, error) { return nil, nil }
 
-func (f fakeTerminal) Restore(*os.File, *term.State) error { return nil }
+func (f fakeTerminal) Restore(*os.File, *term.State) error { return f.restoreErr }
 
 func (f fakeTerminal) Env(name string) string { return f.env[name] }
 

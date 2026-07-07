@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
 func testProfile(name, provider, baseURL, model, description string) *config.Profile {
@@ -155,6 +158,53 @@ func TestReadKey(t *testing.T) {
 	}
 }
 
+func TestSelectProfileReturnsRestoreError(t *testing.T) {
+	stdin := selectorInputFile(t, "\x1b")
+	stdout := selectorInputFile(t, "")
+	restoreErr := errors.New("restore failed")
+
+	_, err := SelectProfile(context.Background(), nil, Selector{
+		Terminal: fakeTerminal{width: 80, height: 24, restoreErr: restoreErr},
+		Stdin:    stdin,
+		Stdout:   stdout,
+		Writer:   &bytes.Buffer{},
+		Loader: func(*storage.Resolver) ([]*config.Profile, string, error) {
+			return []*config.Profile{
+				testProfile("official", "anthropic", "https://api.anthropic.com", "claude-sonnet", ""),
+			}, "official", nil
+		},
+	})
+	if !errors.Is(err, ErrCanceled) {
+		t.Fatalf("SelectProfile err=%v; want ErrCanceled", err)
+	}
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("SelectProfile err=%v; want restoreErr", err)
+	}
+	if !strings.Contains(err.Error(), "restore terminal mode: restore failed") {
+		t.Fatalf("SelectProfile err=%v; want restore error", err)
+	}
+}
+
 func bufioReader(s string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(s))
+}
+
+func selectorInputFile(t *testing.T, content string) *os.File {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "selector-*")
+	if err != nil {
+		t.Fatalf("create selector input: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write selector input: %v", err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatalf("seek selector input: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := f.Close(); err != nil {
+			t.Fatalf("close selector input: %v", err)
+		}
+	})
+	return f
 }

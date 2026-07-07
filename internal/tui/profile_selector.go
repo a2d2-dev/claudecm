@@ -16,6 +16,7 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/resolver"
 	"github.com/a2d2-dev/claudecm/internal/storage"
+	"golang.org/x/term"
 )
 
 var (
@@ -209,60 +210,75 @@ func SelectProfile(ctx context.Context, r *storage.Resolver, opts Selector) (str
 	if err != nil {
 		return "", fmt.Errorf("enter raw terminal mode: %w", err)
 	}
-	defer term.Restore(stdin, oldState)
-	fmt.Fprint(writer, "\x1b[?25l")
-	defer fmt.Fprint(writer, "\x1b[?25h\x1b[0m\n")
+	return withRestoredTerminal(term, stdin, oldState, func() (string, error) {
+		fmt.Fprint(writer, "\x1b[?25l")
+		defer fmt.Fprint(writer, "\x1b[?25h\x1b[0m\n")
 
-	state := selectorState{items: items, filtered: FilterProfileItems(items, ""), selected: 0, reveal: opts.Reveal}
-	reader := bufio.NewReader(stdin)
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		width, height, err := term.Size(stdout)
-		if err != nil {
-			return "", fmt.Errorf("read terminal size: %w", err)
-		}
-		renderSelector(writer, state, r, width, height)
-		key, err := readKey(reader)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
+		state := selectorState{items: items, filtered: FilterProfileItems(items, ""), selected: 0, reveal: opts.Reveal}
+		reader := bufio.NewReader(stdin)
+		for {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			width, height, err := term.Size(stdout)
+			if err != nil {
+				return "", fmt.Errorf("read terminal size: %w", err)
+			}
+			renderSelector(writer, state, r, width, height)
+			key, err := readKey(reader)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return "", ErrCanceled
+				}
+				return "", fmt.Errorf("read selector input: %w", err)
+			}
+			switch key.kind {
+			case keyCancel:
 				return "", ErrCanceled
-			}
-			return "", fmt.Errorf("read selector input: %w", err)
-		}
-		switch key.kind {
-		case keyCancel:
-			return "", ErrCanceled
-		case keyEnter:
-			if len(state.filtered) == 0 {
-				continue
-			}
-			chosen := state.filtered[state.selected]
-			if chosen.Active {
-				return chosen.Name, ErrAlreadyActive
-			}
-			return chosen.Name, nil
-		case keyBackspace:
-			state.query = dropLastRune(state.query)
-			state.filtered = FilterProfileItems(state.items, state.query)
-			state.selected = clampSelection(state.selected, len(state.filtered))
-		case keyRune:
-			if !unicode.IsControl(key.r) {
-				state.query += string(key.r)
+			case keyEnter:
+				if len(state.filtered) == 0 {
+					continue
+				}
+				chosen := state.filtered[state.selected]
+				if chosen.Active {
+					return chosen.Name, ErrAlreadyActive
+				}
+				return chosen.Name, nil
+			case keyBackspace:
+				state.query = dropLastRune(state.query)
 				state.filtered = FilterProfileItems(state.items, state.query)
-				state.selected = 0
-			}
-		case keyUp:
-			if state.selected > 0 {
-				state.selected--
-			}
-		case keyDown:
-			if state.selected < len(state.filtered)-1 {
-				state.selected++
+				state.selected = clampSelection(state.selected, len(state.filtered))
+			case keyRune:
+				if !unicode.IsControl(key.r) {
+					state.query += string(key.r)
+					state.filtered = FilterProfileItems(state.items, state.query)
+					state.selected = 0
+				}
+			case keyUp:
+				if state.selected > 0 {
+					state.selected--
+				}
+			case keyDown:
+				if state.selected < len(state.filtered)-1 {
+					state.selected++
+				}
 			}
 		}
-	}
+	})
+}
+
+func withRestoredTerminal(tty Terminal, stdin *os.File, oldState *term.State, fn func() (string, error)) (selected string, err error) {
+	defer func() {
+		if restoreErr := tty.Restore(stdin, oldState); restoreErr != nil {
+			restoreErr = fmt.Errorf("restore terminal mode: %w", restoreErr)
+			if err == nil {
+				err = restoreErr
+			} else {
+				err = errors.Join(err, restoreErr)
+			}
+		}
+	}()
+	return fn()
 }
 
 type selectorState struct {
