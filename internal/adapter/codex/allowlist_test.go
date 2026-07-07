@@ -155,22 +155,38 @@ func TestOwnedKeys_NoOverlapBetweenFiles(t *testing.T) {
 // silently drop a Codex config knob from the merge-preserve owned set.
 //
 // v1 ships concrete flat leaves matching writepath.Flatten output —
-// the provider-agnostic top-level knobs plus the explicit `openai`
-// and `anthropic` provider entries. Any post-v1 provider expansion
-// requires an ADR + PRD §4.7 edit.
+// the provider-agnostic top-level knobs plus the explicit `openai`,
+// `anthropic`, and ADR-0002 preset provider entries. Any further
+// provider expansion requires an ADR + PRD §4.7 edit.
 func TestOwnedKeysConfigTOML_ExpectedKeysPresent(t *testing.T) {
 	required := []string{
 		"approval_mode",
 		"model",
 		"model_provider",
-		"model_providers.openai.base_url",
-		"model_providers.openai.env_key",
-		"model_providers.openai.name",
-		"model_providers.openai.wire_api",
 		"model_providers.anthropic.base_url",
 		"model_providers.anthropic.env_key",
 		"model_providers.anthropic.name",
 		"model_providers.anthropic.wire_api",
+		"model_providers.deepseek.base_url",
+		"model_providers.deepseek.env_key",
+		"model_providers.deepseek.name",
+		"model_providers.deepseek.wire_api",
+		"model_providers.glm.base_url",
+		"model_providers.glm.env_key",
+		"model_providers.glm.name",
+		"model_providers.glm.wire_api",
+		"model_providers.moonshot.base_url",
+		"model_providers.moonshot.env_key",
+		"model_providers.moonshot.name",
+		"model_providers.moonshot.wire_api",
+		"model_providers.openai.base_url",
+		"model_providers.openai.env_key",
+		"model_providers.openai.name",
+		"model_providers.openai.wire_api",
+		"model_providers.qwen.base_url",
+		"model_providers.qwen.env_key",
+		"model_providers.qwen.name",
+		"model_providers.qwen.wire_api",
 	}
 	have := make(map[string]struct{}, len(OwnedKeysConfigTOML))
 	for _, k := range OwnedKeysConfigTOML {
@@ -223,10 +239,26 @@ func TestOwnedKeysConfigTOML_NoUnexpectedKeys(t *testing.T) {
 		"model_providers.anthropic.env_key",
 		"model_providers.anthropic.name",
 		"model_providers.anthropic.wire_api",
+		"model_providers.deepseek.base_url",
+		"model_providers.deepseek.env_key",
+		"model_providers.deepseek.name",
+		"model_providers.deepseek.wire_api",
+		"model_providers.glm.base_url",
+		"model_providers.glm.env_key",
+		"model_providers.glm.name",
+		"model_providers.glm.wire_api",
+		"model_providers.moonshot.base_url",
+		"model_providers.moonshot.env_key",
+		"model_providers.moonshot.name",
+		"model_providers.moonshot.wire_api",
 		"model_providers.openai.base_url",
 		"model_providers.openai.env_key",
 		"model_providers.openai.name",
 		"model_providers.openai.wire_api",
+		"model_providers.qwen.base_url",
+		"model_providers.qwen.env_key",
+		"model_providers.qwen.name",
+		"model_providers.qwen.wire_api",
 	}
 	if !reflect.DeepEqual(OwnedKeysConfigTOML, golden) {
 		t.Fatalf("OwnedKeysConfigTOML drifted from golden:\n got: %v\nwant: %v", OwnedKeysConfigTOML, golden)

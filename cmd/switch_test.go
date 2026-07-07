@@ -34,6 +34,7 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/adapter/stateio"
 	"github.com/a2d2-dev/claudecm/internal/commit"
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/presets"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 	"github.com/a2d2-dev/claudecm/internal/writepath"
 )
@@ -563,6 +564,76 @@ func TestSwitch_DryRunAbortsTxnPreservesTarget(t *testing.T) {
 	}
 	if !bytes.Equal(origBytes, afterBytes) {
 		t.Errorf("dry-run mutated settings.json;\nbefore: %s\nafter:  %s", origBytes, afterBytes)
+	}
+}
+
+func TestSwitch_PresetBackedProfileUsesNormalWritePathAndPreservesNonOwnedKeys(t *testing.T) {
+	h := newSwitchHarness(t)
+
+	preset, err := presets.Lookup("qwen")
+	if err != nil {
+		t.Fatalf("Lookup(qwen): %v", err)
+	}
+	p := config.NewProfile("qwen-work", preset.BaseURL, "sk-qwen-switch-1234")
+	p.Core.Provider = preset.ProviderKey
+	p.Core.Model = preset.Model
+	p.Tools = preset.Tools
+	if err := h.store.SaveProfile(p); err != nil {
+		t.Fatalf("SaveProfile(qwen-work): %v", err)
+	}
+
+	settingsPath := claudecodeadapter.SettingsPath(h.resv)
+	h.writeSettingsJSON(`{"theme":"dark","env":{"ANTHROPIC_MODEL":"old-model"}}`)
+	configPath := codexadapter.ConfigPath(h.resv)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("sandbox_mode = \"workspace-write\"\n"), 0o600); err != nil {
+		t.Fatalf("seed config.toml: %v", err)
+	}
+
+	switchYesFlag = true
+	stdout, _, err := runSwitchInner(t, "qwen-work")
+	if err != nil {
+		t.Fatalf("runSwitch preset-backed profile: %v\nstdout:\n%s", err, stdout)
+	}
+	if !strings.Contains(stdout, `Switched to "qwen-work"`) {
+		t.Fatalf("stdout missing switched confirmation:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "model_providers.qwen.base_url") {
+		t.Fatalf("pre-apply diff missing qwen owned-key change:\n%s", stdout)
+	}
+
+	settingsBytes, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read settings.json: %v", err)
+	}
+	if !strings.Contains(string(settingsBytes), `"theme":"dark"`) {
+		t.Fatalf("non-owned Claude Code key was not preserved:\n%s", settingsBytes)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	configBody := string(configBytes)
+	for _, want := range []string{
+		`sandbox_mode = "workspace-write"`,
+		`model_provider = "qwen"`,
+		`[model_providers.qwen]`,
+		`base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"`,
+	} {
+		if !strings.Contains(configBody, want) {
+			t.Fatalf("config.toml missing %q:\n%s", want, configBody)
+		}
+	}
+
+	state, err := h.store.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if state.CurrentProfile != "qwen-work" {
+		t.Fatalf("state.CurrentProfile = %q, want qwen-work", state.CurrentProfile)
 	}
 }
 

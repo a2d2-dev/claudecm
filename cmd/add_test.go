@@ -44,6 +44,8 @@ func resetAddFlags() {
 	addModelFlag = ""
 	addSmallFastModelFlag = ""
 	addSetFlag = nil
+	addPresetFlag = ""
+	addListPresetsFlag = false
 	addDryRunFlag = false
 	addOverwriteFlag = false
 	addOutputFlag = "text"
@@ -289,6 +291,154 @@ func TestAdd_HappyDescriptionAndSmallFast(t *testing.T) {
 	}
 }
 
+func TestAdd_PresetMoonshotDryRunRedactedProfileDraft(t *testing.T) {
+	h := newAddHarness(t)
+
+	addPresetFlag = "moonshot"
+	addAPIKeyFlag = "sk-preset-moonshot-1234"
+	addDryRunFlag = true
+
+	stdout, _, err := runAddInner(t, "work")
+	if err != nil {
+		t.Fatalf("runAdd: %v", err)
+	}
+	for _, want := range []string{
+		"provider: moonshot",
+		"base_url: https://api.moonshot.cn/v1",
+		"model: kimi-k2-0711-preview",
+		"model_provider: moonshot",
+		"model_providers.moonshot.base_url: https://api.moonshot.cn/v1",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("dry-run missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "sk-preset-moonshot-1234") {
+		t.Fatalf("dry-run leaked plaintext api key:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "sk-p***1234") {
+		t.Fatalf("dry-run missing redacted api key:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("profile file written despite --dry-run: %v", err)
+	}
+}
+
+func TestAdd_PresetAllBuiltInsSaveOrdinaryProfiles(t *testing.T) {
+	h := newAddHarness(t)
+
+	for _, name := range []string{"deepseek", "glm", "moonshot", "qwen"} {
+		resetAddFlags()
+		addPresetFlag = name
+		addAPIKeyFlag = "sk-" + name + "-1234567890"
+		if _, _, err := runAddInner(t, name+"-profile"); err != nil {
+			t.Fatalf("runAdd preset %q: %v", name, err)
+		}
+		loaded, err := h.store.LoadProfile(name + "-profile")
+		if err != nil {
+			t.Fatalf("LoadProfile(%q): %v", name+"-profile", err)
+		}
+		if loaded.SchemaVersion != config.CurrentProfileSchemaVersion {
+			t.Fatalf("%s SchemaVersion = %d", name, loaded.SchemaVersion)
+		}
+		if loaded.Core.Provider != name {
+			t.Fatalf("%s Provider = %q", name, loaded.Core.Provider)
+		}
+		if loaded.Core.APIKey != "sk-"+name+"-1234567890" {
+			t.Fatalf("%s APIKey not stored from user input", name)
+		}
+		ov := loaded.Tools[config.ToolCodex]
+		if got := ov.Raw["model_provider"]; got != name {
+			t.Fatalf("%s codex model_provider = %v", name, got)
+		}
+	}
+}
+
+func TestAdd_PresetCaseInsensitiveAndOverrides(t *testing.T) {
+	h := newAddHarness(t)
+
+	addPresetFlag = "MoonShot"
+	addAPIKeyFlag = "sk-override-1234"
+	addModelFlag = "kimi-k2-latest"
+	addBaseURLFlag = "https://override.example.com/v1"
+	addSetFlag = []string{
+		"tools.codex.raw.model_providers.moonshot.name=Moonshot Override",
+	}
+	if _, _, err := runAddInner(t, "work"); err != nil {
+		t.Fatalf("runAdd: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("work")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.Provider != "moonshot" {
+		t.Fatalf("Provider = %q, want canonical moonshot", loaded.Core.Provider)
+	}
+	if loaded.Core.Model != "kimi-k2-latest" {
+		t.Fatalf("Core.Model = %q", loaded.Core.Model)
+	}
+	if loaded.Core.BaseURL != "https://override.example.com/v1" {
+		t.Fatalf("Core.BaseURL = %q", loaded.Core.BaseURL)
+	}
+	ov := loaded.Tools[config.ToolCodex]
+	if got := ov.Raw["model"]; got != "kimi-k2-latest" {
+		t.Fatalf("codex raw model override = %v", got)
+	}
+	if got := ov.Raw["model_providers.moonshot.base_url"]; got != "https://override.example.com/v1" {
+		t.Fatalf("codex raw base_url override = %v", got)
+	}
+	if got := ov.Raw["model_providers.moonshot.name"]; got != "Moonshot Override" {
+		t.Fatalf("codex raw --set override = %v", got)
+	}
+}
+
+func TestAdd_ListPresetsText(t *testing.T) {
+	newAddHarness(t)
+	addListPresetsFlag = true
+
+	stdout, _, err := runAddInner(t)
+	if err != nil {
+		t.Fatalf("runAdd --list-presets: %v", err)
+	}
+	for _, name := range []string{"moonshot", "deepseek", "glm", "qwen"} {
+		if !strings.Contains(stdout, name) {
+			t.Fatalf("preset list missing %q:\n%s", name, stdout)
+		}
+	}
+	if !strings.Contains(stdout, "convenience templates") || !strings.Contains(stdout, "not official provider support") {
+		t.Fatalf("preset list missing boundary text:\n%s", stdout)
+	}
+}
+
+func TestAdd_PresetUnknownAndMissingSecretRefuseWithoutWrite(t *testing.T) {
+	h := newAddHarness(t)
+
+	addPresetFlag = "unknown"
+	_, _, err := runAddInner(t, "work")
+	if err == nil {
+		t.Fatalf("unknown preset accepted")
+	}
+	if !strings.Contains(err.Error(), "available presets: deepseek, glm, moonshot, qwen") {
+		t.Fatalf("unknown preset error missing available list: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written after unknown preset: %v", statErr)
+	}
+
+	resetAddFlags()
+	addPresetFlag = "moonshot"
+	_, _, err = runAddInner(t, "work")
+	if err == nil {
+		t.Fatalf("preset without secret accepted")
+	}
+	if !strings.Contains(err.Error(), "requires --api-key") {
+		t.Fatalf("missing secret error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written after missing secret: %v", statErr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
@@ -414,8 +564,11 @@ func TestAdd_DryRunNoWrite(t *testing.T) {
 	if !strings.Contains(stdout, "schema_version: 1") {
 		t.Fatalf("stdout missing YAML body; got %q", stdout)
 	}
-	if !strings.Contains(stdout, "sk-dryrun-1234") {
-		t.Fatalf("stdout missing api key; got %q", stdout)
+	if strings.Contains(stdout, "sk-dryrun-1234") {
+		t.Fatalf("stdout leaked plaintext api key; got %q", stdout)
+	}
+	if !strings.Contains(stdout, "sk-d***1234") {
+		t.Fatalf("stdout missing redacted api key; got %q", stdout)
 	}
 
 	path := filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")
@@ -454,8 +607,11 @@ func TestAdd_DryRunJSONOutputParses(t *testing.T) {
 	if out.Profile.SchemaVersion != config.CurrentProfileSchemaVersion {
 		t.Fatalf("SchemaVersion: got %d want %d", out.Profile.SchemaVersion, config.CurrentProfileSchemaVersion)
 	}
-	if out.Profile.Core.APIKey != "sk-dryrun-json-1234" {
-		t.Fatalf("Core.APIKey: got %q", out.Profile.Core.APIKey)
+	if out.Profile.Core.APIKey != "sk-d***1234" {
+		t.Fatalf("Core.APIKey: got %q, want redacted", out.Profile.Core.APIKey)
+	}
+	if strings.Contains(out.YAML, "sk-dryrun-json-1234") || strings.Contains(stdout, "sk-dryrun-json-1234") {
+		t.Fatalf("dry-run JSON leaked plaintext api key:\n%s", stdout)
 	}
 	if !strings.Contains(out.YAML, "schema_version: 1") {
 		t.Fatalf("YAML field missing schema_version; got %q", out.YAML)

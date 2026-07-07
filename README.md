@@ -39,6 +39,12 @@ claudecm add work \
   --api-key sk-ant-xxxxxxxx \
   --model claude-opus-4-5
 
+# Or start from a convenience provider preset and inspect the generated
+# fields before saving. Built-in presets include moonshot, deepseek,
+# glm, and qwen; secrets still come from you.
+claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx --dry-run
+claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
+
 # 3. Switch.
 claudecm switch work --yes
 
@@ -70,6 +76,35 @@ See [docs/quickstart.md](docs/quickstart.md) for a longer walk-through with expe
 | `claudecm version` | Print version, commit, and build date. |
 
 Global flags: `--home <dir>` (override `$HOME` for sandboxed runs), `--yes`, `--dry-run` (write commands).
+
+## Provider Presets
+
+`claudecm add --preset <name>` expands a built-in convenience template into an ordinary profile. The current catalog is `moonshot`, `deepseek`, `glm`, and `qwen`.
+
+Example dry-run output shows the generated fields with secrets redacted:
+
+```bash
+claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx --dry-run
+```
+
+```yaml
+core:
+  provider: moonshot
+  base_url: https://api.moonshot.cn/v1
+  api_key: sk-a***xxxx
+  model: kimi-k2-0711-preview
+tools:
+  codex:
+    raw:
+      model: kimi-k2-0711-preview
+      model_provider: moonshot
+      model_providers.moonshot.base_url: https://api.moonshot.cn/v1
+      model_providers.moonshot.env_key: OPENAI_API_KEY
+      model_providers.moonshot.name: Moonshot AI
+      model_providers.moonshot.wire_api: chat
+```
+
+Presets are convenience templates, not official provider support, certification, endorsement, or compatibility guarantees. Every generated field is overridable with explicit flags or `--set`; provider endpoints and model names can drift, so edit the profile when a provider changes its API.
 
 ## Deeper reading
 
