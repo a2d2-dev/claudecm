@@ -48,7 +48,7 @@ These rules encode the locked invariants. Each one is testable.
 
 11. **No `panic` in library code.** `panic` is allowed only in `main()` for unrecoverable startup failures. Every fallible function returns `error`. Wrap with `fmt.Errorf("...: %w", err)` when adding context.
 
-12. **No package-level mutable state.** Pass dependencies explicitly. The single exception is the structured logger configured in `main()`.
+12. **No package-level mutable state.** Pass dependencies explicitly. The only documented exceptions are the structured logger configured in `main()` and the process-local lock registry in `internal/storage/lock.go` (`processLocks`). Same-process flock contenders must be serialized process-wide, so the registry's scope must be the process; per-instance state would not serialize goroutines holding different instances.
 
 13. **Two-phase commit on multi-file writes.** When a single command touches more than one owned file, route through `internal/commit`. Direct sequencing of `writepath.Apply` calls across files is a violation. Maps to FR-16.
 

@@ -24,11 +24,13 @@ package storage
 //     via checkUnderHome on the sidecar path itself after creation. The
 //     second check catches an attacker-planted symlink at the sidecar path.
 //
-//   - Same-process callers are serialized through a small process-local gate
-//     keyed by resolved sidecar path before flock acquisition. Linux flock
-//     semantics are per-process enough that sibling goroutines can otherwise
-//     acquire distinct descriptors for the same sidecar and enter the protected
-//     section together.
+//   - Same-process callers are serialized through processLocks, the documented
+//     coding-standards rule-12 exception for this package. The registry is
+//     keyed by resolved sidecar path before flock acquisition because Linux
+//     flock semantics are per-process enough that sibling goroutines can
+//     otherwise acquire distinct descriptors for the same sidecar and enter the
+//     protected section together. The scope must be process-wide; per-instance
+//     state would not serialize goroutines holding different Resolver instances.
 //
 //   - The Resolver is required. Passing nil is refused with a clear error —
 //     symmetric with AtomicWrite / EnsureDir in atomic.go.
