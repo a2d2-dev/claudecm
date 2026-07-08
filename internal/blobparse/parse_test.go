@@ -32,8 +32,12 @@ func TestParseExtractsFieldsAndDesensitizes(t *testing.T) {
 			wantProvider:       "anthropic",
 		},
 		{
-			name:         "prose labels",
-			input:        `Base URL: https://proxy.example.test/v1, API Key: sk-prose-secret123, model: claude-opus-4`,
+			name: "prose labels",
+			input: strings.Join([]string{
+				`Base URL: https://proxy.example.test/v1`,
+				`API Key: sk-prose-secret123`,
+				`model: claude-opus-4`,
+			}, "\n"),
 			wantBaseURL:  "https://proxy.example.test/v1",
 			wantAPIKey:   "sk-prose-secret123",
 			wantModel:    "claude-opus-4",
@@ -124,6 +128,83 @@ func TestParseRedactsSecretNamedFieldsWithoutSecretShape(t *testing.T) {
 	}
 }
 
+func TestParseRedactsSecretNamedUnquotedValueToEndOfLine(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`API Key: sk-ai-input-1234`,
+		`AUTH=Bearer opaque-session-id-123456`,
+		`model claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	for _, secret := range []string{"sk-ai-input-1234", "Bearer opaque-session-id-123456", "opaque-session-id-123456"} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	if !strings.Contains(got.Desensitized, "model claude-sonnet") {
+		t.Fatalf("Desensitized swallowed next line:\n%s", got.Desensitized)
+	}
+}
+
+func TestParseRedactsAuthorizationSecretNamedField(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`Authorization: Bearer opaque-session-id-123456`,
+		`model claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	for _, secret := range []string{"Bearer opaque-session-id-123456", "opaque-session-id-123456"} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	if !strings.Contains(got.Desensitized, "model claude-sonnet") {
+		t.Fatalf("Desensitized swallowed next line:\n%s", got.Desensitized)
+	}
+}
+
+func TestParseRedactsGenericSecretNamedFieldsWithoutSecretShape(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`CLIENT_SECRET=prod-secret-value`,
+		`PASSWORD='plain password value'`,
+		`export DATABASE_TOKEN=db-token-value`,
+		`"private key": "plain-private-key-value"`,
+		`model: claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	if got.Core.BaseURL != "https://api.example.com" {
+		t.Fatalf("Core.BaseURL = %q", got.Core.BaseURL)
+	}
+	if got.Core.Model != "claude-sonnet" {
+		t.Fatalf("Core.Model = %q", got.Core.Model)
+	}
+	for _, secret := range []string{
+		"prod-secret-value",
+		"plain password value",
+		"db-token-value",
+		"plain-private-key-value",
+	} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	for _, nonSecret := range []string{"https://api.example.com", "claude-sonnet"} {
+		if !strings.Contains(got.Desensitized, nonSecret) {
+			t.Fatalf("Desensitized removed non-secret %q:\n%s", nonSecret, got.Desensitized)
+		}
+	}
+	if len(got.CapturedSecrets) != 4 {
+		t.Fatalf("CapturedSecrets len = %d, want 4: %#v", len(got.CapturedSecrets), got.CapturedSecrets)
+	}
+}
+
 func TestParseNoRecognizableFieldsPreservesPlainText(t *testing.T) {
 	input := "hello there\nthis blob has no profile fields"
 
@@ -141,7 +222,7 @@ func TestParseNoRecognizableFieldsPreservesPlainText(t *testing.T) {
 }
 
 func TestParseReusesStablePlaceholderForRepeatedSecret(t *testing.T) {
-	input := "ANTHROPIC_AUTH_TOKEN=sk-repeat-secret and API Key: sk-repeat-secret"
+	input := "ANTHROPIC_AUTH_TOKEN=sk-repeat-secret\nAPI Key: sk-repeat-secret"
 
 	got := Parse(input)
 

@@ -933,12 +933,12 @@ func TestApply_ReparseFailureRollsBack_FirstWrite(t *testing.T) {
 // the subsequent AtomicWrite rollback fails at os.Rename with EISDIR.
 // The parser then returns an error to trigger rollback.
 type sabotageParser struct {
-	calls   int
-	failOn  int
-	target  string
-	inner   Parser
-	t       *testing.T
-	sabbed  bool
+	calls  int
+	failOn int
+	target string
+	inner  Parser
+	t      *testing.T
+	sabbed bool
 }
 
 func (p *sabotageParser) Parse(data []byte) (any, error) {

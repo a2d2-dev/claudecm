@@ -285,4 +285,3 @@ func TestResolver_LexicalToolConfigPath(t *testing.T) {
 		})
 	}
 }
-

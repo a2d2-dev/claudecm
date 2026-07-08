@@ -39,6 +39,7 @@ func Parse(text string) Result {
 			registry.placeholderFor(candidate.value)
 		}
 	}
+	registerSecretNamedFields(text, registry)
 	registerGenericSecrets(text, candidates, registry)
 
 	desensitized := registry.desensitize(text)
@@ -291,6 +292,120 @@ func registerGenericSecrets(text string, candidates []fieldCandidate, registry *
 		}
 	}
 	registerHighEntropySecrets(text, candidates, registry)
+}
+
+func registerSecretNamedFields(text string, registry *secretRegistry) {
+	for _, assignment := range secretNamedAssignments(text) {
+		if !isSecretFieldName(assignment.name) {
+			continue
+		}
+		value := cleanValue(assignment.value, fieldAPIKey)
+		if value == "" {
+			continue
+		}
+		registry.placeholderFor(value)
+	}
+}
+
+type secretNamedAssignment struct {
+	name  string
+	value string
+}
+
+func secretNamedAssignments(text string) []secretNamedAssignment {
+	prefixRe := regexp.MustCompile(`(?i)(^|[\s{[,;])(?:export[ \t]+)?["']?([A-Za-z][A-Za-z0-9 _-]{0,80})["']?[ \t]*[:=][ \t]*`)
+	var out []secretNamedAssignment
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		matches := prefixRe.FindAllStringSubmatchIndex(line, -1)
+		for _, match := range matches {
+			if len(match) < 6 || match[4] < 0 || match[5] < 0 {
+				continue
+			}
+			out = append(out, secretNamedAssignment{
+				name:  line[match[4]:match[5]],
+				value: assignmentLineValue(line[match[1]:]),
+			})
+		}
+	}
+	return out
+}
+
+func assignmentLineValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	switch value[0] {
+	case '"':
+		return consumeQuotedValue(value, '"', true)
+	case '\'':
+		return consumeQuotedValue(value, '\'', false)
+	case '`':
+		return consumeQuotedValue(value, '`', false)
+	default:
+		return value
+	}
+}
+
+func consumeQuotedValue(value string, quote byte, allowEscape bool) string {
+	escaped := false
+	for i := 1; i < len(value); i++ {
+		if allowEscape && !escaped && value[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if !escaped && value[i] == quote {
+			return value[:i+1]
+		}
+		escaped = false
+	}
+	return value
+}
+
+func isSecretFieldName(name string) bool {
+	fields := normalizedNameFields(name)
+	if len(fields) == 0 {
+		return false
+	}
+	compact := strings.Join(fields, "")
+	for _, marker := range secretFieldNameMarkers() {
+		if compact == marker || strings.HasPrefix(compact, marker) || strings.Contains(compact, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func secretFieldNameMarkers() []string {
+	return []string{
+		"secret",
+		"password",
+		"passwd",
+		"pwd",
+		"token",
+		"apikey",
+		"auth",
+		"authorization",
+		"credential",
+		"credentials",
+		"privatekey",
+		"accesskey",
+		"clientsecret",
+	}
+}
+
+func normalizedNameFields(name string) []string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == ' ' || r == '\t':
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Fields(b.String())
 }
 
 func scrubResidualSecretShapes(text string, candidates []fieldCandidate) string {
