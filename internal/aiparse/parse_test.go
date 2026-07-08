@@ -202,6 +202,91 @@ func TestParseCoreJSONStrictSchema(t *testing.T) {
 	}
 }
 
+func TestParseCoreJSONAcceptsMarkdownJSONFenceLiveFixture(t *testing.T) {
+	text := "```json\n" +
+		"{\n" +
+		"  \"base_url\": \"https://api.anthropic.com\",\n" +
+		"  \"api_key\": \"{{CLAUDECM_SECRET_1}}\",\n" +
+		"  \"model\": \"claude-3-5-sonnet-20241022\",\n" +
+		"  \"small_fast_model\": \"claude-3-5-haiku-20241022\",\n" +
+		"  \"provider\": \"anthropic\"\n" +
+		"}\n" +
+		"```"
+	core, err := ParseCoreJSON(text)
+	if err != nil {
+		t.Fatalf("ParseCoreJSON: %v", err)
+	}
+	if core.BaseURL != "https://api.anthropic.com" ||
+		core.APIKey != "{{CLAUDECM_SECRET_1}}" ||
+		core.Model != "claude-3-5-sonnet-20241022" ||
+		core.SmallFastModel != "claude-3-5-haiku-20241022" ||
+		core.Provider != "anthropic" {
+		t.Fatalf("Core = %#v", core)
+	}
+}
+
+func TestParseCoreJSONAcceptsBareMarkdownFence(t *testing.T) {
+	text := "```\n" +
+		"{\n" +
+		"  \"base_url\": \"https://api.example.com\",\n" +
+		"  \"model\": \"claude-test\",\n" +
+		"  \"provider\": \"anthropic\"\n" +
+		"}\n" +
+		"```"
+	core, err := ParseCoreJSON(text)
+	if err != nil {
+		t.Fatalf("ParseCoreJSON: %v", err)
+	}
+	if core.BaseURL != "https://api.example.com" ||
+		core.Model != "claude-test" ||
+		core.Provider != "anthropic" {
+		t.Fatalf("Core = %#v", core)
+	}
+}
+
+func TestParseCoreJSONStillRefusesNonConformingPayloads(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "unknown field",
+			text: `{"base_url":"https://api.example.com","extra":"nope"}`,
+		},
+		{
+			name: "nested object",
+			text: `{"base_url":"https://api.example.com","model":{"no":"no"}}`,
+		},
+		{
+			name: "array value",
+			text: `{"base_url":"https://api.example.com","model":["no"]}`,
+		},
+		{
+			name: "null value",
+			text: `{"base_url":"https://api.example.com","model":null}`,
+		},
+		{
+			name: "trailing data",
+			text: `{"base_url":"https://api.example.com"} {"model":"claude"}`,
+		},
+		{
+			name: "empty object",
+			text: `{}`,
+		},
+		{
+			name: "fenced unknown field",
+			text: "```json\n{\"base_url\":\"https://api.example.com\",\"extra\":\"nope\"}\n```",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := ParseCoreJSON(tt.text); err == nil {
+				t.Fatalf("ParseCoreJSON accepted %s", tt.name)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) Do(req *http.Request) (*http.Response, error) {
