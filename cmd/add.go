@@ -28,15 +28,19 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/a2d2-dev/claudecm/internal/aiparse"
+	"github.com/a2d2-dev/claudecm/internal/blobparse"
 	"github.com/a2d2-dev/claudecm/internal/config"
 	"github.com/a2d2-dev/claudecm/internal/envextract"
 	"github.com/a2d2-dev/claudecm/internal/fileparse"
@@ -88,6 +92,9 @@ var (
 	addPresetFlag         string
 	addFromEnvFlag        bool
 	addFromFileFlag       string
+	addFromTextFlag       string
+	addAIFlag             bool
+	addAIProfileFlag      string
 	addListPresetsFlag    bool
 	addDryRunFlag         bool
 	addOverwriteFlag      bool
@@ -109,6 +116,24 @@ func SetNowForTest(fn func() time.Time) func() {
 	prev := nowFn
 	nowFn = fn
 	return func() { nowFn = prev }
+}
+
+type addLLMParser interface {
+	Parse(ctx context.Context, desensitized string, creds aiparse.Credentials) (config.CoreConfig, error)
+}
+
+// newAddLLMParser is the --ai transport seam. Tests replace it with a mock
+// parser so cmd/add never performs real network I/O under test. Documented
+// exception to coding-standards rule 12, matching nowFn and isTerminalFn.
+var newAddLLMParser = func() addLLMParser {
+	return aiparse.NewClient(nil)
+}
+
+// SetAddLLMParserForTest overrides the --ai parser factory.
+func SetAddLLMParserForTest(fn func() addLLMParser) func() {
+	prev := newAddLLMParser
+	newAddLLMParser = fn
+	return func() { newAddLLMParser = prev }
 }
 
 var addCmd = &cobra.Command{
@@ -159,6 +184,13 @@ EXAMPLES
   claudecm add work --preset moonshot --api-key sk-... --dry-run
   claudecm add work --preset moonshot --api-key sk-... --model kimi-k2-latest
 
+  # Start from pasted text locally; use - to read stdin.
+  claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-...' --dry-run
+  cat provider.txt | claudecm add work --from-text -
+
+  # Opt in to one secret-free LLM parse when local extraction is not enough.
+  claudecm add work --from-text 'messy provider note with sk-...' --ai --dry-run
+
   # Discover built-in presets
   claudecm add --list-presets
 
@@ -189,6 +221,9 @@ func init() {
 	addCmd.Flags().StringVar(&addPresetFlag, "preset", "", "Built-in provider preset name (run --list-presets to discover)")
 	addCmd.Flags().BoolVar(&addFromEnvFlag, "from-env", false, "Build the profile draft from Claude Code / Codex environment variables")
 	addCmd.Flags().StringVar(&addFromFileFlag, "from-file", "", "Build the profile draft from a dotenv, shell, JSON, YAML, or TOML file")
+	addCmd.Flags().StringVar(&addFromTextFlag, "from-text", "", "Build the profile draft from pasted text locally; use '-' to read stdin")
+	addCmd.Flags().BoolVar(&addAIFlag, "ai", false, "With --from-text, opt in to one secret-free Anthropic-compatible LLM parse")
+	addCmd.Flags().StringVar(&addAIProfileFlag, "ai-profile", "", "Profile whose Anthropic-compatible credentials are borrowed for --ai parsing")
 	addCmd.Flags().BoolVar(&addListPresetsFlag, "list-presets", false, "List built-in provider presets and exit")
 	addCmd.Flags().StringArrayVar(&addSetFlag, "set", nil,
 		"Sparse overlay entry (repeatable). Format: tools.<tool>.<sub>=<value>. "+
@@ -236,7 +271,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err := validateAddInputSources(hasPreset); err != nil {
 		return err
 	}
-	fromInputSource := addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != ""
+	fromInputSource := addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "" || strings.TrimSpace(addFromTextFlag) != ""
 	if fromInputSource {
 		providerFlagSet = flagWasExplicit(cmd, "provider", false)
 		baseURLFlagSet = flagWasExplicit(cmd, "base-url", false)
@@ -244,6 +279,19 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		modelFlagSet = flagWasExplicit(cmd, "model", false)
 		smallFastModelFlagSet = flagWasExplicit(cmd, "small-fast-model", false)
 	}
+
+	// Bootstrap is required whether or not the write path fires: --dry-run
+	// still needs a Resolver to exist (and, for parity with every other
+	// command, we do not want a machine without ~/.claudecm to succeed
+	// silently and then fail later on the first non-dry-run add).
+	resv, err := resolverFromGlobals()
+	if err != nil {
+		return fmt.Errorf("failed to resolve HOME: %w", err)
+	}
+	if err := storage.Bootstrap(resv); err != nil {
+		return fmt.Errorf("failed to bootstrap ~/.claudecm layout: %w", err)
+	}
+	store := storage.NewFileStorage(resv)
 
 	provider := addProviderFlag
 	baseURL := addBaseURLFlag
@@ -284,6 +332,19 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		model = core.Model
 		smallFastModel = core.SmallFastModel
 	}
+	if strings.TrimSpace(addFromTextFlag) != "" {
+		core, err := profileDraftFromText(cmd, store)
+		if err != nil {
+			return err
+		}
+		if core.Provider != "" {
+			provider = core.Provider
+		}
+		baseURL = core.BaseURL
+		apiKey = core.APIKey
+		model = core.Model
+		smallFastModel = core.SmallFastModel
+	}
 	if providerFlagSet {
 		provider = addProviderFlag
 	}
@@ -309,7 +370,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if hasPreset && addAPIKeyFlag == "" {
 		return fmt.Errorf("preset %q requires --api-key in non-interactive add", preset.Name)
 	}
-	if (addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "") && strings.TrimSpace(apiKey) == "" {
+	if fromInputSource && strings.TrimSpace(apiKey) == "" {
 		return fmt.Errorf("no API key found in input source")
 	}
 
@@ -337,19 +398,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		},
 		Tools: tools,
 	}
-
-	// Bootstrap is required whether or not the write path fires: --dry-run
-	// still needs a Resolver to exist (and, for parity with every other
-	// command, we do not want a machine without ~/.claudecm to succeed
-	// silently and then fail later on the first non-dry-run add).
-	resv, err := resolverFromGlobals()
-	if err != nil {
-		return fmt.Errorf("failed to resolve HOME: %w", err)
-	}
-	if err := storage.Bootstrap(resv); err != nil {
-		return fmt.Errorf("failed to bootstrap ~/.claudecm layout: %w", err)
-	}
-	store := storage.NewFileStorage(resv)
 
 	if addDryRunFlag {
 		return renderAddDryRun(cmd.OutOrStdout(), format, profile)
@@ -399,6 +447,7 @@ func resolveAddPreset(raw string) (presets.Preset, bool, error) {
 
 func validateAddInputSources(hasPreset bool) error {
 	fromFileSet := strings.TrimSpace(addFromFileFlag) != ""
+	fromTextSet := strings.TrimSpace(addFromTextFlag) != ""
 	count := 0
 	if hasPreset {
 		count++
@@ -409,8 +458,17 @@ func validateAddInputSources(hasPreset bool) error {
 	if fromFileSet {
 		count++
 	}
+	if fromTextSet {
+		count++
+	}
 	if count > 1 {
-		return fmt.Errorf("choose only one add input source: --preset, --from-env, or --from-file")
+		return fmt.Errorf("choose only one add input source: --preset, --from-env, --from-file, or --from-text")
+	}
+	if addAIFlag && !fromTextSet {
+		return fmt.Errorf("--ai requires --from-text")
+	}
+	if strings.TrimSpace(addAIProfileFlag) != "" && !addAIFlag {
+		return fmt.Errorf("--ai-profile requires --ai")
 	}
 	return nil
 }
@@ -467,6 +525,136 @@ func profileDraftFromEnv() (config.CoreConfig, map[config.ToolID]config.ToolOver
 	}
 
 	return core, tools, nil
+}
+
+func profileDraftFromText(cmd *cobra.Command, store *storage.FileStorage) (config.CoreConfig, error) {
+	text, err := readAddFromText(cmd)
+	if err != nil {
+		return config.CoreConfig{}, err
+	}
+	parsed := blobparse.Parse(text)
+	if !addAIFlag {
+		if !coreHasRecognizableField(parsed.Core) {
+			return config.CoreConfig{}, fmt.Errorf("could not extract profile fields from text")
+		}
+		return normalizeParsedProvider(parsed.Core), nil
+	}
+
+	if err := aiparse.EnsureSecretFree(parsed.Desensitized); err != nil {
+		return config.CoreConfig{}, err
+	}
+	lenderName, creds, err := resolveAddAICredentials(store)
+	if err != nil {
+		return config.CoreConfig{}, err
+	}
+	if isTerminal(os.Stdin) {
+		fmt.Fprintf(cmd.OutOrStdout(), "--ai will borrow credentials from profile %q.\n", lenderName)
+		fmt.Fprintln(cmd.OutOrStdout(), "--- desensitized payload to send ---")
+		fmt.Fprintln(cmd.OutOrStdout(), parsed.Desensitized)
+		fmt.Fprintln(cmd.OutOrStdout(), "--- end desensitized payload ---")
+		ok, promptErr := promptConfirm(cmd.OutOrStdout(), os.Stdin, "Send this secret-free payload for --ai parsing?")
+		if promptErr != nil {
+			return config.CoreConfig{}, fmt.Errorf("read confirmation: %w", promptErr)
+		}
+		if !ok {
+			return config.CoreConfig{}, fmt.Errorf("--ai parse refused by user")
+		}
+	}
+
+	aiCore, err := newAddLLMParser().Parse(context.Background(), parsed.Desensitized, creds)
+	if err != nil {
+		return config.CoreConfig{}, err
+	}
+	aiCore = normalizeParsedProvider(aiCore)
+	aiCore.APIKey, err = reinjectParsedAPIKey(aiCore.APIKey, parsed.CapturedSecrets)
+	if err != nil {
+		return config.CoreConfig{}, err
+	}
+	if !coreHasRecognizableField(aiCore) {
+		return config.CoreConfig{}, fmt.Errorf("--ai parse response contained no profile fields")
+	}
+	return aiCore, nil
+}
+
+func readAddFromText(cmd *cobra.Command) (string, error) {
+	raw := strings.TrimSpace(addFromTextFlag)
+	if raw == "" {
+		return "", fmt.Errorf("--from-text requires text or '-'")
+	}
+	if raw != "-" {
+		return addFromTextFlag, nil
+	}
+	body, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", fmt.Errorf("read --from-text stdin: %w", err)
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return "", fmt.Errorf("--from-text stdin was empty")
+	}
+	return string(body), nil
+}
+
+func resolveAddAICredentials(store *storage.FileStorage) (string, aiparse.Credentials, error) {
+	if store == nil {
+		return "", aiparse.Credentials{}, fmt.Errorf("no credentials available for --ai parse")
+	}
+	name := strings.TrimSpace(addAIProfileFlag)
+	if name == "" {
+		state, err := store.LoadState()
+		if err != nil {
+			return "", aiparse.Credentials{}, fmt.Errorf("failed to read active profile for --ai parse: %w", err)
+		}
+		name = strings.TrimSpace(state.CurrentProfile)
+		if name == "" {
+			return "", aiparse.Credentials{}, fmt.Errorf("no credentials available for --ai parse: no active profile set and --ai-profile was not provided")
+		}
+	}
+	profile, err := store.LoadProfile(name)
+	if err != nil {
+		return "", aiparse.Credentials{}, fmt.Errorf("profile %q for --ai parse could not be loaded: %w", name, err)
+	}
+	if strings.TrimSpace(profile.Core.Provider) != "" && strings.TrimSpace(profile.Core.Provider) != addProviderDefault {
+		return "", aiparse.Credentials{}, fmt.Errorf("--ai currently supports only Anthropic-compatible messages endpoints")
+	}
+	if strings.TrimSpace(profile.Core.BaseURL) == "" || strings.TrimSpace(profile.Core.APIKey) == "" {
+		return "", aiparse.Credentials{}, fmt.Errorf("no credentials available for --ai parse: profile %q is missing base_url or api_key", name)
+	}
+	return name, aiparse.Credentials{
+		BaseURL: profile.Core.BaseURL,
+		APIKey:  profile.Core.APIKey,
+		Model:   profile.Core.Model,
+	}, nil
+}
+
+func reinjectParsedAPIKey(apiKey string, captured map[string]string) (string, error) {
+	if secret, ok := captured[apiKey]; ok {
+		return secret, nil
+	}
+	if strings.TrimSpace(apiKey) != "" {
+		return "", fmt.Errorf("--ai parse response api_key did not match a locally captured secret placeholder")
+	}
+	if len(captured) == 1 {
+		for _, secret := range captured {
+			return secret, nil
+		}
+	}
+	return "", nil
+}
+
+func normalizeParsedProvider(core config.CoreConfig) config.CoreConfig {
+	switch core.Provider {
+	case "openai", "openai-compatible":
+		core.Provider = "openai-compat"
+	}
+	return core
+}
+
+func coreHasRecognizableField(core config.CoreConfig) bool {
+	return core.BaseURL != "" ||
+		core.APIKey != "" ||
+		core.Model != "" ||
+		core.SmallFastModel != "" ||
+		core.Provider != ""
 }
 
 func lookupNonEmptyEnv(name string) string {

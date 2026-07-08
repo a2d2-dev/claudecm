@@ -223,10 +223,10 @@ type fixtureCase struct {
 	// path. Kept as separate bools rather than an enum so an unknown
 	// value in a future fixture is a compile-time addition, not a
 	// silent default.
-	SymlinkInHome     bool // ~/.claude/settings.json → ~/.claude/settings-actual.json
-	SymlinkOutOfHome  bool // ~/.claude/settings.json → outside-HOME real file
-	ErrorOnlyErrName  string // expected error identifier when ErrorOnly is true
-	ErrorOnly         bool  // true → assert Import error, skip all stage compares
+	SymlinkInHome    bool   // ~/.claude/settings.json → ~/.claude/settings-actual.json
+	SymlinkOutOfHome bool   // ~/.claude/settings.json → outside-HOME real file
+	ErrorOnlyErrName string // expected error identifier when ErrorOnly is true
+	ErrorOnly        bool   // true → assert Import error, skip all stage compares
 }
 
 // discoverCases walks classes then names to build the case slice.

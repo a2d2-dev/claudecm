@@ -8,18 +8,18 @@ import (
 
 // ClaudeEnvVars defines the environment variables used by Claude Code
 const (
-	EnvBaseURL         = "ANTHROPIC_BASE_URL"
-	EnvAuthToken       = "ANTHROPIC_AUTH_TOKEN"
-	EnvModel           = "ANTHROPIC_MODEL"
-	EnvSmallFastModel  = "ANTHROPIC_SMALL_FAST_MODEL"
+	EnvBaseURL        = "ANTHROPIC_BASE_URL"
+	EnvAuthToken      = "ANTHROPIC_AUTH_TOKEN"
+	EnvModel          = "ANTHROPIC_MODEL"
+	EnvSmallFastModel = "ANTHROPIC_SMALL_FAST_MODEL"
 )
 
 // ExtractedEnv holds the extracted environment variables
 type ExtractedEnv struct {
-	BaseURL         string
-	AuthToken       string
-	Model           string
-	SmallFastModel  string
+	BaseURL        string
+	AuthToken      string
+	Model          string
+	SmallFastModel string
 }
 
 // ExtractCurrentEnv extracts Claude-related environment variables from the current environment

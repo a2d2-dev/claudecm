@@ -47,6 +47,9 @@ func resetAddFlags() {
 	addPresetFlag = ""
 	addFromEnvFlag = false
 	addFromFileFlag = ""
+	addFromTextFlag = ""
+	addAIFlag = false
+	addAIProfileFlag = ""
 	addListPresetsFlag = false
 	addDryRunFlag = false
 	addOverwriteFlag = false

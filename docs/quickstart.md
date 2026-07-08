@@ -77,6 +77,26 @@ claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
 
 Available presets: `moonshot`, `deepseek`, `glm`, `qwen`. Use `claudecm add --list-presets` to inspect the current catalog. Endpoint and model names can drift, so override with `--base-url`, `--model`, `--provider`, or `--set` when a provider changes its API.
 
+You can also build a draft from pasted text. This is local by default: `--from-text` runs the local extractor, redacts secrets in `--dry-run`, and does not use the network.
+
+```bash
+claudecm add work \
+  --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-ant-xxxxxxxx ANTHROPIC_MODEL=claude-opus-4-5' \
+  --dry-run
+```
+
+Use `--from-text -` to read stdin:
+
+```bash
+cat provider-snippet.txt | claudecm add work --from-text - --dry-run
+```
+
+If the local extractor is not enough, `--ai` is opt-in per invocation. claudecm strips secret-shaped tokens locally, keeps captured secrets in-process, and sends only the desensitized text in one Anthropic-compatible Messages request using the active profile's credentials, or `--ai-profile <name>` if you choose another credential-lending profile. Interactive runs show the exact desensitized payload before sending.
+
+```bash
+claudecm add work --from-text 'messy provider note with sk-ant-xxxxxxxx' --ai --dry-run
+```
+
 > **Name rules.** Profile names must match `^[a-z0-9][a-z0-9._-]{0,63}$` (NFR-S5). If `claudecm add` fails with a profile-name error, that regex is the reason — no uppercase, no leading dot/dash, ≤ 64 characters.
 
 ## 4. Switch to the second profile

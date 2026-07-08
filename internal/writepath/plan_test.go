@@ -220,10 +220,10 @@ func TestFlatten_EscapesDotAndBackslashInKeys(t *testing.T) {
 		t.Fatalf("Flatten err = %v", err)
 	}
 	want := map[string]any{
-		`a\.b`:      1,
-		`a\\b`:      2,
-		`a\\\.b`:    3,
-		`plain`:     4,
+		`a\.b`:        1,
+		`a\\b`:        2,
+		`a\\\.b`:      3,
+		`plain`:       4,
 		`nested.c\.d`: 5,
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -266,8 +266,8 @@ func TestFlatten_EmptyMapAtLeaf(t *testing.T) {
 		t.Fatalf("Flatten err = %v", err)
 	}
 	want := map[string]any{
-		"present":      1,
-		"nested.kept":  "yes",
+		"present":     1,
+		"nested.kept": "yes",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Flatten = %+v; want %+v", got, want)

@@ -11,14 +11,14 @@ import (
 // legacy v0 → v1 migration when the file pre-dates the unified schema. The
 // decision tree is intentionally narrow:
 //
-//   1. Malformed YAML        → error (no fallback writes, NFR-S1).
-//   2. schema_version absent → treat as legacy v0; migrate to v1 in-memory.
-//      The next save will rewrite the file under the v1 shape.
-//   3. schema_version == 1   → decode as v1.
-//   4. schema_version >= 2   → refuse with a "newer claudecm wrote this" error
-//                              (NFR-M1: never silently misread a future schema).
-//   5. Any other value (e.g. negative)
-//                            → refuse: schema version is structurally invalid.
+//  1. Malformed YAML        → error (no fallback writes, NFR-S1).
+//  2. schema_version absent → treat as legacy v0; migrate to v1 in-memory.
+//     The next save will rewrite the file under the v1 shape.
+//  3. schema_version == 1   → decode as v1.
+//  4. schema_version >= 2   → refuse with a "newer claudecm wrote this" error
+//     (NFR-M1: never silently misread a future schema).
+//  5. Any other value (e.g. negative)
+//     → refuse: schema version is structurally invalid.
 //
 // MarshalProfile is the symmetric writer; it always stamps
 // CurrentProfileSchemaVersion on the output.

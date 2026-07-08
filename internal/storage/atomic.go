@@ -118,11 +118,11 @@ func Stat(path string) (Fingerprint, bool, error) {
 //  4. fsync the temp file, close it.
 //  5. Publish the temp to the final path:
 //     - opts.MustNotExist=false: os.Rename(temp, target). Rename is atomic
-//       on POSIX and clobbers any pre-existing target as a single step.
+//     on POSIX and clobbers any pre-existing target as a single step.
 //     - opts.MustNotExist=true: os.Link(temp, target) then os.Remove(temp).
-//       Link fails atomically with EEXIST if the target already exists,
-//       eliminating the TOCTOU window a Lstat pre-check would leave open
-//       between check and rename. On EEXIST we return ErrTargetExists.
+//     Link fails atomically with EEXIST if the target already exists,
+//     eliminating the TOCTOU window a Lstat pre-check would leave open
+//     between check and rename. On EEXIST we return ErrTargetExists.
 //  6. fsync the parent directory so the rename/link is durable on ext4/xfs.
 //  7. Return the post-write Fingerprint.
 //
