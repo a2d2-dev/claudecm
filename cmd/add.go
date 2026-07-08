@@ -38,6 +38,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/a2d2-dev/claudecm/internal/config"
+	"github.com/a2d2-dev/claudecm/internal/envextract"
+	"github.com/a2d2-dev/claudecm/internal/fileparse"
 	"github.com/a2d2-dev/claudecm/internal/presets"
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
@@ -84,6 +86,8 @@ var (
 	addSmallFastModelFlag string
 	addSetFlag            []string
 	addPresetFlag         string
+	addFromEnvFlag        bool
+	addFromFileFlag       string
 	addListPresetsFlag    bool
 	addDryRunFlag         bool
 	addOverwriteFlag      bool
@@ -183,6 +187,8 @@ func init() {
 	addCmd.Flags().StringVar(&addModelFlag, "model", "", "Core model name")
 	addCmd.Flags().StringVar(&addSmallFastModelFlag, "small-fast-model", "", "Core small/fast auxiliary model name")
 	addCmd.Flags().StringVar(&addPresetFlag, "preset", "", "Built-in provider preset name (run --list-presets to discover)")
+	addCmd.Flags().BoolVar(&addFromEnvFlag, "from-env", false, "Build the profile draft from Claude Code / Codex environment variables")
+	addCmd.Flags().StringVar(&addFromFileFlag, "from-file", "", "Build the profile draft from a dotenv, shell, JSON, YAML, or TOML file")
 	addCmd.Flags().BoolVar(&addListPresetsFlag, "list-presets", false, "List built-in provider presets and exit")
 	addCmd.Flags().StringArrayVar(&addSetFlag, "set", nil,
 		"Sparse overlay entry (repeatable). Format: tools.<tool>.<sub>=<value>. "+
@@ -219,16 +225,31 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	providerFlagSet := flagWasExplicit(cmd, "provider", addProviderFlag != addProviderDefault)
 	baseURLFlagSet := flagWasExplicit(cmd, "base-url", addBaseURLFlag != "")
+	apiKeyFlagSet := flagWasExplicit(cmd, "api-key", addAPIKeyFlag != "")
 	modelFlagSet := flagWasExplicit(cmd, "model", addModelFlag != "")
+	smallFastModelFlagSet := flagWasExplicit(cmd, "small-fast-model", addSmallFastModelFlag != "")
 
 	preset, hasPreset, err := resolveAddPreset(addPresetFlag)
 	if err != nil {
 		return err
 	}
+	if err := validateAddInputSources(hasPreset); err != nil {
+		return err
+	}
+	fromInputSource := addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != ""
+	if fromInputSource {
+		providerFlagSet = flagWasExplicit(cmd, "provider", false)
+		baseURLFlagSet = flagWasExplicit(cmd, "base-url", false)
+		apiKeyFlagSet = flagWasExplicit(cmd, "api-key", false)
+		modelFlagSet = flagWasExplicit(cmd, "model", false)
+		smallFastModelFlagSet = flagWasExplicit(cmd, "small-fast-model", false)
+	}
 
 	provider := addProviderFlag
 	baseURL := addBaseURLFlag
+	apiKey := addAPIKeyFlag
 	model := addModelFlag
+	smallFastModel := addSmallFastModelFlag
 	var tools map[config.ToolID]config.ToolOverlay
 	if hasPreset {
 		provider = preset.ProviderKey
@@ -236,14 +257,47 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		model = preset.Model
 		tools = cloneToolMap(preset.Tools)
 	}
+	if addFromEnvFlag {
+		core, envTools, err := profileDraftFromEnv()
+		if err != nil {
+			return err
+		}
+		if core.Provider != "" {
+			provider = core.Provider
+		}
+		baseURL = core.BaseURL
+		apiKey = core.APIKey
+		model = core.Model
+		smallFastModel = core.SmallFastModel
+		tools = mergeToolMaps(tools, envTools)
+	}
+	if strings.TrimSpace(addFromFileFlag) != "" {
+		core, err := fileparse.ParseProfileCoreFile(addFromFileFlag)
+		if err != nil {
+			return err
+		}
+		if core.Provider != "" {
+			provider = core.Provider
+		}
+		baseURL = core.BaseURL
+		apiKey = core.APIKey
+		model = core.Model
+		smallFastModel = core.SmallFastModel
+	}
 	if providerFlagSet {
 		provider = addProviderFlag
 	}
 	if baseURLFlagSet {
 		baseURL = addBaseURLFlag
 	}
+	if apiKeyFlagSet {
+		apiKey = addAPIKeyFlag
+	}
 	if modelFlagSet {
 		model = addModelFlag
+	}
+	if smallFastModelFlagSet {
+		smallFastModel = addSmallFastModelFlag
 	}
 	if hasPreset {
 		applyExplicitPresetFlagOverrides(tools, preset.Name, provider, baseURL, model, providerFlagSet, baseURLFlagSet, modelFlagSet)
@@ -254,6 +308,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 	if hasPreset && addAPIKeyFlag == "" {
 		return fmt.Errorf("preset %q requires --api-key in non-interactive add", preset.Name)
+	}
+	if (addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "") && strings.TrimSpace(apiKey) == "" {
+		return fmt.Errorf("no API key found in input source")
 	}
 
 	// Build tools overlay from --set entries. Parsing is a pure
@@ -274,9 +331,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		Core: config.CoreConfig{
 			Provider:       provider,
 			BaseURL:        baseURL,
-			APIKey:         addAPIKeyFlag,
+			APIKey:         apiKey,
 			Model:          model,
-			SmallFastModel: addSmallFastModelFlag,
+			SmallFastModel: smallFastModel,
 		},
 		Tools: tools,
 	}
@@ -340,6 +397,24 @@ func resolveAddPreset(raw string) (presets.Preset, bool, error) {
 	return p, true, nil
 }
 
+func validateAddInputSources(hasPreset bool) error {
+	fromFileSet := strings.TrimSpace(addFromFileFlag) != ""
+	count := 0
+	if hasPreset {
+		count++
+	}
+	if addFromEnvFlag {
+		count++
+	}
+	if fromFileSet {
+		count++
+	}
+	if count > 1 {
+		return fmt.Errorf("choose only one add input source: --preset, --from-env, or --from-file")
+	}
+	return nil
+}
+
 func flagWasExplicit(cmd *cobra.Command, name string, fallback bool) bool {
 	if cmd != nil && cmd.Flags() != nil {
 		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
@@ -347,6 +422,86 @@ func flagWasExplicit(cmd *cobra.Command, name string, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+func profileDraftFromEnv() (config.CoreConfig, map[config.ToolID]config.ToolOverlay, error) {
+	var core config.CoreConfig
+	var tools map[config.ToolID]config.ToolOverlay
+
+	core.Provider = addProviderDefault
+	if v := lookupNonEmptyEnv("ANTHROPIC_BASE_URL"); v != "" {
+		core.BaseURL = v
+	}
+	if v := lookupNonEmptyEnv("ANTHROPIC_AUTH_TOKEN"); v != "" {
+		core.APIKey = v
+	}
+	if v := lookupNonEmptyEnv("ANTHROPIC_API_KEY"); v != "" {
+		if core.APIKey == "" {
+			core.APIKey = v
+		} else {
+			tools = putClaudeCodeEnv(tools, "ANTHROPIC_API_KEY", v)
+		}
+	}
+	if v := lookupNonEmptyEnv("ANTHROPIC_MODEL"); v != "" {
+		core.Model = v
+	}
+	if v := lookupNonEmptyEnv("ANTHROPIC_SMALL_FAST_MODEL"); v != "" {
+		core.SmallFastModel = v
+	}
+
+	codexKey := lookupNonEmptyEnv("OPENAI_API_KEY")
+	codexBaseURL := lookupNonEmptyEnv("OPENAI_BASE_URL")
+	codexModel := lookupNonEmptyEnv("CODEX_MODEL")
+	codexProvider := normalizeCodexProvider(lookupNonEmptyEnv("CODEX_MODEL_PROVIDER"))
+	if core.APIKey == "" && codexKey != "" {
+		core.APIKey = codexKey
+	}
+	if core.BaseURL == "" && codexBaseURL != "" {
+		core.BaseURL = codexBaseURL
+	}
+	if core.Model == "" && codexModel != "" {
+		core.Model = codexModel
+	}
+	if codexProvider != "" {
+		core.Provider = codexProvider
+	}
+
+	return core, tools, nil
+}
+
+func lookupNonEmptyEnv(name string) string {
+	v, ok := envextract.Lookup(name)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+func normalizeCodexProvider(provider string) string {
+	switch strings.TrimSpace(provider) {
+	case "":
+		return ""
+	case "openai":
+		return "openai-compat"
+	default:
+		return provider
+	}
+}
+
+func putClaudeCodeEnv(
+	tools map[config.ToolID]config.ToolOverlay,
+	name, value string,
+) map[config.ToolID]config.ToolOverlay {
+	if tools == nil {
+		tools = map[config.ToolID]config.ToolOverlay{}
+	}
+	ov := tools[config.ToolClaudeCode]
+	if ov.ExtraEnv == nil {
+		ov.ExtraEnv = map[string]string{}
+	}
+	ov.ExtraEnv[name] = value
+	tools[config.ToolClaudeCode] = ov
+	return tools
 }
 
 func applyExplicitPresetFlagOverrides(

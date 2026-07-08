@@ -45,6 +45,8 @@ func resetAddFlags() {
 	addSmallFastModelFlag = ""
 	addSetFlag = nil
 	addPresetFlag = ""
+	addFromEnvFlag = false
+	addFromFileFlag = ""
 	addListPresetsFlag = false
 	addDryRunFlag = false
 	addOverwriteFlag = false
@@ -94,10 +96,34 @@ func runAddInner(t *testing.T, args ...string) (stdout, stderr string, err error
 	t.Helper()
 	var out, errBuf bytes.Buffer
 	cmd := &cobra.Command{Use: "add"}
+	bindSyntheticAddFlags(cmd)
 	cmd.SetOut(&out)
 	cmd.SetErr(&errBuf)
 	err = runAdd(cmd, args)
 	return out.String(), errBuf.String(), err
+}
+
+func bindSyntheticAddFlags(cmd *cobra.Command) {
+	cmd.Flags().String("provider", addProviderFlag, "")
+	if addProviderFlag != addProviderDefault {
+		_ = cmd.Flags().Set("provider", addProviderFlag)
+	}
+	cmd.Flags().String("base-url", addBaseURLFlag, "")
+	if addBaseURLFlag != "" {
+		_ = cmd.Flags().Set("base-url", addBaseURLFlag)
+	}
+	cmd.Flags().String("api-key", addAPIKeyFlag, "")
+	if addAPIKeyFlag != "" {
+		_ = cmd.Flags().Set("api-key", addAPIKeyFlag)
+	}
+	cmd.Flags().String("model", addModelFlag, "")
+	if addModelFlag != "" {
+		_ = cmd.Flags().Set("model", addModelFlag)
+	}
+	cmd.Flags().String("small-fast-model", addSmallFastModelFlag, "")
+	if addSmallFastModelFlag != "" {
+		_ = cmd.Flags().Set("small-fast-model", addSmallFastModelFlag)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +462,186 @@ func TestAdd_PresetUnknownAndMissingSecretRefuseWithoutWrite(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")); !os.IsNotExist(statErr) {
 		t.Fatalf("profile file written after missing secret: %v", statErr)
+	}
+}
+
+func TestAdd_FromFileDotenvDryRunRedactsAndDoesNotWrite(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.env")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		"ANTHROPIC_BASE_URL=https://envfile.example.com",
+		"ANTHROPIC_AUTH_TOKEN=sk-file-dotenv-1234",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+	addDryRunFlag = true
+
+	stdout, _, err := runAddInner(t, "work")
+	if err != nil {
+		t.Fatalf("runAdd --from-file dotenv: %v", err)
+	}
+	if !strings.Contains(stdout, "base_url: https://envfile.example.com") {
+		t.Fatalf("dry-run missing base_url:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "sk-file-dotenv-1234") {
+		t.Fatalf("dry-run leaked plaintext api key:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "sk-f***1234") {
+		t.Fatalf("dry-run missing redacted api key:\n%s", stdout)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "work.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written despite --dry-run: %v", statErr)
+	}
+}
+
+func TestAdd_FromFileJSONPopulatesProfile(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"base_url":"https://json.example.com","api_key":"sk-json-file-1234","model":"json-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+
+	if _, _, err := runAddInner(t, "jsonfile"); err != nil {
+		t.Fatalf("runAdd --from-file json: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("jsonfile")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.BaseURL != "https://json.example.com" {
+		t.Fatalf("BaseURL = %q", loaded.Core.BaseURL)
+	}
+	if loaded.Core.APIKey != "sk-json-file-1234" {
+		t.Fatalf("APIKey = %q", loaded.Core.APIKey)
+	}
+	if loaded.Core.Model != "json-model" {
+		t.Fatalf("Model = %q", loaded.Core.Model)
+	}
+}
+
+func TestAdd_FromFileShellExportModelParsed(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "exports.sh")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{
+		"export ANTHROPIC_AUTH_TOKEN=sk-shell-file-1234",
+		"export ANTHROPIC_MODEL=claude-shell-model",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+
+	if _, _, err := runAddInner(t, "shellfile"); err != nil {
+		t.Fatalf("runAdd --from-file shell: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("shellfile")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.Model != "claude-shell-model" {
+		t.Fatalf("Model = %q", loaded.Core.Model)
+	}
+}
+
+func TestAdd_FromFileExplicitModelOverridesParsedValue(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"api_key":"sk-file-override-1234","model":"file-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+	addModelFlag = "flag-model"
+
+	if _, _, err := runAddInner(t, "overridefile"); err != nil {
+		t.Fatalf("runAdd --from-file override: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("overridefile")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.Model != "flag-model" {
+		t.Fatalf("Model = %q, want flag-model", loaded.Core.Model)
+	}
+}
+
+func TestAdd_FromFileKeylessWithExplicitAPIKeyAllowed(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"base_url":"https://json.example.com","model":"json-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+	addAPIKeyFlag = "sk-flag-file-1234"
+
+	if _, _, err := runAddInner(t, "fileflagkey"); err != nil {
+		t.Fatalf("runAdd --from-file --api-key: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("fileflagkey")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.APIKey != "sk-flag-file-1234" {
+		t.Fatalf("APIKey = %q, want flag value", loaded.Core.APIKey)
+	}
+}
+
+func TestAdd_FromFileKeylessWithoutExplicitAPIKeyRefuses(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"base_url":"https://json.example.com","model":"json-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+
+	_, _, err := runAddInner(t, "filewithoutkey")
+	if err == nil {
+		t.Fatalf("keyless --from-file accepted without --api-key")
+	}
+	if !strings.Contains(err.Error(), "no API key found in input source") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "filewithoutkey.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written despite missing file key: %v", statErr)
+	}
+}
+
+func TestAdd_FromFileUnreadableAndGarbageRefuseWithoutWrite(t *testing.T) {
+	h := newAddHarness(t)
+
+	addFromFileFlag = filepath.Join(h.home, "missing.env")
+	_, _, err := runAddInner(t, "missing")
+	if err == nil {
+		t.Fatalf("nonexistent --from-file accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot read file") {
+		t.Fatalf("missing file error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "missing.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written after missing file: %v", statErr)
+	}
+
+	resetAddFlags()
+	path := filepath.Join(h.home, "garbage.bin")
+	if err := os.WriteFile(path, []byte{0x00, 0xff, 0x01}, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+	_, _, err = runAddInner(t, "garbage")
+	if err == nil {
+		t.Fatalf("garbage --from-file accepted")
+	}
+	if !strings.Contains(err.Error(), "unrecognized config format") {
+		t.Fatalf("garbage file error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "garbage.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written after garbage file: %v", statErr)
 	}
 }
 
