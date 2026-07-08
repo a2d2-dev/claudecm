@@ -1,6 +1,6 @@
 # ADR-0003: Smart `add` Onboarding Scope (env / file / paste, optional AI-assisted parse)
 
-- **Status:** Proposed (awaiting CEO/LF sign-off)
+- **Status:** Accepted (CEO-delegated 2026-07-08). The single network amendment (the opt-in, interactive-only, secret-free `--ai` parse) is flagged for LF ratification; every other E13 path is zero-network and within existing ADR-0001 scope.
 - **Date:** 2026-07-08
 - **Owner:** CEO (LF)
 - **Authority:** This memo governs the "smart api-key onboarding" scope (epic E13) only. Where it conflicts with `docs/decisions/0001-direction-lock.md` or `docs/decisions/0002-v1_1-scope.md`, this memo wins **for E13 only**. ADR-0001 and ADR-0002 remain the authority everywhere else.
