@@ -162,6 +162,50 @@ func TestParseStripsResidualSecretShapes(t *testing.T) {
 	assertNoSecretShapes(t, got.Desensitized)
 }
 
+func TestParseDesensitizesExpandedBareSecretShapes(t *testing.T) {
+	secrets := []string{
+		"sk-ant-secret123",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signedpayload123",
+		"xoxb-1234567890abcdef",
+		"ghp_1234567890abcdef",
+		"pat_1234567890abcdef",
+		"token_secret_value_123456789",
+		"AIzaSyA123456789012345678901234567890123",
+		"0123456789abcdef0123456789abcdef01234567",
+		"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo1234567890+/=",
+	}
+	input := strings.Join([]string{
+		`first "` + secrets[0] + `", second (` + secrets[1] + `);`,
+		secrets[2] + " " + secrets[3] + " " + secrets[4],
+		"`" + secrets[5] + "` " + secrets[6] + ".",
+		"hex=[" + secrets[7] + "] b64=" + secrets[8] + ",",
+	}, "\n")
+
+	got := Parse(input)
+
+	for _, secret := range secrets {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q: %q", secret, got.Desensitized)
+		}
+	}
+	assertNoSecretShapes(t, got.Desensitized)
+}
+
+func TestParseHighEntropyFallbackPreservesURLs(t *testing.T) {
+	baseURL := "https://compat.example.com/v1"
+	input := "OPENAI_BASE_URL=" + baseURL + " blob QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo1234567890+/="
+
+	got := Parse(input)
+
+	if got.Core.BaseURL != baseURL {
+		t.Fatalf("Core.BaseURL = %q, want %q", got.Core.BaseURL, baseURL)
+	}
+	if !strings.Contains(got.Desensitized, baseURL) {
+		t.Fatalf("Desensitized removed base URL: %q", got.Desensitized)
+	}
+	assertNoSecretShapes(t, got.Desensitized)
+}
+
 func TestParsePropertyNoSecretShapeSurvives(t *testing.T) {
 	corpus := []string{
 		`export ANTHROPIC_BASE_URL=https://api.example.com ANTHROPIC_AUTH_TOKEN=sk-ant-property123`,
@@ -171,6 +215,12 @@ func TestParsePropertyNoSecretShapeSurvives(t *testing.T) {
 		`plain text with no token`,
 		`oauth token: token_secret_value_123456789`,
 		`jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signedpayload123`,
+		`google "AIzaSyA123456789012345678901234567890123"`,
+		`hex (0123456789abcdef0123456789abcdef01234567), next`,
+		`base64 QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo1234567890+/=;`,
+		`multiple sk-first-secret123 xoxb-1234567890abcdef ghp_1234567890abcdef`,
+		`TOKEN_SECRET_VALUE_123456789 and pat_1234567890abcdef`,
+		`wrapped ['AIzaSyA123456789012345678901234567890123'].`,
 	}
 
 	for _, blob := range corpus {
@@ -178,6 +228,42 @@ func TestParsePropertyNoSecretShapeSurvives(t *testing.T) {
 			got := Parse(blob)
 			assertNoSecretShapes(t, got.Desensitized)
 		})
+	}
+}
+
+func TestParseInfersProviderFromSelectedAPIKey(t *testing.T) {
+	input := strings.Join([]string{
+		"OPENAI_BASE_URL=https://compat.example.com/v1",
+		"OPENAI_API_KEY=sk-openai-secret123",
+		"ANTHROPIC_AUTH_TOKEN=sk-anthropic-secret123",
+	}, "\n")
+
+	got := Parse(input)
+
+	if got.Core.BaseURL != "https://compat.example.com/v1" {
+		t.Errorf("Core.BaseURL = %q, want OpenAI-compatible base URL", got.Core.BaseURL)
+	}
+	if got.Core.APIKey != "sk-anthropic-secret123" {
+		t.Errorf("Core.APIKey = %q, want selected Anthropic auth token", got.Core.APIKey)
+	}
+	if got.Core.Provider != "anthropic" {
+		t.Errorf("Core.Provider = %q, want anthropic", got.Core.Provider)
+	}
+}
+
+func TestParseDoesNotTrimTrailingPunctuationFromAPIKey(t *testing.T) {
+	input := "ANTHROPIC_AUTH_TOKEN=sk-key-ending. OPENAI_BASE_URL=https://compat.example.com/v1."
+
+	got := Parse(input)
+
+	if got.Core.APIKey != "sk-key-ending." {
+		t.Errorf("Core.APIKey = %q, want trailing punctuation preserved", got.Core.APIKey)
+	}
+	if got.Core.BaseURL != "https://compat.example.com/v1" {
+		t.Errorf("Core.BaseURL = %q, want trailing punctuation trimmed", got.Core.BaseURL)
+	}
+	if strings.Contains(got.Desensitized, "sk-key-ending.") {
+		t.Fatalf("Desensitized leaked api key with trailing punctuation: %q", got.Desensitized)
 	}
 }
 
@@ -204,10 +290,49 @@ func onlyPlaceholder(t *testing.T, secrets map[string]string) string {
 
 func assertNoSecretShapes(t *testing.T, text string) {
 	t.Helper()
-	for _, corePattern := range secretShapePatterns() {
-		re := regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + corePattern + `)`)
-		if re.MatchString(text) {
-			t.Fatalf("desensitized text contains secret shape %q: %q", corePattern, text)
+	for _, detector := range testSecretShapeDetectors() {
+		matches := detector.re.FindAllStringSubmatch(text, -1)
+		for _, match := range matches {
+			if len(match) < 3 {
+				continue
+			}
+			secret := match[2]
+			if detector.mixedAlphaNum && !hasTestLetterAndDigit(secret) {
+				continue
+			}
+			t.Fatalf("desensitized text contains secret shape %q: %q", detector.name, text)
 		}
 	}
+}
+
+type testSecretShapeDetector struct {
+	name          string
+	re            *regexp.Regexp
+	mixedAlphaNum bool
+}
+
+func testSecretShapeDetectors() []testSecretShapeDetector {
+	return []testSecretShapeDetector{
+		{name: "sk prefix", re: regexp.MustCompile(`(^|[^A-Za-z0-9_-])(sk-[A-Za-z0-9][A-Za-z0-9._=/+-]{3,})`)},
+		{name: "jwt", re: regexp.MustCompile(`(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)},
+		{name: "xox gh pat token prefix", re: regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])((?:xox[baprs]?|gh[pousr]|pat|token)[_-][A-Za-z0-9][A-Za-z0-9._=-]{7,})`)},
+		{name: "embedded token", re: regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])([A-Za-z0-9._-]{8,}token[A-Za-z0-9._-]{8,})`)},
+		{name: "google api key", re: regexp.MustCompile(`(^|[^A-Za-z0-9_-])(AIza[0-9A-Za-z_-]{35,})`)},
+		{name: "40 hex", re: regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_-])([0-9a-f]{40})(?:$|[^0-9a-f])`)},
+		{name: "high entropy token", re: regexp.MustCompile(`(^|[^A-Za-z0-9_-])([A-Za-z0-9+/=_-]{32,})`), mixedAlphaNum: true},
+	}
+}
+
+func hasTestLetterAndDigit(text string) bool {
+	hasLetter := false
+	hasDigit := false
+	for _, r := range text {
+		switch {
+		case r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	return hasLetter && hasDigit
 }

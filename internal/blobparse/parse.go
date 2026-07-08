@@ -39,10 +39,10 @@ func Parse(text string) Result {
 			registry.placeholderFor(candidate.value)
 		}
 	}
-	registerGenericSecrets(text, registry)
+	registerGenericSecrets(text, candidates, registry)
 
 	desensitized := registry.desensitize(text)
-	desensitized = scrubResidualSecretShapes(desensitized)
+	desensitized = scrubResidualSecretShapes(desensitized, candidates)
 
 	return Result{
 		Core:            core,
@@ -96,7 +96,7 @@ func extractCandidates(text string) []fieldCandidate {
 			if len(match) < 6 || match[4] < 0 || match[5] < 0 {
 				continue
 			}
-			value := cleanValue(text[match[4]:match[5]])
+			value := cleanValue(text[match[4]:match[5]], alias.kind)
 			if value == "" {
 				continue
 			}
@@ -186,21 +186,25 @@ func buildCore(candidates []fieldCandidate) config.CoreConfig {
 	if c := selected[fieldProvider]; c.set {
 		core.Provider = c.value
 	} else {
-		core.Provider = inferProvider(candidates)
+		core.Provider = inferProvider(selected)
 	}
 	return core
 }
 
-func inferProvider(candidates []fieldCandidate) string {
-	for _, candidate := range candidates {
-		if candidate.providerHint != "" {
-			return candidate.providerHint
-		}
+func inferProvider(selected map[fieldKind]selectedCandidate) string {
+	if c := selected[fieldAPIKey]; c.set && c.providerHint != "" {
+		return c.providerHint
+	}
+	if c := selected[fieldBaseURL]; c.set && c.providerHint != "" {
+		return c.providerHint
+	}
+	if c := selected[fieldModel]; c.set && c.providerHint != "" {
+		return c.providerHint
 	}
 	return ""
 }
 
-func cleanValue(raw string) string {
+func cleanValue(raw string, kind fieldKind) string {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return ""
@@ -217,6 +221,9 @@ func cleanValue(raw string) string {
 	case strings.HasPrefix(value, "`") && strings.HasSuffix(value, "`"):
 		return strings.Trim(value, "`")
 	default:
+		if kind == fieldAPIKey {
+			return value
+		}
 		return strings.TrimRight(value, ".,)]}")
 	}
 }
@@ -235,7 +242,7 @@ func newSecretRegistry() *secretRegistry {
 }
 
 func (r *secretRegistry) placeholderFor(secret string) string {
-	secret = normalizeSecretToken(secret)
+	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return ""
 	}
@@ -247,6 +254,10 @@ func (r *secretRegistry) placeholderFor(secret string) string {
 	r.bySecret[secret] = placeholder
 	r.captured[placeholder] = secret
 	return placeholder
+}
+
+func (r *secretRegistry) placeholderForNormalized(secret string) string {
+	return r.placeholderFor(normalizeSecretToken(secret))
 }
 
 func (r *secretRegistry) desensitize(text string) string {
@@ -268,7 +279,7 @@ func (r *secretRegistry) desensitize(text string) string {
 	return desensitized
 }
 
-func registerGenericSecrets(text string, registry *secretRegistry) {
+func registerGenericSecrets(text string, candidates []fieldCandidate, registry *secretRegistry) {
 	for _, corePattern := range secretShapePatterns() {
 		re := regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + corePattern + `)`)
 		matches := re.FindAllStringSubmatchIndex(text, -1)
@@ -276,18 +287,105 @@ func registerGenericSecrets(text string, registry *secretRegistry) {
 			if len(match) < 6 || match[4] < 0 || match[5] < 0 {
 				continue
 			}
-			registry.placeholderFor(text[match[4]:match[5]])
+			registry.placeholderForNormalized(text[match[4]:match[5]])
 		}
 	}
+	registerHighEntropySecrets(text, candidates, registry)
 }
 
-func scrubResidualSecretShapes(text string) string {
+func scrubResidualSecretShapes(text string, candidates []fieldCandidate) string {
 	desensitized := text
 	for _, corePattern := range secretShapePatterns() {
 		re := regexp.MustCompile(`(^|[^A-Za-z0-9_-])(` + corePattern + `)`)
 		desensitized = re.ReplaceAllString(desensitized, `${1}`)
 	}
+	return scrubResidualHighEntropyTokens(desensitized, candidates)
+}
+
+func registerHighEntropySecrets(text string, candidates []fieldCandidate, registry *secretRegistry) {
+	for _, rawToken := range strings.Fields(text) {
+		token := highEntropyTokenCandidate(rawToken)
+		if isHighEntropySecretToken(token, candidates) {
+			registry.placeholderFor(token)
+		}
+	}
+}
+
+func scrubResidualHighEntropyTokens(text string, candidates []fieldCandidate) string {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return text
+	}
+
+	desensitized := text
+	for _, rawToken := range fields {
+		token := highEntropyTokenCandidate(rawToken)
+		if !isHighEntropySecretToken(token, candidates) {
+			continue
+		}
+		desensitized = strings.ReplaceAll(desensitized, token, "")
+	}
 	return desensitized
+}
+
+func highEntropyTokenCandidate(rawToken string) string {
+	token := normalizeSecretToken(rawToken)
+	if key, value, ok := strings.Cut(token, "="); ok && isAssignmentKey(key) && value != "" {
+		return normalizeSecretToken(value)
+	}
+	return token
+}
+
+func isAssignmentKey(text string) bool {
+	for _, r := range text {
+		switch {
+		case r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_':
+		default:
+			return false
+		}
+	}
+	return text != ""
+}
+
+func isHighEntropySecretToken(token string, candidates []fieldCandidate) bool {
+	if len(token) < 32 {
+		return false
+	}
+	if isKnownBaseURLValue(token, candidates) || looksLikeURL(token) {
+		return false
+	}
+
+	hasLetter := false
+	hasDigit := false
+	for _, r := range token {
+		switch {
+		case r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z':
+			hasLetter = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '+' || r == '/' || r == '=' || r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit
+}
+
+func isKnownBaseURLValue(token string, candidates []fieldCandidate) bool {
+	for _, candidate := range candidates {
+		if candidate.kind == fieldBaseURL && candidate.value == token {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeURL(token string) bool {
+	// The high-entropy fallback intentionally leaves URL-looking values alone,
+	// even if they contain token-like path text, so base_url extraction is not
+	// damaged before downstream provider inference. Bare base64 can contain '/',
+	// so only clear URLs or path-shaped values are excluded here.
+	return strings.Contains(token, "://") || strings.HasPrefix(token, "/")
 }
 
 func secretShapePatterns() []string {
@@ -296,9 +394,11 @@ func secretShapePatterns() []string {
 		`[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`,
 		`(?i)(?:xox[baprs]?|gh[pousr]|pat|token)[_-][A-Za-z0-9][A-Za-z0-9._=-]{7,}`,
 		`(?i)[A-Za-z0-9._-]{8,}token[A-Za-z0-9._-]{8,}`,
+		`AIza[0-9A-Za-z_-]{35}`,
+		`(?i)[0-9a-f]{40}`,
 	}
 }
 
 func normalizeSecretToken(secret string) string {
-	return strings.Trim(strings.TrimSpace(secret), `"'`+"`"+`.,;:)]}`)
+	return strings.Trim(strings.TrimSpace(secret), `"'`+"`"+`.,;:()[]{}<>`)
 }
