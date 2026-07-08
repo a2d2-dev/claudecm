@@ -60,6 +60,7 @@ func resetAddFlags() {
 	addAIProfileFlag = ""
 	addListPresetsFlag = false
 	addDryRunFlag = false
+	addYesFlag = false
 	addOverwriteFlag = false
 	addOutputFlag = "text"
 }
@@ -138,6 +139,10 @@ func bindSyntheticAddFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("auto", addAutoFlag, "")
 	if addAutoFlag {
 		_ = cmd.Flags().Set("auto", "true")
+	}
+	cmd.Flags().Bool("yes", addYesFlag, "")
+	if addYesFlag {
+		_ = cmd.Flags().Set("yes", "true")
 	}
 }
 

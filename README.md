@@ -71,9 +71,10 @@ claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
 # use the network; --dry-run previews the redacted draft without writing.
 claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-ant-xxxxxxxx' --dry-run
 
-# Or sweep local sources at once and skip credentials already recorded
-# by the same base_url + api_key.
-claudecm add work --auto --dry-run
+# Or sweep local sources at once. Each new credential becomes one
+# auto-named profile; already-recorded credentials are skipped.
+claudecm add --auto --dry-run
+claudecm add --auto --yes
 
 # Optional AI parse is opt-in per invocation and requires an interactive TTY.
 # claudecm strips secret-shaped tokens locally, shows the desensitized payload
@@ -151,9 +152,9 @@ Presets are convenience templates, not official provider support, certification,
 - `--from-env` reads the Claude Code / Codex environment-variable allowlist.
 - `--from-file <path>` parses dotenv, shell, JSON, YAML, or TOML config files.
 - `--from-text <text>` or `--from-text -` parses pasted text with local heuristics.
-- `--auto` / `-a` sweeps clipboard, environment, `~/.claude/settings.json`, and `~/.codex/{auth.json,config.toml}` in order, drops candidates without an API key, and marks credentials whose `(base_url, api_key)` are already recorded.
+- `--auto` / `-a` takes no profile name. It sweeps clipboard, environment, `~/.claude/settings.json`, and `~/.codex/{auth.json,config.toml}` in order, drops candidates without an API key, collapses duplicate `(base_url, api_key)` credentials, skips credentials already recorded, and creates one auto-named profile per remaining credential.
 
-These paths are local-first. `--auto` is zero-network and best-effort: a missing clipboard tool or absent config file is reported and does not stop the other sources. If it finds one new credential, it enters the normal redacted preview/save path; if it finds several, non-interactive runs refuse with a redacted list and interactive runs ask which one to use. Without `--ai`, pasted text never leaves the machine. `--ai` is an explicit escalation for `--from-text`: claudecm requires an interactive terminal, runs the local redaction pass first, shows the full desensitized payload for confirmation, keeps captured secrets in-process, sends only the confirmed desensitized text to an Anthropic-compatible Messages endpoint using the active profile's credentials (or `--ai-profile <name>`), then re-injects the secret locally before the normal redacted preview/save path. Non-interactive or piped `--ai` runs refuse before any parse request is sent.
+These paths are local-first. `--auto` is zero-network and best-effort: a missing clipboard tool, absent config file, or malformed optional source is reported and does not stop the other sources. It reads Codex credentials leniently, so an unreadable `config.toml` never suppresses an `auth.json` API key. Use `--dry-run` to preview every profile that would be created; interactive terminals ask for confirmation before writing, and non-interactive runs require `--yes`. Without `--ai`, pasted text never leaves the machine. `--ai` is an explicit escalation for `--from-text`: claudecm requires an interactive terminal, runs the local redaction pass first, shows the full desensitized payload for confirmation, keeps captured secrets in-process, sends only the confirmed desensitized text to an Anthropic-compatible Messages endpoint using the active profile's credentials (or `--ai-profile <name>`), then re-injects the secret locally before the normal redacted preview/save path. Non-interactive or piped `--ai` runs refuse before any parse request is sent.
 
 ## Deeper reading
 
