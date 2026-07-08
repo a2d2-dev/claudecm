@@ -331,6 +331,13 @@ func coerceToString(v any) string {
 // side always requires the file to already exist, so it is simpler
 // to inline the semantics than to grow the write-path helper.
 func verifyReadTargetInHome(path string, r *storage.Resolver) error {
+	return VerifyReadTargetInHome(path, r)
+}
+
+// VerifyReadTargetInHome performs Claude Code's read-side containment
+// check for callers that need Claude-compatible lenient reads without
+// using the strict Import flow.
+func VerifyReadTargetInHome(path string, r *storage.Resolver) error {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		// ErrNotExist covers both "file/parent absent" and "dangling

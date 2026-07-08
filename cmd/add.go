@@ -98,6 +98,7 @@ var (
 	addAIProfileFlag      string
 	addListPresetsFlag    bool
 	addDryRunFlag         bool
+	addYesFlag            bool
 	addOverwriteFlag      bool
 	addOutputFlag         string
 )
@@ -189,8 +190,11 @@ EXAMPLES
   claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-...' --dry-run
   cat provider.txt | claudecm add work --from-text -
 
-  # Sweep local sources and skip credentials already recorded.
-  claudecm add work --auto --dry-run
+  # Sweep local sources and auto-name one profile per new credential.
+  # On an interactive terminal, each new credential prompts:
+  # Save profile for <source, redacted key> as [derived-name]:
+  claudecm add --auto --dry-run
+  claudecm add --auto --yes
 
   # Opt in to one secret-free LLM parse from an interactive terminal.
   claudecm add work --from-text 'messy provider note with sk-...' --ai --dry-run
@@ -208,6 +212,12 @@ add does NOT auto-activate the new profile. Use 'claudecm switch <name>'
 to make it the active profile.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if addListPresetsFlag {
+			return cobra.NoArgs(cmd, args)
+		}
+		if addAutoFlag {
+			if len(args) > 0 {
+				return fmt.Errorf("--auto does not take a profile name; names are derived from discovered sources")
+			}
 			return cobra.NoArgs(cmd, args)
 		}
 		return cobra.ExactArgs(1)(cmd, args)
@@ -234,6 +244,7 @@ func init() {
 		"Sparse overlay entry (repeatable). Format: tools.<tool>.<sub>=<value>. "+
 			"Supported: tools.claude_code.env.<VAR>=<value>, tools.codex.raw.<key>=<value>")
 	addCmd.Flags().BoolVar(&addDryRunFlag, "dry-run", false, "Print the would-be profile and exit without writing")
+	addCmd.Flags().BoolVar(&addYesFlag, "yes", false, "Skip interactive naming and confirmation for --auto")
 	addCmd.Flags().BoolVar(&addOverwriteFlag, "overwrite", false, "Allow replacing an existing profile with the same name")
 	addCmd.Flags().StringVarP(&addOutputFlag, "output", "o", "text", "Output format (text|json)")
 
@@ -246,6 +257,9 @@ func init() {
 // bytes.Buffers.
 func runAdd(cmd *cobra.Command, args []string) error {
 	if addListPresetsFlag {
+		if len(args) != 0 {
+			return fmt.Errorf("--list-presets does not take a profile name")
+		}
 		format, err := parseAddOutput(addOutputFlag)
 		if err != nil {
 			return err
@@ -253,9 +267,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return renderPresetList(cmd.OutOrStdout(), format)
 	}
 
-	name := strings.TrimSpace(args[0])
-	if err := storage.ValidateProfileName(name); err != nil {
-		return err
+	if addAutoFlag {
+		if len(args) != 0 {
+			return fmt.Errorf("--auto does not take a profile name; names are derived from discovered sources")
+		}
+	} else if len(args) != 1 {
+		return fmt.Errorf("add requires exactly one profile name unless --auto is used")
 	}
 
 	format, err := parseAddOutput(addOutputFlag)
@@ -298,6 +315,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 	store := storage.NewFileStorage(resv)
 
+	if addAutoFlag {
+		return runAddAuto(cmd, resv, store, format)
+	}
+
+	name := strings.TrimSpace(args[0])
+	if err := storage.ValidateProfileName(name); err != nil {
+		return err
+	}
+
 	provider := addProviderFlag
 	baseURL := addBaseURLFlag
 	apiKey := addAPIKeyFlag
@@ -309,23 +335,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		baseURL = preset.BaseURL
 		model = preset.Model
 		tools = cloneToolMap(preset.Tools)
-	}
-	if addAutoFlag {
-		core, autoTools, done, err := profileDraftFromAuto(cmd, resv, store, format)
-		if err != nil {
-			return err
-		}
-		if done {
-			return nil
-		}
-		if core.Provider != "" {
-			provider = core.Provider
-		}
-		baseURL = core.BaseURL
-		apiKey = core.APIKey
-		model = core.Model
-		smallFastModel = core.SmallFastModel
-		tools = mergeToolMaps(tools, autoTools)
 	}
 	if addFromEnvFlag {
 		core, envTools, err := profileDraftFromEnv()

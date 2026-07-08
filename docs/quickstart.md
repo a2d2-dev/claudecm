@@ -91,13 +91,14 @@ Use `--from-text -` to read stdin:
 cat provider-snippet.txt | claudecm add work --from-text - --dry-run
 ```
 
-For the lowest-friction local onboarding, `--auto` / `-a` sweeps the clipboard, environment, `~/.claude/settings.json`, and `~/.codex/{auth.json,config.toml}` in order. It drops candidates without an API key, marks anything already recorded by the same `(base_url, api_key)`, and never uses the network. Missing sources, such as no clipboard tool on PATH, are reported and do not stop the rest of the sweep.
+For the lowest-friction local onboarding, `--auto` / `-a` takes no profile name and sweeps the clipboard, environment, `~/.claude/settings.json`, and `~/.codex/{auth.json,config.toml}` in order. It drops candidates without an API key, collapses duplicate credentials, skips anything already recorded, and creates one profile per remaining credential. It never uses the network. Missing sources, such as no clipboard tool on PATH, are reported and do not stop the rest of the sweep; Codex `auth.json` is still read even if `config.toml` contains unknown sections.
 
 ```bash
-claudecm add work --auto --dry-run
+claudecm add --auto --dry-run
+claudecm add --auto --yes
 ```
 
-Expected: a redacted discovery list. If exactly one new credential is found, the normal add preview/save path continues. If several are found, interactive terminals ask which one to use; non-interactive runs refuse with a redacted list so you can disambiguate.
+Expected: a redacted discovery list and a preview or creation report for every new profile. Interactive terminals prompt for each new credential name with a derived default, accept Enter to keep the default, then ask for confirmation before writing. `--yes` and non-interactive runs use derived names without prompting; non-interactive runs require `--yes`.
 
 If the local extractor is not enough, `--ai` is opt-in per invocation and only runs in an interactive terminal. claudecm strips secret-shaped tokens locally, keeps captured secrets in-process, shows the exact desensitized payload for confirmation, and sends only the confirmed desensitized text in one Anthropic-compatible Messages request using the active profile's credentials, or `--ai-profile <name>` if you choose another credential-lending profile. Non-interactive or piped `--ai` runs refuse before sending.
 
