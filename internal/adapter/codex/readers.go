@@ -177,6 +177,13 @@ func treatAsEmpty(data []byte) bool {
 // treatAsEmpty: cross-adapter dependencies are forbidden by the
 // interface contract.
 func verifyReadTargetInHomeCodex(path string, r *storage.Resolver) error {
+	return VerifyReadTargetInHome(path, r)
+}
+
+// VerifyReadTargetInHome performs Codex's read-side containment check
+// for callers that need Codex-compatible lenient reads without using
+// the strict Import flow.
+func VerifyReadTargetInHome(path string, r *storage.Resolver) error {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

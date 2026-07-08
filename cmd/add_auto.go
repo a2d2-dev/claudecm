@@ -53,10 +53,16 @@ type addAutoSourceResult struct {
 
 type addAutoClipboardReader func() (string, bool, error)
 
+type addAutoProfileStore interface {
+	LoadAllProfiles() ([]*config.Profile, error)
+	ProfileExists(name string) (bool, error)
+	SaveProfile(profile *config.Profile) error
+}
+
 func runAddAuto(
 	cmd *cobra.Command,
 	resv *storage.Resolver,
-	store *storage.FileStorage,
+	store addAutoProfileStore,
 	format addOutputFormat,
 ) error {
 	results := sweepAddAutoSources(context.Background(), resv, readClipboardText)
@@ -78,6 +84,8 @@ func runAddAuto(
 	case len(newCandidates) == 0:
 		if format == addOutputText {
 			fmt.Fprintln(cmd.OutOrStdout(), "all discovered credentials are already recorded")
+		} else if err := renderAddAutoResultJSON(cmd.OutOrStdout(), "already-recorded", results, nil, nil); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -87,21 +95,28 @@ func runAddAuto(
 		return err
 	}
 	assignAddAutoProfileNames(newCandidates, existingNames)
-	profiles := buildAddAutoProfiles(newCandidates, nowFn().UTC())
 
 	if addDryRunFlag {
-		return renderAddAutoDryRun(cmd.OutOrStdout(), format, profiles)
+		profiles := buildAddAutoProfiles(newCandidates, nowFn().UTC())
+		return renderAddAutoDryRun(cmd.OutOrStdout(), format, results, profiles)
 	}
 	if !addYesFlag {
 		if !isTerminal(os.Stdin) {
+			profiles := buildAddAutoProfiles(newCandidates, nowFn().UTC())
 			if format == addOutputText {
 				fmt.Fprintln(cmd.OutOrStdout(), "profiles to create:")
 				renderAddAutoProfileTextList(cmd.OutOrStdout(), profiles)
-			} else if err := renderAddAutoProfilesJSON(cmd.OutOrStdout(), "confirm-required", profiles); err != nil {
+			} else if err := renderAddAutoResultJSON(cmd.OutOrStdout(), "confirm-required", results, profiles, nil); err != nil {
 				return err
 			}
 			return fmt.Errorf("non-interactive session: pass --yes to create discovered profiles or --dry-run to preview")
 		}
+		if err := promptAddAutoProfileNames(cmd.OutOrStdout(), os.Stdin, newCandidates, existingNames); err != nil {
+			return err
+		}
+	}
+	profiles := buildAddAutoProfiles(newCandidates, nowFn().UTC())
+	if !addYesFlag {
 		if format == addOutputText {
 			fmt.Fprintln(cmd.OutOrStdout(), "profiles to create:")
 			renderAddAutoProfileTextList(cmd.OutOrStdout(), profiles)
@@ -115,6 +130,7 @@ func runAddAuto(
 		}
 	}
 
+	created := make([]*config.Profile, 0, len(profiles))
 	for _, profile := range profiles {
 		if err := storage.ValidateProfileName(profile.Name); err != nil {
 			return fmt.Errorf("derived profile name %q is invalid: %w", profile.Name, err)
@@ -125,10 +141,11 @@ func runAddAuto(
 			return fmt.Errorf("derived profile name %q already exists", profile.Name)
 		}
 		if err := store.SaveProfile(profile); err != nil {
-			return fmt.Errorf("failed to save profile %q: %w", profile.Name, err)
+			return addAutoPartialCreateError(created, profile.Name, err)
 		}
+		created = append(created, profile)
 	}
-	return renderAddAutoCreated(cmd.OutOrStdout(), format, profiles)
+	return renderAddAutoCreated(cmd.OutOrStdout(), format, results, created)
 }
 
 func sweepAddAutoSources(ctx context.Context, resv *storage.Resolver, clipboard addAutoClipboardReader) []addAutoSourceResult {
@@ -330,6 +347,12 @@ func lenientReadClaudeCode(ctx context.Context, resv *storage.Resolver) (config.
 		return config.CoreConfig{}, config.ToolOverlay{}, "skipped: " + err.Error()
 	}
 	path := claudecodeadapter.SettingsPath(resv)
+	if err := claudecodeadapter.VerifyReadTargetInHome(path, resv); err != nil {
+		if errors.Is(err, claudecodeadapter.ErrNoConfig) || errors.Is(err, os.ErrNotExist) {
+			return config.CoreConfig{}, config.ToolOverlay{}, "skipped: settings.json not found"
+		}
+		return config.CoreConfig{}, config.ToolOverlay{}, "skipped: settings.json refused: " + err.Error()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -395,7 +418,7 @@ func lenientReadCodex(ctx context.Context, resv *storage.Resolver) (config.CoreC
 	var overlay config.ToolOverlay
 
 	authPath := codexadapter.AuthPath(resv)
-	authRoot, authNote := lenientReadJSONMap(authPath, "auth.json")
+	authRoot, authNote := lenientReadJSONMap(authPath, "auth.json", resv, codexadapter.VerifyReadTargetInHome)
 	if authNote != "" {
 		notes = append(notes, authNote)
 	}
@@ -417,7 +440,7 @@ func lenientReadCodex(ctx context.Context, resv *storage.Resolver) (config.CoreC
 	}
 
 	configPath := codexadapter.ConfigPath(resv)
-	doc, configNote := lenientReadCodexConfig(configPath)
+	doc, configNote := lenientReadCodexConfig(configPath, resv)
 	if configNote != "" {
 		notes = append(notes, configNote)
 	}
@@ -434,7 +457,15 @@ func lenientReadCodex(ctx context.Context, resv *storage.Resolver) (config.CoreC
 	return core, overlay, strings.Join(notes, "; ")
 }
 
-func lenientReadJSONMap(path, label string) (map[string]any, string) {
+func lenientReadJSONMap(path, label string, resv *storage.Resolver, verify func(string, *storage.Resolver) error) (map[string]any, string) {
+	if verify != nil {
+		if err := verify(path, resv); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, label + " not found"
+			}
+			return nil, label + " skipped: read target refused: " + err.Error()
+		}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -455,7 +486,13 @@ func lenientReadJSONMap(path, label string) (map[string]any, string) {
 	return root, ""
 }
 
-func lenientReadCodexConfig(path string) (*codextoml.Doc, string) {
+func lenientReadCodexConfig(path string, resv *storage.Resolver) (*codextoml.Doc, string) {
+	if err := codexadapter.VerifyReadTargetInHome(path, resv); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "config.toml not found"
+		}
+		return nil, "config.toml skipped: read target refused: " + err.Error()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -468,9 +505,125 @@ func lenientReadCodexConfig(path string) (*codextoml.Doc, string) {
 	}
 	doc, err := codextoml.Load(data)
 	if err != nil {
-		return nil, "config.toml skipped: parse failed: " + err.Error()
+		doc = lenientExtractCodexConfig(data)
+		if doc == nil {
+			return nil, "config.toml skipped: parse failed: " + err.Error()
+		}
+		return doc, "config.toml partially read: parse failed: " + err.Error()
 	}
 	return doc, ""
+}
+
+func lenientExtractCodexConfig(data []byte) *codextoml.Doc {
+	lines := strings.Split(string(data), "\n")
+	values := map[string]any{}
+	var section string
+	for _, line := range lines {
+		line = stripAddAutoTOMLComment(strings.TrimSpace(line))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line[:strings.Index(line, "]")+1], "["), "]"))
+			continue
+		}
+		if !strings.HasPrefix(section, "model_providers.") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		if key == "" {
+			continue
+		}
+		value, ok := parseAddAutoTOMLString(strings.TrimSpace(parts[1]))
+		if !ok {
+			continue
+		}
+		values[section+"."+key] = value
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	bySection := map[string][]string{}
+	for _, key := range codexadapter.OwnedKeysConfigTOML {
+		if v, ok := values[key]; ok {
+			section, leaf, ok := splitAddAutoTOMLPath(key)
+			if !ok {
+				continue
+			}
+			bySection[section] = append(bySection[section], fmt.Sprintf("%s = %q", leaf, fmt.Sprint(v)))
+		}
+	}
+	var b strings.Builder
+	for _, key := range codexadapter.OwnedKeysConfigTOML {
+		section, _, ok := splitAddAutoTOMLPath(key)
+		if !ok || len(bySection[section]) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "[%s]\n", section)
+		for _, line := range bySection[section] {
+			fmt.Fprintln(&b, line)
+		}
+		fmt.Fprintln(&b)
+		delete(bySection, section)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	doc, err := codextoml.Load([]byte(b.String()))
+	if err != nil {
+		return nil
+	}
+	return doc
+}
+
+func splitAddAutoTOMLPath(path string) (string, string, bool) {
+	idx := strings.LastIndex(path, ".")
+	if idx <= 0 || idx == len(path)-1 {
+		return "", "", false
+	}
+	return path[:idx], path[idx+1:], true
+}
+
+func stripAddAutoTOMLComment(line string) string {
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for idx, r := range line {
+		switch {
+		case escaped:
+			escaped = false
+		case r == '\\' && inDouble:
+			escaped = true
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == '#' && !inSingle && !inDouble:
+			return strings.TrimSpace(line[:idx])
+		}
+	}
+	return line
+}
+
+func parseAddAutoTOMLString(raw string) (string, bool) {
+	if len(raw) < 2 {
+		return "", false
+	}
+	if raw[0] == '"' {
+		var out string
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return "", false
+		}
+		return out, true
+	}
+	if raw[0] == '\'' && raw[len(raw)-1] == '\'' {
+		return raw[1 : len(raw)-1], true
+	}
+	return "", false
 }
 
 func stringMapValue(m map[string]any, key string) (string, bool) {
@@ -488,7 +641,7 @@ func putOverlayRaw(overlay *config.ToolOverlay, key string, value any) {
 	overlay.Raw[key] = value
 }
 
-func markExistingAddAutoCandidates(results []addAutoSourceResult, store *storage.FileStorage) error {
+func markExistingAddAutoCandidates(results []addAutoSourceResult, store addAutoProfileStore) error {
 	if store == nil {
 		return nil
 	}
@@ -496,24 +649,43 @@ func markExistingAddAutoCandidates(results []addAutoSourceResult, store *storage
 	if err != nil {
 		return fmt.Errorf("load existing profiles for auto dedup: %w", err)
 	}
-	index := map[string]string{}
+	exactIndex := map[string]string{}
+	anyKeyIndex := map[string]string{}
+	emptyKeyIndex := map[string]string{}
 	for _, profile := range profiles {
 		if profile == nil || strings.TrimSpace(profile.Core.APIKey) == "" {
 			continue
 		}
-		key := addAutoDedupKey(profile.Core.BaseURL, profile.Core.APIKey)
-		if key == "" {
+		apiKey := strings.TrimSpace(profile.Core.APIKey)
+		base := normalizeAddAutoBaseURL(profile.Core.BaseURL)
+		if _, exists := anyKeyIndex[apiKey]; !exists {
+			anyKeyIndex[apiKey] = profile.Name
+		}
+		if base == "" {
+			if _, exists := emptyKeyIndex[apiKey]; !exists {
+				emptyKeyIndex[apiKey] = profile.Name
+			}
 			continue
 		}
-		if _, exists := index[key]; !exists {
-			index[key] = profile.Name
+		exactKey := base + "\x00" + apiKey
+		if _, exists := exactIndex[exactKey]; !exists {
+			exactIndex[exactKey] = profile.Name
 		}
 	}
 	for resultIdx := range results {
 		for candidateIdx := range results[resultIdx].Candidates {
 			candidate := &results[resultIdx].Candidates[candidateIdx]
-			if name := index[addAutoDedupKey(candidate.Core.BaseURL, candidate.Core.APIKey)]; name != "" {
+			apiKey := strings.TrimSpace(candidate.Core.APIKey)
+			if apiKey == "" {
+				continue
+			}
+			base := normalizeAddAutoBaseURL(candidate.Core.BaseURL)
+			if base == "" {
+				candidate.AlreadyProfile = anyKeyIndex[apiKey]
+			} else if name := exactIndex[base+"\x00"+apiKey]; name != "" {
 				candidate.AlreadyProfile = name
+			} else {
+				candidate.AlreadyProfile = emptyKeyIndex[apiKey]
 			}
 		}
 	}
@@ -521,22 +693,40 @@ func markExistingAddAutoCandidates(results []addAutoSourceResult, store *storage
 }
 
 func markDuplicateAddAutoCandidates(results []addAutoSourceResult) {
-	seen := map[string]string{}
+	exactSeen := map[string]string{}
+	anyKeySeen := map[string]string{}
+	emptyKeySeen := map[string]string{}
 	for resultIdx := range results {
 		for candidateIdx := range results[resultIdx].Candidates {
 			candidate := &results[resultIdx].Candidates[candidateIdx]
 			if candidate.AlreadyProfile != "" {
 				continue
 			}
-			key := addAutoDedupKey(candidate.Core.BaseURL, candidate.Core.APIKey)
-			if key == "" {
+			apiKey := strings.TrimSpace(candidate.Core.APIKey)
+			if apiKey == "" {
 				continue
 			}
-			if firstSource := seen[key]; firstSource != "" {
+			base := normalizeAddAutoBaseURL(candidate.Core.BaseURL)
+			if base == "" {
+				candidate.DuplicateOf = anyKeySeen[apiKey]
+			} else if firstSource := exactSeen[base+"\x00"+apiKey]; firstSource != "" {
 				candidate.DuplicateOf = firstSource
+			} else {
+				candidate.DuplicateOf = emptyKeySeen[apiKey]
+			}
+			if candidate.DuplicateOf != "" {
 				continue
 			}
-			seen[key] = candidate.Source
+			if _, exists := anyKeySeen[apiKey]; !exists {
+				anyKeySeen[apiKey] = candidate.Source
+			}
+			if base == "" {
+				if _, exists := emptyKeySeen[apiKey]; !exists {
+					emptyKeySeen[apiKey] = candidate.Source
+				}
+			} else if _, exists := exactSeen[base+"\x00"+apiKey]; !exists {
+				exactSeen[base+"\x00"+apiKey] = candidate.Source
+			}
 		}
 	}
 }
@@ -615,6 +805,13 @@ type jsonAddAutoCandidate struct {
 	APIKey      string   `json:"api_key"`
 	Model       string   `json:"model,omitempty"`
 	Status      string   `json:"status"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+type jsonAddAutoDiscoverySource struct {
+	Source     string                 `json:"source"`
+	Note       string                 `json:"note,omitempty"`
+	Candidates []jsonAddAutoCandidate `json:"candidates,omitempty"`
 }
 
 func addAutoCandidateStatus(candidate addAutoCandidate) string {
@@ -628,19 +825,33 @@ func addAutoCandidateStatus(candidate addAutoCandidate) string {
 }
 
 func newAddAutoCandidates(results []addAutoSourceResult) ([]addAutoCandidate, error) {
-	byKey := map[string]int{}
+	exactByKey := map[string]int{}
+	anyByAPIKey := map[string]int{}
+	emptyByAPIKey := map[string]int{}
 	out := []addAutoCandidate{}
 	for _, result := range results {
 		for _, candidate := range result.Candidates {
 			if candidate.AlreadyProfile != "" || candidate.DuplicateOf != "" {
 				continue
 			}
-			key := addAutoDedupKey(candidate.Core.BaseURL, candidate.Core.APIKey)
-			if key == "" {
+			apiKey := strings.TrimSpace(candidate.Core.APIKey)
+			if apiKey == "" {
 				continue
 			}
-			if idx, ok := byKey[key]; ok {
-				out[idx] = mergeAddAutoCandidate(out[idx], candidate)
+			base := normalizeAddAutoBaseURL(candidate.Core.BaseURL)
+			mergeIdx := -1
+			if base == "" {
+				if idx, ok := anyByAPIKey[apiKey]; ok {
+					mergeIdx = idx
+				}
+			} else if idx, ok := exactByKey[base+"\x00"+apiKey]; ok {
+				mergeIdx = idx
+			} else if idx, ok := emptyByAPIKey[apiKey]; ok {
+				mergeIdx = idx
+			}
+			if mergeIdx >= 0 {
+				out[mergeIdx] = mergeAddAutoCandidate(out[mergeIdx], candidate)
+				indexAddAutoCandidate(out[mergeIdx], mergeIdx, exactByKey, anyByAPIKey, emptyByAPIKey)
 				continue
 			}
 			candidate.Core = normalizeParsedProvider(candidate.Core)
@@ -648,11 +859,31 @@ func newAddAutoCandidates(results []addAutoSourceResult) ([]addAutoCandidate, er
 			if candidate.NameBase == "" {
 				candidate.NameBase = addAutoBaseNameFor(candidate.Source, candidate.Core.BaseURL)
 			}
-			byKey[key] = len(out)
+			indexAddAutoCandidate(candidate, len(out), exactByKey, anyByAPIKey, emptyByAPIKey)
 			out = append(out, candidate)
 		}
 	}
 	return out, nil
+}
+
+func indexAddAutoCandidate(candidate addAutoCandidate, idx int, exactByKey, anyByAPIKey, emptyByAPIKey map[string]int) {
+	apiKey := strings.TrimSpace(candidate.Core.APIKey)
+	if apiKey == "" {
+		return
+	}
+	base := normalizeAddAutoBaseURL(candidate.Core.BaseURL)
+	if _, exists := anyByAPIKey[apiKey]; !exists {
+		anyByAPIKey[apiKey] = idx
+	}
+	if base == "" {
+		if _, exists := emptyByAPIKey[apiKey]; !exists {
+			emptyByAPIKey[apiKey] = idx
+		}
+		return
+	}
+	if _, exists := exactByKey[base+"\x00"+apiKey]; !exists {
+		exactByKey[base+"\x00"+apiKey] = idx
+	}
 }
 
 func mergeAddAutoCandidate(base, next addAutoCandidate) addAutoCandidate {
@@ -726,7 +957,7 @@ func addAutoNamePriority(name string) int {
 	}
 }
 
-func loadAddAutoProfileNames(store *storage.FileStorage) (map[string]struct{}, error) {
+func loadAddAutoProfileNames(store addAutoProfileStore) (map[string]struct{}, error) {
 	names := map[string]struct{}{}
 	if store == nil {
 		return names, nil
@@ -763,6 +994,42 @@ func assignAddAutoProfileNames(candidates []addAutoCandidate, used map[string]st
 		candidates[idx].ProfileName = name
 		used[name] = struct{}{}
 	}
+}
+
+func promptAddAutoProfileNames(w io.Writer, in io.Reader, candidates []addAutoCandidate, used map[string]struct{}) error {
+	if used == nil {
+		used = map[string]struct{}{}
+	}
+	for idx := range candidates {
+		defaultName := candidates[idx].ProfileName
+		for {
+			fmt.Fprintf(w, "Save profile for %s, %s as [%s]: ",
+				candidates[idx].Source,
+				redactedValueDisplay("api_key", candidates[idx].Core.APIKey),
+				defaultName,
+			)
+			line, err := readLine(in)
+			if err != nil {
+				return fmt.Errorf("read profile name: %w", err)
+			}
+			name := strings.TrimSpace(line)
+			if name == "" {
+				name = defaultName
+			}
+			if err := storage.ValidateProfileName(name); err != nil {
+				fmt.Fprintf(w, "Invalid profile name %q: %v\n", name, err)
+				continue
+			}
+			if _, exists := used[name]; exists && name != candidates[idx].ProfileName {
+				fmt.Fprintf(w, "Profile name %q already exists; choose another name.\n", name)
+				continue
+			}
+			candidates[idx].ProfileName = name
+			used[name] = struct{}{}
+			break
+		}
+	}
+	return nil
 }
 
 func addAutoNameWithSuffix(base string, suffix int) string {
@@ -875,9 +1142,9 @@ func buildAddAutoProfiles(candidates []addAutoCandidate, now time.Time) []*confi
 	return profiles
 }
 
-func renderAddAutoDryRun(w io.Writer, format addOutputFormat, profiles []*config.Profile) error {
+func renderAddAutoDryRun(w io.Writer, format addOutputFormat, results []addAutoSourceResult, profiles []*config.Profile) error {
 	if format == addOutputJSON {
-		return renderAddAutoProfilesJSON(w, "dry-run", profiles)
+		return renderAddAutoResultJSON(w, "dry-run", results, profiles, nil)
 	}
 	fmt.Fprintln(w, "--- dry-run: auto profiles (not written) ---")
 	for _, profile := range profiles {
@@ -888,9 +1155,9 @@ func renderAddAutoDryRun(w io.Writer, format addOutputFormat, profiles []*config
 	return nil
 }
 
-func renderAddAutoCreated(w io.Writer, format addOutputFormat, profiles []*config.Profile) error {
+func renderAddAutoCreated(w io.Writer, format addOutputFormat, results []addAutoSourceResult, profiles []*config.Profile) error {
 	if format == addOutputJSON {
-		return renderAddAutoProfilesJSON(w, "created", profiles)
+		return renderAddAutoResultJSON(w, "created", results, profiles, nil)
 	}
 	fmt.Fprintln(w, "created profiles:")
 	for _, profile := range profiles {
@@ -914,8 +1181,11 @@ func renderAddAutoProfileTextList(w io.Writer, profiles []*config.Profile) {
 }
 
 type jsonAddAutoProfiles struct {
-	Action   string           `json:"action"`
-	Profiles []jsonAddProfile `json:"profiles"`
+	Action    string                       `json:"action"`
+	Discovery []jsonAddAutoDiscoverySource `json:"discovery,omitempty"`
+	Created   []string                     `json:"created,omitempty"`
+	Skipped   []jsonAddAutoCandidate       `json:"skipped,omitempty"`
+	Profiles  []jsonAddProfile             `json:"profiles"`
 }
 
 func renderAddAutoProfilesJSON(w io.Writer, action string, profiles []*config.Profile) error {
@@ -927,6 +1197,89 @@ func renderAddAutoProfilesJSON(w io.Writer, action string, profiles []*config.Pr
 		out.Profiles = append(out.Profiles, profileToJSON(redactProfileForAddOutput(profile)))
 	}
 	return writeAddJSON(w, out)
+}
+
+func renderAddAutoResultJSON(w io.Writer, action string, results []addAutoSourceResult, profiles []*config.Profile, skipped []jsonAddAutoCandidate) error {
+	out := jsonAddAutoProfiles{
+		Action:    action,
+		Discovery: jsonAddAutoDiscovery(results),
+		Created:   profileNames(profiles),
+		Skipped:   skipped,
+		Profiles:  make([]jsonAddProfile, 0, len(profiles)),
+	}
+	for _, profile := range profiles {
+		out.Profiles = append(out.Profiles, profileToJSON(redactProfileForAddOutput(profile)))
+	}
+	out.Skipped = append(out.Skipped, jsonAddAutoSkipped(results)...)
+	return writeAddJSON(w, out)
+}
+
+func jsonAddAutoDiscovery(results []addAutoSourceResult) []jsonAddAutoDiscoverySource {
+	out := make([]jsonAddAutoDiscoverySource, 0, len(results))
+	for _, result := range results {
+		source := jsonAddAutoDiscoverySource{
+			Source: result.Source,
+			Note:   result.Note,
+		}
+		if len(result.Candidates) == 0 && source.Note == "" {
+			source.Note = "no API key found"
+		}
+		for _, candidate := range result.Candidates {
+			source.Candidates = append(source.Candidates, jsonAddAutoCandidateFromCandidate(candidate))
+		}
+		out = append(out, source)
+	}
+	return out
+}
+
+func jsonAddAutoSkipped(results []addAutoSourceResult) []jsonAddAutoCandidate {
+	var out []jsonAddAutoCandidate
+	for _, result := range results {
+		for _, candidate := range result.Candidates {
+			if candidate.AlreadyProfile == "" && candidate.DuplicateOf == "" {
+				continue
+			}
+			out = append(out, jsonAddAutoCandidateFromCandidate(candidate))
+		}
+	}
+	return out
+}
+
+func jsonAddAutoCandidateFromCandidate(candidate addAutoCandidate) jsonAddAutoCandidate {
+	status := addAutoCandidateStatus(candidate)
+	out := jsonAddAutoCandidate{
+		Source:      candidate.Source,
+		Sources:     normalizeAddAutoSources(candidate.Sources, candidate.Source),
+		ProfileName: candidate.ProfileName,
+		BaseURL:     candidate.Core.BaseURL,
+		APIKey:      redactedValueDisplay("api_key", candidate.Core.APIKey),
+		Model:       candidate.Core.Model,
+		Status:      status,
+	}
+	if candidate.AlreadyProfile != "" {
+		out.Reason = "already-recorded"
+	} else if candidate.DuplicateOf != "" {
+		out.Reason = "duplicate"
+	}
+	return out
+}
+
+func profileNames(profiles []*config.Profile) []string {
+	names := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile != nil {
+			names = append(names, profile.Name)
+		}
+	}
+	return names
+}
+
+func addAutoPartialCreateError(created []*config.Profile, failedName string, saveErr error) error {
+	names := profileNames(created)
+	if len(names) == 0 {
+		return fmt.Errorf("失败于：%s: %w", failedName, saveErr)
+	}
+	return fmt.Errorf("已创建：%s; 失败于：%s: %w", strings.Join(names, ", "), failedName, saveErr)
 }
 
 func addAutoDedupKey(baseURL, apiKey string) string {

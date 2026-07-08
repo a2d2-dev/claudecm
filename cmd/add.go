@@ -191,6 +191,8 @@ EXAMPLES
   cat provider.txt | claudecm add work --from-text -
 
   # Sweep local sources and auto-name one profile per new credential.
+  # On an interactive terminal, each new credential prompts:
+  # Save profile for <source, redacted key> as [derived-name]:
   claudecm add --auto --dry-run
   claudecm add --auto --yes
 
@@ -242,7 +244,7 @@ func init() {
 		"Sparse overlay entry (repeatable). Format: tools.<tool>.<sub>=<value>. "+
 			"Supported: tools.claude_code.env.<VAR>=<value>, tools.codex.raw.<key>=<value>")
 	addCmd.Flags().BoolVar(&addDryRunFlag, "dry-run", false, "Print the would-be profile and exit without writing")
-	addCmd.Flags().BoolVar(&addYesFlag, "yes", false, "Skip interactive confirmation for --auto")
+	addCmd.Flags().BoolVar(&addYesFlag, "yes", false, "Skip interactive naming and confirmation for --auto")
 	addCmd.Flags().BoolVar(&addOverwriteFlag, "overwrite", false, "Allow replacing an existing profile with the same name")
 	addCmd.Flags().StringVarP(&addOutputFlag, "output", "o", "text", "Output format (text|json)")
 
