@@ -307,36 +307,16 @@ func chooseAddAutoCandidate(
 	if !isTerminal(in) {
 		if format == addOutputText {
 			fmt.Fprintln(w, "multiple new credentials discovered:")
-			for idx, candidate := range candidates {
-				fmt.Fprintf(w, "  %d. %s base_url=%s api_key=%s",
-					idx+1,
-					candidate.Source,
-					displayAddAutoValue(candidate.Core.BaseURL),
-					redactedValueDisplay("api_key", candidate.Core.APIKey),
-				)
-				if strings.TrimSpace(candidate.Core.Model) != "" {
-					fmt.Fprintf(w, " model=%s", candidate.Core.Model)
-				}
-				fmt.Fprintln(w)
-			}
+			renderAddAutoCandidateTextList(w, candidates, true)
+		} else if err := renderAddAutoDisambiguationJSON(w, candidates); err != nil {
+			return addAutoCandidate{}, err
 		}
 		return addAutoCandidate{}, fmt.Errorf("multiple new credentials discovered; rerun in an interactive terminal or use a specific add input source to disambiguate")
 	}
 
 	if format == addOutputText {
 		fmt.Fprintln(w, "multiple new credentials discovered; choose one:")
-		for idx, candidate := range candidates {
-			fmt.Fprintf(w, "  %d. %s base_url=%s api_key=%s",
-				idx+1,
-				candidate.Source,
-				displayAddAutoValue(candidate.Core.BaseURL),
-				redactedValueDisplay("api_key", candidate.Core.APIKey),
-			)
-			if strings.TrimSpace(candidate.Core.Model) != "" {
-				fmt.Fprintf(w, " model=%s", candidate.Core.Model)
-			}
-			fmt.Fprintln(w)
-		}
+		renderAddAutoCandidateTextList(w, candidates, true)
 	}
 	fmt.Fprintf(w, "Select credential [1-%d]: ", len(candidates))
 	line, err := bufio.NewReader(in).ReadString('\n')
@@ -377,6 +357,63 @@ func displayAddAutoValue(value string) string {
 	return value
 }
 
+func renderAddAutoCandidateTextList(w io.Writer, candidates []addAutoCandidate, numbered bool) {
+	for idx, candidate := range candidates {
+		if numbered {
+			fmt.Fprintf(w, "  %d. ", idx+1)
+		} else {
+			fmt.Fprint(w, "  - ")
+		}
+		fmt.Fprintf(w, "%s base_url=%s api_key=%s",
+			candidate.Source,
+			displayAddAutoValue(candidate.Core.BaseURL),
+			redactedValueDisplay("api_key", candidate.Core.APIKey),
+		)
+		if strings.TrimSpace(candidate.Core.Model) != "" {
+			fmt.Fprintf(w, " model=%s", candidate.Core.Model)
+		}
+		fmt.Fprintln(w)
+	}
+}
+
+type jsonAddAutoDisambiguation struct {
+	Action     string                 `json:"action"`
+	Candidates []jsonAddAutoCandidate `json:"candidates"`
+}
+
+type jsonAddAutoCandidate struct {
+	Source  string `json:"source"`
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Status  string `json:"status"`
+}
+
+func renderAddAutoDisambiguationJSON(w io.Writer, candidates []addAutoCandidate) error {
+	out := jsonAddAutoDisambiguation{
+		Action:     "auto-disambiguation-required",
+		Candidates: make([]jsonAddAutoCandidate, 0, len(candidates)),
+	}
+	for _, candidate := range candidates {
+		out.Candidates = append(out.Candidates, jsonAddAutoCandidate{
+			Source:  candidate.Source,
+			BaseURL: candidate.Core.BaseURL,
+			APIKey:  redactedValueDisplay("api_key", candidate.Core.APIKey),
+			Status:  addAutoCandidateStatus(candidate),
+		})
+	}
+	return writeAddJSON(w, out)
+}
+
+func addAutoCandidateStatus(candidate addAutoCandidate) string {
+	if candidate.AlreadyProfile != "" {
+		return "already recorded as " + candidate.AlreadyProfile
+	}
+	if candidate.DuplicateOf != "" {
+		return "duplicate of " + candidate.DuplicateOf
+	}
+	return "NEW"
+}
+
 func addAutoDedupKey(baseURL, apiKey string) string {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey == "" {
@@ -398,7 +435,9 @@ func normalizeAddAutoBaseURL(raw string) string {
 	u.Scheme = strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
 	if port := u.Port(); port != "" {
-		host = net.JoinHostPort(host, port)
+		if (u.Scheme != "https" || port != "443") && (u.Scheme != "http" || port != "80") {
+			host = net.JoinHostPort(host, port)
+		}
 	}
 	u.Host = host
 	return strings.TrimRight(u.String(), "/")

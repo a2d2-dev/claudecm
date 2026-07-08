@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,6 +117,44 @@ func TestAddAuto_DedupAlreadyRecorded(t *testing.T) {
 	}
 }
 
+func TestAddAuto_DedupAlreadyRecordedDefaultHTTPSPort(t *testing.T) {
+	h := newAddHarness(t)
+	addAutoFlag = true
+	restoreClipboard := setAddAutoClipboardForTest(func() (string, bool, error) {
+		return "", false, os.ErrNotExist
+	})
+	defer restoreClipboard()
+	restoreEnv := envextract.SetLookupForTest(addEnvUniverse(map[string]string{
+		"ANTHROPIC_BASE_URL":   "https://h:443/v1",
+		"ANTHROPIC_AUTH_TOKEN": "sk-same-default-port",
+	}))
+	defer restoreEnv()
+	if err := h.store.SaveProfile(&config.Profile{
+		SchemaVersion: config.CurrentProfileSchemaVersion,
+		Name:          "existing",
+		Core: config.CoreConfig{
+			Provider: "anthropic",
+			BaseURL:  "https://h/v1",
+			APIKey:   "sk-same-default-port",
+		},
+	}); err != nil {
+		t.Fatalf("SaveProfile existing: %v", err)
+	}
+
+	stdout, _, err := runAddInner(t, "dupport")
+	if err != nil {
+		t.Fatalf("runAdd --auto default-port dedup should exit 0: %v\nstdout=%s", err, stdout)
+	}
+	if !strings.Contains(stdout, "already recorded as existing") {
+		t.Fatalf("stdout missing already-recorded marker:\n%s", stdout)
+	}
+	if exists, err := h.store.ProfileExists("dupport"); err != nil {
+		t.Fatalf("ProfileExists dupport: %v", err)
+	} else if exists {
+		t.Fatalf("default-port duplicate auto path wrote profile dupport")
+	}
+}
+
 func TestAddAuto_NoKeyRefusesWithSweptSources(t *testing.T) {
 	newAddHarness(t)
 	addAutoFlag = true
@@ -135,6 +174,94 @@ func TestAddAuto_NoKeyRefusesWithSweptSources(t *testing.T) {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q missing swept source %q", msg, want)
 		}
+	}
+}
+
+func TestAddAuto_ExplicitEmptyAPIKeyRefuses(t *testing.T) {
+	h := newAddHarness(t)
+	addAutoFlag = true
+	addAPIKeyFlagExplicit = true
+
+	stdout, _, err := runAddInner(t, "emptykey")
+	if err == nil {
+		t.Fatalf("runAdd --auto --api-key= unexpectedly succeeded\nstdout=%s", stdout)
+	}
+	if !strings.Contains(err.Error(), "choose only one add identity source") {
+		t.Fatalf("error missing identity mutual exclusion: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--auto") || !strings.Contains(err.Error(), "--api-key") {
+		t.Fatalf("error missing conflicting flags: %v", err)
+	}
+	if exists, err := h.store.ProfileExists("emptykey"); err != nil {
+		t.Fatalf("ProfileExists emptykey: %v", err)
+	} else if exists {
+		t.Fatalf("explicit empty --api-key wrote keyless profile")
+	}
+}
+
+func TestAddAuto_IdentityOverridesRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		baseURL    string
+		apiKey     string
+		wantFlag   string
+		flagIsBase bool
+	}{
+		{name: "apikey", apiKey: "sk-existing-identity", wantFlag: "--api-key"},
+		{name: "baseurl", baseURL: "http://x", wantFlag: "--base-url", flagIsBase: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newAddHarness(t)
+			addAutoFlag = true
+			if tc.flagIsBase {
+				addBaseURLFlag = tc.baseURL
+			} else {
+				addAPIKeyFlag = tc.apiKey
+			}
+
+			stdout, _, err := runAddInner(t, "identity")
+			if err == nil {
+				t.Fatalf("runAdd --auto %s unexpectedly succeeded\nstdout=%s", tc.wantFlag, stdout)
+			}
+			if !strings.Contains(err.Error(), "choose only one add identity source") {
+				t.Fatalf("error missing identity mutual exclusion: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantFlag) {
+				t.Fatalf("error missing %s: %v", tc.wantFlag, err)
+			}
+			if exists, err := h.store.ProfileExists("identity"); err != nil {
+				t.Fatalf("ProfileExists identity: %v", err)
+			} else if exists {
+				t.Fatalf("--auto %s wrote profile", tc.wantFlag)
+			}
+		})
+	}
+}
+
+func TestAddAuto_ModelOverrideAllowed(t *testing.T) {
+	h := newAddHarness(t)
+	addAutoFlag = true
+	addModelFlag = "foo"
+	restoreClipboard := setAddAutoClipboardForTest(func() (string, bool, error) {
+		return "", false, os.ErrNotExist
+	})
+	defer restoreClipboard()
+	restoreEnv := envextract.SetLookupForTest(addEnvUniverse(map[string]string{
+		"ANTHROPIC_BASE_URL":   "https://api.anthropic.com",
+		"ANTHROPIC_AUTH_TOKEN": "sk-model-override-1234",
+		"ANTHROPIC_MODEL":      "from-env",
+	}))
+	defer restoreEnv()
+
+	if _, _, err := runAddInner(t, "modeloverride"); err != nil {
+		t.Fatalf("runAdd --auto --model: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("modeloverride")
+	if err != nil {
+		t.Fatalf("LoadProfile modeloverride: %v", err)
+	}
+	if loaded.Core.Model != "foo" {
+		t.Fatalf("Core.Model = %q, want explicit override foo", loaded.Core.Model)
 	}
 }
 
@@ -167,6 +294,57 @@ func TestAddAuto_MultipleNewNonTTYRefusesRedactedList(t *testing.T) {
 		if strings.Contains(stdout, secret) {
 			t.Fatalf("stdout leaked secret %q:\n%s", secret, stdout)
 		}
+	}
+}
+
+func TestAddAuto_MultipleNewNonTTYJSONOutputsRedactedCandidates(t *testing.T) {
+	newAddHarness(t)
+	addAutoFlag = true
+	addOutputFlag = "json"
+	restoreClipboard := setAddAutoClipboardForTest(func() (string, bool, error) {
+		return "ANTHROPIC_BASE_URL=https://clip.example ANTHROPIC_AUTH_TOKEN=sk-clip-json-1234", true, nil
+	})
+	defer restoreClipboard()
+	restoreEnv := envextract.SetLookupForTest(addEnvUniverse(map[string]string{
+		"OPENAI_BASE_URL": "https://env-json.example/v1",
+		"OPENAI_API_KEY":  "sk-env-json-1234",
+	}))
+	defer restoreEnv()
+	restoreTTY := SetIsTerminalForTest(func(*os.File) bool { return false })
+	defer restoreTTY()
+
+	stdout, _, err := runAddInner(t, "multijson")
+	if err == nil {
+		t.Fatalf("runAdd --auto multi json non-tty unexpectedly succeeded\nstdout=%s", stdout)
+	}
+	if !strings.Contains(err.Error(), "multiple new credentials discovered") {
+		t.Fatalf("error missing multi-candidate refusal: %v", err)
+	}
+	var out jsonAddAutoDisambiguation
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", stdout, err)
+	}
+	if out.Action != "auto-disambiguation-required" {
+		t.Fatalf("Action = %q", out.Action)
+	}
+	if len(out.Candidates) != 2 {
+		t.Fatalf("Candidates len = %d, want 2; stdout=%s", len(out.Candidates), stdout)
+	}
+	for _, candidate := range out.Candidates {
+		if candidate.Status != "NEW" {
+			t.Fatalf("candidate status = %q, want NEW", candidate.Status)
+		}
+		if candidate.Source == "" || candidate.BaseURL == "" || candidate.APIKey == "" {
+			t.Fatalf("candidate missing structured fields: %+v", candidate)
+		}
+	}
+	for _, secret := range []string{"sk-clip-json-1234", "sk-env-json-1234"} {
+		if strings.Contains(stdout, secret) {
+			t.Fatalf("stdout leaked secret %q:\n%s", secret, stdout)
+		}
+	}
+	if !strings.Contains(stdout, "sk-c***1234") || !strings.Contains(stdout, "sk-e***1234") {
+		t.Fatalf("stdout missing redacted keys:\n%s", stdout)
 	}
 }
 

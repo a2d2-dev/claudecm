@@ -273,7 +273,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := validateAddInputSources(hasPreset); err != nil {
+	if err := validateAddInputSources(hasPreset, baseURLFlagSet, apiKeyFlagSet); err != nil {
 		return err
 	}
 	fromInputSource := addAutoFlag || addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "" || strings.TrimSpace(addFromTextFlag) != ""
@@ -392,7 +392,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if hasPreset && addAPIKeyFlag == "" {
 		return fmt.Errorf("preset %q requires --api-key in non-interactive add", preset.Name)
 	}
-	if fromInputSource && !addAutoFlag && strings.TrimSpace(apiKey) == "" {
+	if fromInputSource && strings.TrimSpace(apiKey) == "" {
 		return fmt.Errorf("no API key found in input source")
 	}
 
@@ -467,7 +467,7 @@ func resolveAddPreset(raw string) (presets.Preset, bool, error) {
 	return p, true, nil
 }
 
-func validateAddInputSources(hasPreset bool) error {
+func validateAddInputSources(hasPreset, baseURLFlagSet, apiKeyFlagSet bool) error {
 	fromFileSet := strings.TrimSpace(addFromFileFlag) != ""
 	fromTextSet := strings.TrimSpace(addFromTextFlag) != ""
 	count := 0
@@ -488,6 +488,9 @@ func validateAddInputSources(hasPreset bool) error {
 	}
 	if count > 1 {
 		return fmt.Errorf("choose only one add input source: --preset, --from-env, --from-file, --from-text, or --auto")
+	}
+	if addAutoFlag && (baseURLFlagSet || apiKeyFlagSet) {
+		return fmt.Errorf("choose only one add identity source: --auto, --base-url, or --api-key")
 	}
 	if addAIFlag && !fromTextSet {
 		return fmt.Errorf("--ai requires --from-text")
