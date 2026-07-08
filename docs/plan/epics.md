@@ -219,7 +219,7 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - Secrets are redacted by default in every preview (`--dry-run` / prompt) per NFR-S8; profile-name validation (NFR-S5) and overwrite guard are unchanged.
 - Docs and `--help` state the local-first default and that only the opt-in `--ai` path makes a (secret-free) network request.
 
-**Stories.** E13-S1, E13-S2, E13-S3, E13-S4, E13-S5, E13-S6 (`add --auto`/`-a` one-flag source sweep with dedup — added 2026-07-08; collapses the five source flags into one "just find my key" path and skips already-recorded credentials).
+**Stories.** E13-S1, E13-S2, E13-S3, E13-S4, E13-S5, E13-S6, E13-S7 (`add --auto`/`-a` — S6 added the one-flag sweep; S7 corrects it to a nameless, multi-profile discovery that registers one auto-named profile per discovered credential and reads sources leniently).
 
 ---
 
@@ -237,5 +237,5 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - E10: 4 stories
 - E11: 4 stories
 - E12: 5 stories
-- E13: 6 stories
-- **Total: 13 epics, 75 stories.**
+- E13: 7 stories
+- **Total: 13 epics, 76 stories.**

@@ -47,11 +47,15 @@ zero-network paths are the default and the network path is explicit opt-in:
    the held secret locally, then routes through the normal `add` preview/validation. This is the
    only E13 path that uses the network.
 
-5. **`add --auto` / `-a`** (E13-S6) — a convenience mode that sweeps every **local** source at once
-   (clipboard, environment, `~/.claude/settings.json`, `~/.codex/{auth.json,config.toml}`), dedups
-   discovered credentials against existing profiles by `(base_url, api_key)`, and offers only the new
-   ones. Zero network; never combined with `--ai`. This exists because five source flags are more
-   choice than the common "just find my key" case warrants.
+5. **`add --auto` / `-a`** (E13-S6, corrected by E13-S7) — a nameless discovery mode that sweeps
+   every **local** source at once (clipboard, environment, `~/.claude/settings.json`,
+   `~/.codex/{auth.json,config.toml}`), collapses candidates sharing `(base_url, api_key)`, dedups
+   against existing profiles, and **registers each remaining new credential as its own auto-named
+   profile** — because a sweep finds several distinct credentials and each is a distinct profile.
+   Discovery reads sources **leniently** (read-only), not via the strict write-path `Import`, so a
+   `config.toml` with unknown `[projects."…"]` sections never suppresses the `auth.json` credential.
+   Zero network; never combined with `--ai`. This exists because five source flags are more choice
+   than the common "just find my keys" case warrants.
 
 All four paths converge on the existing `add` pipeline: they only produce a `config.Profile` draft,
 which is then subject to the same `--dry-run`, redaction (NFR-S8), name validation (NFR-S5),
