@@ -47,6 +47,12 @@ zero-network paths are the default and the network path is explicit opt-in:
    the held secret locally, then routes through the normal `add` preview/validation. This is the
    only E13 path that uses the network.
 
+5. **`add --auto` / `-a`** (E13-S6) — a convenience mode that sweeps every **local** source at once
+   (clipboard, environment, `~/.claude/settings.json`, `~/.codex/{auth.json,config.toml}`), dedups
+   discovered credentials against existing profiles by `(base_url, api_key)`, and offers only the new
+   ones. Zero network; never combined with `--ai`. This exists because five source flags are more
+   choice than the common "just find my key" case warrants.
+
 All four paths converge on the existing `add` pipeline: they only produce a `config.Profile` draft,
 which is then subject to the same `--dry-run`, redaction (NFR-S8), name validation (NFR-S5),
 overwrite guard, and `SaveProfile` invariants. No E13 path writes a Claude Code or Codex tool file
@@ -66,6 +72,10 @@ directly, and no path auto-activates the new profile (activation stays `switch`)
    plainly.
 3. **No new command.** E13 adds flags/inputs to the existing `add` command (ADR-0001 Decision 3).
    It does not introduce a new top-level command.
+4. **Clipboard read is admitted for `--auto` only (reverses the E13 non-goal below).** claudecm MAY
+   read the OS clipboard read-only, best-effort, as one source of the `--auto` sweep, degrading
+   silently when no clipboard tool is present. This is a local read; it is not network access and
+   does not admit clipboard *writes* or any always-on clipboard watching.
 
 ## Locked Decisions
 
@@ -97,7 +107,8 @@ directly, and no path auto-activates the new profile (activation stays `switch`)
 
 ## Explicit Non-Goals
 
-- No clipboard integration (paste is via argument or stdin `-`); OS clipboard access is deferred.
+- Clipboard: read-only, best-effort clipboard access is admitted **only** as an `--auto` sweep
+  source (Amendment 4). Clipboard *writes* and always-on clipboard watching remain out.
 - No batch/multi-profile import from one blob; one draft per invocation.
 - No provider auto-detection beyond field extraction (we do not map a base URL to an official
   provider identity or claim support).

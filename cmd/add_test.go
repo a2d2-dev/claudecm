@@ -34,6 +34,11 @@ import (
 	"github.com/a2d2-dev/claudecm/internal/storage"
 )
 
+var (
+	addBaseURLFlagExplicit bool
+	addAPIKeyFlagExplicit  bool
+)
+
 // resetAddFlags restores the package-level flag vars to their init()
 // defaults.
 func resetAddFlags() {
@@ -41,6 +46,8 @@ func resetAddFlags() {
 	addProviderFlag = addProviderDefault
 	addBaseURLFlag = ""
 	addAPIKeyFlag = ""
+	addBaseURLFlagExplicit = false
+	addAPIKeyFlagExplicit = false
 	addModelFlag = ""
 	addSmallFastModelFlag = ""
 	addSetFlag = nil
@@ -48,6 +55,7 @@ func resetAddFlags() {
 	addFromEnvFlag = false
 	addFromFileFlag = ""
 	addFromTextFlag = ""
+	addAutoFlag = false
 	addAIFlag = false
 	addAIProfileFlag = ""
 	addListPresetsFlag = false
@@ -112,11 +120,11 @@ func bindSyntheticAddFlags(cmd *cobra.Command) {
 		_ = cmd.Flags().Set("provider", addProviderFlag)
 	}
 	cmd.Flags().String("base-url", addBaseURLFlag, "")
-	if addBaseURLFlag != "" {
+	if addBaseURLFlag != "" || addBaseURLFlagExplicit {
 		_ = cmd.Flags().Set("base-url", addBaseURLFlag)
 	}
 	cmd.Flags().String("api-key", addAPIKeyFlag, "")
-	if addAPIKeyFlag != "" {
+	if addAPIKeyFlag != "" || addAPIKeyFlagExplicit {
 		_ = cmd.Flags().Set("api-key", addAPIKeyFlag)
 	}
 	cmd.Flags().String("model", addModelFlag, "")
@@ -126,6 +134,10 @@ func bindSyntheticAddFlags(cmd *cobra.Command) {
 	cmd.Flags().String("small-fast-model", addSmallFastModelFlag, "")
 	if addSmallFastModelFlag != "" {
 		_ = cmd.Flags().Set("small-fast-model", addSmallFastModelFlag)
+	}
+	cmd.Flags().Bool("auto", addAutoFlag, "")
+	if addAutoFlag {
+		_ = cmd.Flags().Set("auto", "true")
 	}
 }
 

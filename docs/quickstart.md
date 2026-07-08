@@ -91,6 +91,14 @@ Use `--from-text -` to read stdin:
 cat provider-snippet.txt | claudecm add work --from-text - --dry-run
 ```
 
+For the lowest-friction local onboarding, `--auto` / `-a` sweeps the clipboard, environment, `~/.claude/settings.json`, and `~/.codex/{auth.json,config.toml}` in order. It drops candidates without an API key, marks anything already recorded by the same `(base_url, api_key)`, and never uses the network. Missing sources, such as no clipboard tool on PATH, are reported and do not stop the rest of the sweep.
+
+```bash
+claudecm add work --auto --dry-run
+```
+
+Expected: a redacted discovery list. If exactly one new credential is found, the normal add preview/save path continues. If several are found, interactive terminals ask which one to use; non-interactive runs refuse with a redacted list so you can disambiguate.
+
 If the local extractor is not enough, `--ai` is opt-in per invocation and only runs in an interactive terminal. claudecm strips secret-shaped tokens locally, keeps captured secrets in-process, shows the exact desensitized payload for confirmation, and sends only the confirmed desensitized text in one Anthropic-compatible Messages request using the active profile's credentials, or `--ai-profile <name>` if you choose another credential-lending profile. Non-interactive or piped `--ai` runs refuse before sending.
 
 ```bash
