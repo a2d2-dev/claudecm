@@ -394,33 +394,72 @@ func normalizeSecretToken(secret string) string {
 
 // ParseCoreJSON parses the LLM's strict core JSON object.
 func ParseCoreJSON(text string) (config.CoreConfig, error) {
-	dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(text)))
+	dec := json.NewDecoder(strings.NewReader(stripOuterMarkdownFence(text)))
 	dec.DisallowUnknownFields()
-	var raw map[string]string
+	var raw coreJSONFields
 	if err := dec.Decode(&raw); err != nil {
 		return config.CoreConfig{}, fmt.Errorf("--ai parse response was not strict core JSON")
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return config.CoreConfig{}, fmt.Errorf("--ai parse response had trailing data")
 	}
-	var core config.CoreConfig
-	for key, value := range raw {
-		switch key {
-		case "base_url":
-			core.BaseURL = value
-		case "api_key":
-			core.APIKey = value
-		case "model":
-			core.Model = value
-		case "small_fast_model":
-			core.SmallFastModel = value
-		case "provider":
-			core.Provider = value
-		default:
-			return config.CoreConfig{}, fmt.Errorf("--ai parse response contained unsupported field %q", key)
-		}
+	core := config.CoreConfig{
+		BaseURL:        string(raw.BaseURL),
+		APIKey:         string(raw.APIKey),
+		Model:          string(raw.Model),
+		SmallFastModel: string(raw.SmallFastModel),
+		Provider:       string(raw.Provider),
+	}
+	if !coreHasAnyField(core) {
+		return config.CoreConfig{}, fmt.Errorf("--ai parse response contained no profile fields")
 	}
 	return core, nil
+}
+
+func stripOuterMarkdownFence(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "```") {
+		return trimmed
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 2 {
+		return trimmed
+	}
+
+	opener := strings.TrimSpace(lines[0])
+	lang := strings.TrimSpace(strings.TrimPrefix(opener, "```"))
+	if lang != "" && !strings.EqualFold(lang, "json") {
+		return trimmed
+	}
+
+	if strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return trimmed
+	}
+
+	return strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
+}
+
+type coreJSONFields struct {
+	BaseURL        strictJSONString `json:"base_url,omitempty"`
+	APIKey         strictJSONString `json:"api_key,omitempty"`
+	Model          strictJSONString `json:"model,omitempty"`
+	SmallFastModel strictJSONString `json:"small_fast_model,omitempty"`
+	Provider       strictJSONString `json:"provider,omitempty"`
+}
+
+type strictJSONString string
+
+func (s *strictJSONString) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("null string field")
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = strictJSONString(value)
+	return nil
 }
 
 func coreHasAnyField(core config.CoreConfig) bool {
