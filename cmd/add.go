@@ -188,7 +188,7 @@ EXAMPLES
   claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-...' --dry-run
   cat provider.txt | claudecm add work --from-text -
 
-  # Opt in to one secret-free LLM parse when local extraction is not enough.
+  # Opt in to one secret-free LLM parse from an interactive terminal.
   claudecm add work --from-text 'messy provider note with sk-...' --ai --dry-run
 
   # Discover built-in presets
@@ -222,7 +222,7 @@ func init() {
 	addCmd.Flags().BoolVar(&addFromEnvFlag, "from-env", false, "Build the profile draft from Claude Code / Codex environment variables")
 	addCmd.Flags().StringVar(&addFromFileFlag, "from-file", "", "Build the profile draft from a dotenv, shell, JSON, YAML, or TOML file")
 	addCmd.Flags().StringVar(&addFromTextFlag, "from-text", "", "Build the profile draft from pasted text locally; use '-' to read stdin")
-	addCmd.Flags().BoolVar(&addAIFlag, "ai", false, "With --from-text, opt in to one secret-free Anthropic-compatible LLM parse")
+	addCmd.Flags().BoolVar(&addAIFlag, "ai", false, "With --from-text, opt in to one interactive, reviewed, secret-free Anthropic-compatible LLM parse")
 	addCmd.Flags().StringVar(&addAIProfileFlag, "ai-profile", "", "Profile whose Anthropic-compatible credentials are borrowed for --ai parsing")
 	addCmd.Flags().BoolVar(&addListPresetsFlag, "list-presets", false, "List built-in provider presets and exit")
 	addCmd.Flags().StringArrayVar(&addSetFlag, "set", nil,
@@ -543,22 +543,23 @@ func profileDraftFromText(cmd *cobra.Command, store *storage.FileStorage) (confi
 	if err := aiparse.EnsureSecretFree(parsed.Desensitized); err != nil {
 		return config.CoreConfig{}, err
 	}
+	if !isTerminal(os.Stdin) {
+		return config.CoreConfig{}, fmt.Errorf("--ai requires an interactive terminal to review the desensitized payload before sending; it is not available in non-interactive/piped mode")
+	}
 	lenderName, creds, err := resolveAddAICredentials(store)
 	if err != nil {
 		return config.CoreConfig{}, err
 	}
-	if isTerminal(os.Stdin) {
-		fmt.Fprintf(cmd.OutOrStdout(), "--ai will borrow credentials from profile %q.\n", lenderName)
-		fmt.Fprintln(cmd.OutOrStdout(), "--- desensitized payload to send ---")
-		fmt.Fprintln(cmd.OutOrStdout(), parsed.Desensitized)
-		fmt.Fprintln(cmd.OutOrStdout(), "--- end desensitized payload ---")
-		ok, promptErr := promptConfirm(cmd.OutOrStdout(), os.Stdin, "Send this secret-free payload for --ai parsing?")
-		if promptErr != nil {
-			return config.CoreConfig{}, fmt.Errorf("read confirmation: %w", promptErr)
-		}
-		if !ok {
-			return config.CoreConfig{}, fmt.Errorf("--ai parse refused by user")
-		}
+	fmt.Fprintf(cmd.OutOrStdout(), "--ai will borrow credentials from profile %q.\n", lenderName)
+	fmt.Fprintln(cmd.OutOrStdout(), "--- desensitized payload to send ---")
+	fmt.Fprintln(cmd.OutOrStdout(), parsed.Desensitized)
+	fmt.Fprintln(cmd.OutOrStdout(), "--- end desensitized payload ---")
+	ok, promptErr := promptConfirm(cmd.OutOrStdout(), os.Stdin, "Send this secret-free payload for --ai parsing?")
+	if promptErr != nil {
+		return config.CoreConfig{}, fmt.Errorf("read confirmation: %w", promptErr)
+	}
+	if !ok {
+		return config.CoreConfig{}, fmt.Errorf("--ai parse refused by user")
 	}
 
 	aiCore, err := newAddLLMParser().Parse(context.Background(), parsed.Desensitized, creds)

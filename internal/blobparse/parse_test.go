@@ -32,8 +32,12 @@ func TestParseExtractsFieldsAndDesensitizes(t *testing.T) {
 			wantProvider:       "anthropic",
 		},
 		{
-			name:         "prose labels",
-			input:        `Base URL: https://proxy.example.test/v1, API Key: sk-prose-secret123, model: claude-opus-4`,
+			name: "prose labels",
+			input: strings.Join([]string{
+				`Base URL: https://proxy.example.test/v1`,
+				`API Key: sk-prose-secret123`,
+				`model: claude-opus-4`,
+			}, "\n"),
 			wantBaseURL:  "https://proxy.example.test/v1",
 			wantAPIKey:   "sk-prose-secret123",
 			wantModel:    "claude-opus-4",
@@ -124,6 +128,45 @@ func TestParseRedactsSecretNamedFieldsWithoutSecretShape(t *testing.T) {
 	}
 }
 
+func TestParseRedactsSecretNamedUnquotedValueToEndOfLine(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`API Key: sk-ai-input-1234`,
+		`AUTH=Bearer opaque-session-id-123456`,
+		`model claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	for _, secret := range []string{"sk-ai-input-1234", "Bearer opaque-session-id-123456", "opaque-session-id-123456"} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	if !strings.Contains(got.Desensitized, "model claude-sonnet") {
+		t.Fatalf("Desensitized swallowed next line:\n%s", got.Desensitized)
+	}
+}
+
+func TestParseRedactsAuthorizationSecretNamedField(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`Authorization: Bearer opaque-session-id-123456`,
+		`model claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	for _, secret := range []string{"Bearer opaque-session-id-123456", "opaque-session-id-123456"} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	if !strings.Contains(got.Desensitized, "model claude-sonnet") {
+		t.Fatalf("Desensitized swallowed next line:\n%s", got.Desensitized)
+	}
+}
+
 func TestParseRedactsGenericSecretNamedFieldsWithoutSecretShape(t *testing.T) {
 	input := strings.Join([]string{
 		`Base URL: https://api.example.com`,
@@ -179,7 +222,7 @@ func TestParseNoRecognizableFieldsPreservesPlainText(t *testing.T) {
 }
 
 func TestParseReusesStablePlaceholderForRepeatedSecret(t *testing.T) {
-	input := "ANTHROPIC_AUTH_TOKEN=sk-repeat-secret and API Key: sk-repeat-secret"
+	input := "ANTHROPIC_AUTH_TOKEN=sk-repeat-secret\nAPI Key: sk-repeat-secret"
 
 	got := Parse(input)
 

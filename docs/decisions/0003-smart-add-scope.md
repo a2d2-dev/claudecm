@@ -42,9 +42,10 @@ zero-network paths are the default and the network path is explicit opt-in:
 3. **`add --from-text` / `--from-text -` (stdin)** — run the shared **local redaction + heuristic
    extractor** over pasted text and produce a profile draft. Local only.
 4. **`add --ai`** — escalation, **off by default**. Uses the shared extractor to strip and hold
-   secrets locally, sends only the desensitized text to an LLM, receives a structured profile,
-   re-injects the held secret locally, then routes through the normal `add` preview/validation.
-   This is the only E13 path that uses the network.
+   secrets locally, requires an interactive TTY to show and confirm the full desensitized payload,
+   sends only the confirmed desensitized text to an LLM, receives a structured profile, re-injects
+   the held secret locally, then routes through the normal `add` preview/validation. This is the
+   only E13 path that uses the network.
 
 All four paths converge on the existing `add` pipeline: they only produce a `config.Profile` draft,
 which is then subject to the same `--dry-run`, redaction (NFR-S8), name validation (NFR-S5),
@@ -55,9 +56,10 @@ directly, and no path auto-activates the new profile (activation stays `switch`)
 
 1. **ADR-0001 Decision 8 ("no cloud") is narrowly amended for E13's `--ai` path only.** claudecm
    MAY make a single outbound LLM request to parse desensitized text into a profile draft, strictly
-   when the user opts in via `--ai`. This does not admit cloud sync, telemetry, a proxy, a gateway,
-   remote credential validation, or any always-on network behavior. Every non-`--ai` path, and the
-   default of every path, remains zero-network.
+   when the user opts in via `--ai` and confirms the desensitized payload in an interactive TTY.
+   This does not admit cloud sync, telemetry, a proxy, a gateway, remote credential validation, or
+   any always-on network behavior. Every non-`--ai` path, every non-interactive `--ai` invocation,
+   and the default of every path remains zero-network.
 2. **README "never sees a request" is refined, not revoked.** The tool still never sees, proxies, or
    routes a *tool* request (Claude Code / Codex traffic). The `--ai` path issues its own,
    user-initiated, secret-free parse request and nothing else. Docs MUST state this distinction
@@ -72,7 +74,9 @@ directly, and no path auto-activates the new profile (activation stays `switch`)
    have been removed/placeholdered. Re-injection of the real secret happens locally after the LLM
    responds. A verifiable redaction step (secret token → placeholder) is an acceptance gate, not a
    nicety. If redaction cannot be established for a candidate secret, that token is stripped
-   entirely rather than risk transit (no fallback that leaks).
+   entirely rather than risk transit (no fallback that leaks). `--ai` MUST require interactive
+   confirmation of the full desensitized payload before the parse request; non-interactive or piped
+   invocations refuse before sending.
 2. **AI is opt-in and off by default.** Absent `--ai`, `add --from-text` uses only the local
    heuristic and never touches the network. `--ai` must be typed explicitly per invocation; there is
    no persisted "always use AI" mode in E13.
@@ -112,8 +116,8 @@ rule is what makes the AI path defensible against ADR-0001's spirit even while a
 
 - **R1. Redaction miss → secret leak on the `--ai` path.** This is the load-bearing risk.
   Mitigation: redaction is a tested gate with a conservative "strip on doubt" rule; `--ai` shows the
-  exact desensitized payload before sending when interactive; unit tests assert no secret-shaped
-  token survives into the outbound request.
+  exact desensitized payload before sending and requires interactive confirmation; non-interactive
+  runs refuse; unit tests assert no secret-shaped token survives into the outbound request.
 - **R2. Heuristic false extraction** (wrong field grabbed). Mitigation: every path ends in
   `--dry-run`/preview with redacted secrets; nothing is saved without confirmation.
 - **R3. Scope creep toward "AI everywhere."** Mitigation: `--ai` is per-invocation, single-request,

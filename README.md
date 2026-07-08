@@ -16,7 +16,7 @@ People juggling multiple Anthropic or OpenAI accounts, relay endpoints, or work-
 
 ## Not for
 
-claudecm does **not** sync your configuration to the cloud, is **not** a proxy or gateway for Claude Code or Codex traffic, does **not** support Gemini CLI / Cursor / Windsurf / other IDE plugins in v1, and does **not** encrypt profiles at rest — they are plaintext YAML at file mode `0600` under `~/.claudecm/` (deferred post-v1 per ADR-0001 and PRD NFR-D1). The only networked onboarding path is `add --from-text ... --ai`, which is explicit per run and sends one locally desensitized parse request using your chosen claudecm profile credentials. If you need vault-grade secret storage, wire claudecm's `import`/`export` around your existing secret manager instead.
+claudecm does **not** sync your configuration to the cloud, is **not** a proxy or gateway for Claude Code or Codex traffic, does **not** support Gemini CLI / Cursor / Windsurf / other IDE plugins in v1, and does **not** encrypt profiles at rest — they are plaintext YAML at file mode `0600` under `~/.claudecm/` (deferred post-v1 per ADR-0001 and PRD NFR-D1). The only networked onboarding path is `add --from-text ... --ai`, which is explicit per run, requires an interactive terminal to review and confirm the desensitized payload, and sends one locally desensitized parse request using your chosen claudecm profile credentials. If you need vault-grade secret storage, wire claudecm's `import`/`export` around your existing secret manager instead.
 
 ## Install
 
@@ -71,9 +71,9 @@ claudecm add work --preset moonshot --api-key sk-ant-xxxxxxxx
 # use the network; --dry-run previews the redacted draft without writing.
 claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-ant-xxxxxxxx' --dry-run
 
-# Optional AI parse is opt-in per invocation. claudecm strips secret-shaped
-# tokens locally, shows the desensitized payload on a TTY, then sends one
-# Anthropic-compatible messages request only when --ai is present.
+# Optional AI parse is opt-in per invocation and requires an interactive TTY.
+# claudecm strips secret-shaped tokens locally, shows the desensitized payload
+# for confirmation, then sends one Anthropic-compatible messages request.
 claudecm add work --from-text 'messy provider note with sk-ant-xxxxxxxx' --ai --dry-run
 
 # 3. Switch.
@@ -148,7 +148,7 @@ Presets are convenience templates, not official provider support, certification,
 - `--from-file <path>` parses dotenv, shell, JSON, YAML, or TOML config files.
 - `--from-text <text>` or `--from-text -` parses pasted text with local heuristics.
 
-These paths are local-first. Without `--ai`, pasted text never leaves the machine. `--ai` is an explicit escalation for `--from-text`: claudecm runs the local redaction pass first, keeps captured secrets in-process, sends only the desensitized text to an Anthropic-compatible Messages endpoint using the active profile's credentials (or `--ai-profile <name>`), then re-injects the secret locally before the normal redacted preview/save path.
+These paths are local-first. Without `--ai`, pasted text never leaves the machine. `--ai` is an explicit escalation for `--from-text`: claudecm requires an interactive terminal, runs the local redaction pass first, shows the full desensitized payload for confirmation, keeps captured secrets in-process, sends only the confirmed desensitized text to an Anthropic-compatible Messages endpoint using the active profile's credentials (or `--ai-profile <name>`), then re-injects the secret locally before the normal redacted preview/save path. Non-interactive or piped `--ai` runs refuse before any parse request is sent.
 
 ## Deeper reading
 

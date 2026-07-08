@@ -295,16 +295,11 @@ func registerGenericSecrets(text string, candidates []fieldCandidate, registry *
 }
 
 func registerSecretNamedFields(text string, registry *secretRegistry) {
-	re := regexp.MustCompile(secretNamedAssignmentPattern())
-	matches := re.FindAllStringSubmatchIndex(text, -1)
-	for _, match := range matches {
-		if len(match) < 8 || match[4] < 0 || match[5] < 0 || match[6] < 0 || match[7] < 0 {
+	for _, assignment := range secretNamedAssignments(text) {
+		if !isSecretFieldName(assignment.name) {
 			continue
 		}
-		if !isSecretFieldName(text[match[4]:match[5]]) {
-			continue
-		}
-		value := cleanValue(text[match[6]:match[7]], fieldAPIKey)
+		value := cleanValue(assignment.value, fieldAPIKey)
 		if value == "" {
 			continue
 		}
@@ -312,9 +307,60 @@ func registerSecretNamedFields(text string, registry *secretRegistry) {
 	}
 }
 
-func secretNamedAssignmentPattern() string {
-	valuePattern := `((?:\{\{CLAUDECM_SECRET_[0-9]+\}\}|"(?:\\.|[^"\\])*"|'[^'\n]*'|` + "`" + `[^` + "`" + `\n]*` + "`" + `|[^\s,;#}\]]+))`
-	return `(?i)(^|[\s{[,;])(?:export[ \t]+)?["']?([A-Za-z][A-Za-z0-9 _-]{0,80})["']?[ \t]*[:=][ \t]*` + valuePattern
+type secretNamedAssignment struct {
+	name  string
+	value string
+}
+
+func secretNamedAssignments(text string) []secretNamedAssignment {
+	prefixRe := regexp.MustCompile(`(?i)(^|[\s{[,;])(?:export[ \t]+)?["']?([A-Za-z][A-Za-z0-9 _-]{0,80})["']?[ \t]*[:=][ \t]*`)
+	var out []secretNamedAssignment
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		matches := prefixRe.FindAllStringSubmatchIndex(line, -1)
+		for _, match := range matches {
+			if len(match) < 6 || match[4] < 0 || match[5] < 0 {
+				continue
+			}
+			out = append(out, secretNamedAssignment{
+				name:  line[match[4]:match[5]],
+				value: assignmentLineValue(line[match[1]:]),
+			})
+		}
+	}
+	return out
+}
+
+func assignmentLineValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	switch value[0] {
+	case '"':
+		return consumeQuotedValue(value, '"', true)
+	case '\'':
+		return consumeQuotedValue(value, '\'', false)
+	case '`':
+		return consumeQuotedValue(value, '`', false)
+	default:
+		return value
+	}
+}
+
+func consumeQuotedValue(value string, quote byte, allowEscape bool) string {
+	escaped := false
+	for i := 1; i < len(value); i++ {
+		if allowEscape && !escaped && value[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if !escaped && value[i] == quote {
+			return value[:i+1]
+		}
+		escaped = false
+	}
+	return value
 }
 
 func isSecretFieldName(name string) bool {
@@ -323,23 +369,30 @@ func isSecretFieldName(name string) bool {
 		return false
 	}
 	compact := strings.Join(fields, "")
-	switch compact {
-	case "apikey", "privatekey", "accesskey", "clientsecret":
-		return true
-	}
-	for _, field := range fields {
-		switch field {
-		case "secret", "password", "passwd", "pwd", "token", "auth", "credential", "credentials":
-			return true
-		}
-	}
-	for i := 0; i+1 < len(fields); i++ {
-		switch fields[i] + " " + fields[i+1] {
-		case "api key", "private key", "access key", "client secret":
+	for _, marker := range secretFieldNameMarkers() {
+		if compact == marker || strings.HasPrefix(compact, marker) || strings.Contains(compact, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func secretFieldNameMarkers() []string {
+	return []string{
+		"secret",
+		"password",
+		"passwd",
+		"pwd",
+		"token",
+		"apikey",
+		"auth",
+		"authorization",
+		"credential",
+		"credentials",
+		"privatekey",
+		"accesskey",
+		"clientsecret",
+	}
 }
 
 func normalizedNameFields(name string) []string {

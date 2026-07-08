@@ -140,7 +140,7 @@ func TestAddAI_HappyMockReinjectsSecretAndDryRunRedacts(t *testing.T) {
 	addAIFlag = true
 	addDryRunFlag = true
 
-	stdout, _, err := runAddInner(t, "aiprof")
+	stdout, _, err := runAddInnerInteractive(t, "y\n", "aiprof")
 	if err != nil {
 		t.Fatalf("runAdd --from-text --ai: %v", err)
 	}
@@ -185,11 +185,18 @@ func TestAddAI_RedactsSecretNamedFieldsBeforeParser(t *testing.T) {
 	}
 	restore := SetAddLLMParserForTest(func() addLLMParser { return parser })
 	t.Cleanup(restore)
-	addFromTextFlag = "Base URL: https://api.example.com API Key: sk-input-secret-1234 CLIENT_SECRET=prod-secret-value PASSWORD=plain-password DATABASE_TOKEN=db-token-value model claude-sonnet"
+	addFromTextFlag = strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`API Key: sk-input-secret-1234`,
+		`CLIENT_SECRET=prod-secret-value`,
+		`PASSWORD=plain-password`,
+		`DATABASE_TOKEN=db-token-value`,
+		`model claude-sonnet`,
+	}, "\n")
 	addAIFlag = true
 	addDryRunFlag = true
 
-	stdout, _, err := runAddInner(t, "airedact")
+	stdout, _, err := runAddInnerInteractive(t, "y\n", "airedact")
 	if err != nil {
 		t.Fatalf("runAdd --from-text --ai: %v", err)
 	}
@@ -238,7 +245,7 @@ func TestAddAI_ExplicitAPIKeyOverridesReinjectedSecret(t *testing.T) {
 	addAIFlag = true
 	addAPIKeyFlag = "sk-explicit-ai-1234"
 
-	if _, _, err := runAddInner(t, "aiexplicit"); err != nil {
+	if _, _, err := runAddInnerInteractive(t, "y\n", "aiexplicit"); err != nil {
 		t.Fatalf("runAdd --ai explicit key: %v", err)
 	}
 	loaded, err := h.store.LoadProfile("aiexplicit")
@@ -255,7 +262,7 @@ func TestAddAI_EdgeCredentialAndProtocolRefusals(t *testing.T) {
 		h := newAddHarness(t)
 		addFromTextFlag = "API Key: sk-ai-input-1234"
 		addAIFlag = true
-		_, _, err := runAddInner(t, "noactive")
+		_, _, err := runAddInnerInteractive(t, "y\n", "noactive")
 		if err == nil || !strings.Contains(err.Error(), "no credentials available for --ai parse") {
 			t.Fatalf("err = %v", err)
 		}
@@ -269,7 +276,7 @@ func TestAddAI_EdgeCredentialAndProtocolRefusals(t *testing.T) {
 		addFromTextFlag = "API Key: sk-ai-input-1234"
 		addAIFlag = true
 		addAIProfileFlag = "missing"
-		_, _, err := runAddInner(t, "missing")
+		_, _, err := runAddInnerInteractive(t, "y\n", "missing")
 		if err == nil || !strings.Contains(err.Error(), `profile "missing" for --ai parse could not be loaded`) {
 			t.Fatalf("err = %v", err)
 		}
@@ -285,7 +292,7 @@ func TestAddAI_EdgeCredentialAndProtocolRefusals(t *testing.T) {
 		}, true)
 		addFromTextFlag = "API Key: sk-ai-input-1234"
 		addAIFlag = true
-		_, _, err := runAddInner(t, "nonanth")
+		_, _, err := runAddInnerInteractive(t, "y\n", "nonanth")
 		if err == nil || !strings.Contains(err.Error(), "Anthropic-compatible messages endpoints") {
 			t.Fatalf("err = %v", err)
 		}
@@ -311,7 +318,7 @@ func TestAddAI_MalformedMockResponseRefusesWithoutWriteAndNoCredentialLeak(t *te
 	addFromTextFlag = "API Key: sk-ai-input-1234"
 	addAIFlag = true
 
-	_, _, err := runAddInner(t, "badai")
+	_, _, err := runAddInnerInteractive(t, "y\n", "badai")
 	if err == nil {
 		t.Fatalf("malformed AI output accepted")
 	}
@@ -343,7 +350,7 @@ func TestAddAI_ResponseAPIKeyMustBeCapturedPlaceholder(t *testing.T) {
 	addFromTextFlag = "API Key: sk-ai-input-1234"
 	addAIFlag = true
 
-	_, _, err := runAddInner(t, "aiguess")
+	_, _, err := runAddInnerInteractive(t, "y\n", "aiguess")
 	if err == nil {
 		t.Fatalf("AI guessed api_key accepted")
 	}
@@ -358,6 +365,149 @@ func TestAddAI_ResponseAPIKeyMustBeCapturedPlaceholder(t *testing.T) {
 	}
 }
 
+func TestAddAI_RedactsBearerTokenLineBeforeParser(t *testing.T) {
+	h := newAddHarness(t)
+	seedAIProfile(t, h, "lender", config.CoreConfig{
+		Provider: "anthropic",
+		BaseURL:  "https://api.anthropic.com",
+		APIKey:   "sk-lender-secret-1234",
+		Model:    "claude-lender",
+	}, true)
+	parser := &mockAddLLMParser{
+		core: config.CoreConfig{
+			Provider: "anthropic",
+			BaseURL:  "https://api.example.com",
+			APIKey:   "{{CLAUDECM_SECRET_1}}",
+			Model:    "claude-sonnet",
+		},
+	}
+	restore := SetAddLLMParserForTest(func() addLLMParser { return parser })
+	t.Cleanup(restore)
+	addFromTextFlag = strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`API Key: sk-ai-input-1234`,
+		`AUTH=Bearer opaque-session-id-123456`,
+		`model claude-sonnet`,
+	}, "\n")
+	addAIFlag = true
+	addDryRunFlag = true
+
+	stdout, _, err := runAddInnerInteractive(t, "y\n", "aibearer")
+	if err != nil {
+		t.Fatalf("runAdd --from-text --ai: %v", err)
+	}
+	if parser.calls != 1 {
+		t.Fatalf("parser calls = %d, want 1", parser.calls)
+	}
+	for _, secret := range []string{
+		"sk-ai-input-1234",
+		"Bearer opaque-session-id-123456",
+		"opaque-session-id-123456",
+		"sk-lender-secret-1234",
+	} {
+		if strings.Contains(parser.desensitized, secret) {
+			t.Fatalf("outbound desensitized payload leaked %q:\n%s", secret, parser.desensitized)
+		}
+		if strings.Contains(stdout, secret) {
+			t.Fatalf("stdout leaked %q:\n%s", secret, stdout)
+		}
+	}
+	if !strings.Contains(parser.desensitized, "model claude-sonnet") {
+		t.Fatalf("outbound desensitized payload swallowed next line:\n%s", parser.desensitized)
+	}
+}
+
+func TestAddAI_RedactsAuthorizationBeforeParser(t *testing.T) {
+	h := newAddHarness(t)
+	seedAIProfile(t, h, "lender", config.CoreConfig{
+		Provider: "anthropic",
+		BaseURL:  "https://api.anthropic.com",
+		APIKey:   "sk-lender-secret-1234",
+		Model:    "claude-lender",
+	}, true)
+	parser := &mockAddLLMParser{
+		core: config.CoreConfig{
+			Provider: "anthropic",
+			BaseURL:  "https://api.example.com",
+			APIKey:   "{{CLAUDECM_SECRET_1}}",
+			Model:    "claude-sonnet",
+		},
+	}
+	restore := SetAddLLMParserForTest(func() addLLMParser { return parser })
+	t.Cleanup(restore)
+	addFromTextFlag = strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`Authorization: Bearer opaque-session-id-123456`,
+		`API Key: sk-ai-input-1234`,
+		`model claude-sonnet`,
+	}, "\n")
+	addAIFlag = true
+	addDryRunFlag = true
+
+	stdout, _, err := runAddInnerInteractive(t, "y\n", "aiauthz")
+	if err != nil {
+		t.Fatalf("runAdd --from-text --ai: %v", err)
+	}
+	if parser.calls != 1 {
+		t.Fatalf("parser calls = %d, want 1", parser.calls)
+	}
+	for _, secret := range []string{
+		"sk-ai-input-1234",
+		"Bearer opaque-session-id-123456",
+		"opaque-session-id-123456",
+		"sk-lender-secret-1234",
+	} {
+		if strings.Contains(parser.desensitized, secret) {
+			t.Fatalf("outbound desensitized payload leaked %q:\n%s", secret, parser.desensitized)
+		}
+		if strings.Contains(stdout, secret) {
+			t.Fatalf("stdout leaked %q:\n%s", secret, stdout)
+		}
+	}
+}
+
+func TestAddAI_NonInteractiveRefusesBeforeParser(t *testing.T) {
+	h := newAddHarness(t)
+	seedAIProfile(t, h, "lender", config.CoreConfig{
+		Provider: "anthropic",
+		BaseURL:  "https://api.anthropic.com",
+		APIKey:   "sk-lender-secret-1234",
+		Model:    "claude-lender",
+	}, true)
+	parser := &mockAddLLMParser{
+		core: config.CoreConfig{
+			Provider: "anthropic",
+			BaseURL:  "https://api.example.com",
+			APIKey:   "{{CLAUDECM_SECRET_1}}",
+			Model:    "claude-sonnet",
+		},
+	}
+	restoreParser := SetAddLLMParserForTest(func() addLLMParser { return parser })
+	t.Cleanup(restoreParser)
+	restoreTTY := SetIsTerminalForTest(func(*os.File) bool { return false })
+	t.Cleanup(restoreTTY)
+	addFromTextFlag = strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`API Key: sk-ai-input-1234`,
+		`model claude-sonnet`,
+	}, "\n")
+	addAIFlag = true
+
+	_, _, err := runAddInner(t, "ainontty")
+	if err == nil {
+		t.Fatalf("non-interactive --ai accepted")
+	}
+	if !strings.Contains(err.Error(), "--ai requires an interactive terminal") {
+		t.Fatalf("err = %v", err)
+	}
+	if parser.calls != 0 {
+		t.Fatalf("parser calls = %d, want 0", parser.calls)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "ainontty.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written despite non-interactive refusal: %v", statErr)
+	}
+}
+
 func runAddInnerWithInput(t *testing.T, input string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	var out, errBuf bytes.Buffer
@@ -368,6 +518,24 @@ func runAddInnerWithInput(t *testing.T, input string, args ...string) (stdout, s
 	cmd.SetIn(strings.NewReader(input))
 	err = runAdd(cmd, args)
 	return out.String(), errBuf.String(), err
+}
+
+func runAddInnerInteractive(t *testing.T, input string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	restoreTTY := SetIsTerminalForTest(func(*os.File) bool { return true })
+	t.Cleanup(restoreTTY)
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatalf("os.Pipe: %v", pipeErr)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig })
+	if _, writeErr := w.WriteString(input); writeErr != nil {
+		t.Fatalf("write stdin pipe: %v", writeErr)
+	}
+	_ = w.Close()
+	return runAddInner(t, args...)
 }
 
 type mockAddLLMParser struct {

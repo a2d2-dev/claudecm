@@ -101,6 +101,33 @@ func TestClientParseRefusesOutboundSecretNamedAssignmentBeforeTransport(t *testi
 	}
 }
 
+func TestEnsureSecretFreeRefusesAuthorizationAndAuthLineRemainders(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "authorization bearer",
+			text: "Base URL: https://api.example.com\nAuthorization: Bearer opaque-session-id-123456\nmodel claude-sonnet",
+		},
+		{
+			name: "auth bearer",
+			text: "Base URL: https://api.example.com\nAUTH=Bearer opaque-session-id-123456\nmodel claude-sonnet",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := EnsureSecretFree(tt.text)
+			if err == nil {
+				t.Fatalf("EnsureSecretFree accepted residual secret-named assignment")
+			}
+			if strings.Contains(err.Error(), "opaque-session-id-123456") {
+				t.Fatalf("error leaked secret: %v", err)
+			}
+		})
+	}
+}
+
 func TestClientParseStripsUserinfoFromEndpoint(t *testing.T) {
 	var gotURL string
 	client := NewClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {

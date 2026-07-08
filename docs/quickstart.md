@@ -91,7 +91,7 @@ Use `--from-text -` to read stdin:
 cat provider-snippet.txt | claudecm add work --from-text - --dry-run
 ```
 
-If the local extractor is not enough, `--ai` is opt-in per invocation. claudecm strips secret-shaped tokens locally, keeps captured secrets in-process, and sends only the desensitized text in one Anthropic-compatible Messages request using the active profile's credentials, or `--ai-profile <name>` if you choose another credential-lending profile. Interactive runs show the exact desensitized payload before sending.
+If the local extractor is not enough, `--ai` is opt-in per invocation and only runs in an interactive terminal. claudecm strips secret-shaped tokens locally, keeps captured secrets in-process, shows the exact desensitized payload for confirmation, and sends only the confirmed desensitized text in one Anthropic-compatible Messages request using the active profile's credentials, or `--ai-profile <name>` if you choose another credential-lending profile. Non-interactive or piped `--ai` runs refuse before sending.
 
 ```bash
 claudecm add work --from-text 'messy provider note with sk-ant-xxxxxxxx' --ai --dry-run
