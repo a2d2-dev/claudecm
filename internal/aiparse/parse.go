@@ -60,6 +60,9 @@ func (c *Client) Parse(ctx context.Context, desensitized string, creds Credentia
 	if strings.TrimSpace(creds.Model) == "" {
 		return config.CoreConfig{}, fmt.Errorf("credential-lending profile has no model for --ai parse")
 	}
+	if err := EnsureSecretFree(desensitized); err != nil {
+		return config.CoreConfig{}, err
+	}
 
 	endpoint, err := messagesEndpoint(creds.BaseURL)
 	if err != nil {
@@ -137,6 +140,7 @@ func messagesEndpoint(rawBaseURL string) (string, error) {
 	if base.Scheme != "http" && base.Scheme != "https" || base.Host == "" {
 		return "", fmt.Errorf("invalid --ai credential base URL")
 	}
+	base.User = nil
 	base.RawQuery = ""
 	base.Fragment = ""
 	path := strings.TrimRight(base.Path, "/")
@@ -172,6 +176,9 @@ func EnsureSecretFree(text string) error {
 	if secretShapePresent(text) {
 		return fmt.Errorf("refusing to send --ai parse payload: desensitized text still contains a secret-shaped token")
 	}
+	if secretNamedAssignmentPresent(text) {
+		return fmt.Errorf("refusing to send --ai parse payload: desensitized text still contains a secret-named assignment")
+	}
 	return nil
 }
 
@@ -192,6 +199,86 @@ func secretShapePresent(text string) bool {
 		}
 	}
 	return false
+}
+
+func secretNamedAssignmentPresent(text string) bool {
+	re := regexp.MustCompile(secretNamedAssignmentPattern())
+	matches := re.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		if len(match) < 4 {
+			continue
+		}
+		value := cleanAssignmentValue(match[3])
+		if isSecretFieldName(match[2]) && value != "" && !isSecretPlaceholder(value) {
+			return true
+		}
+	}
+	return false
+}
+
+func secretNamedAssignmentPattern() string {
+	valuePattern := `((?:\{\{CLAUDECM_SECRET_[0-9]+\}\}|"(?:\\.|[^"\\])*"|'[^'\n]*'|` + "`" + `[^` + "`" + `\n]*` + "`" + `|[^\s,;#}\]]+))`
+	return `(?i)(^|[\s{[,;])(?:export[ \t]+)?["']?([A-Za-z][A-Za-z0-9 _-]{0,80})["']?[ \t]*[:=][ \t]*` + valuePattern
+}
+
+func isSecretFieldName(name string) bool {
+	fields := normalizedNameFields(name)
+	if len(fields) == 0 {
+		return false
+	}
+	compact := strings.Join(fields, "")
+	switch compact {
+	case "apikey", "privatekey", "accesskey", "clientsecret":
+		return true
+	}
+	for _, field := range fields {
+		switch field {
+		case "secret", "password", "passwd", "pwd", "token", "auth", "credential", "credentials":
+			return true
+		}
+	}
+	for i := 0; i+1 < len(fields); i++ {
+		switch fields[i] + " " + fields[i+1] {
+		case "api key", "private key", "access key", "client secret":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedNameFields(name string) []string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == ' ' || r == '\t':
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Fields(b.String())
+}
+
+func cleanAssignmentValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if isSecretPlaceholder(value) {
+		return value
+	}
+	switch {
+	case strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`):
+		value = strings.Trim(value, `"`)
+	case strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'"):
+		value = strings.Trim(value, "'")
+	case strings.HasPrefix(value, "`") && strings.HasSuffix(value, "`"):
+		value = strings.Trim(value, "`")
+	default:
+		value = strings.TrimRight(value, ".,)]")
+	}
+	return strings.TrimSpace(value)
+}
+
+func isSecretPlaceholder(value string) bool {
+	return regexp.MustCompile(`^\{\{CLAUDECM_SECRET_[0-9]+\}\}$`).MatchString(strings.TrimSpace(value))
 }
 
 func secretShapePatterns() []string {

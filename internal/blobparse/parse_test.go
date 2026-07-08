@@ -124,6 +124,44 @@ func TestParseRedactsSecretNamedFieldsWithoutSecretShape(t *testing.T) {
 	}
 }
 
+func TestParseRedactsGenericSecretNamedFieldsWithoutSecretShape(t *testing.T) {
+	input := strings.Join([]string{
+		`Base URL: https://api.example.com`,
+		`CLIENT_SECRET=prod-secret-value`,
+		`PASSWORD='plain password value'`,
+		`export DATABASE_TOKEN=db-token-value`,
+		`"private key": "plain-private-key-value"`,
+		`model: claude-sonnet`,
+	}, "\n")
+
+	got := Parse(input)
+
+	if got.Core.BaseURL != "https://api.example.com" {
+		t.Fatalf("Core.BaseURL = %q", got.Core.BaseURL)
+	}
+	if got.Core.Model != "claude-sonnet" {
+		t.Fatalf("Core.Model = %q", got.Core.Model)
+	}
+	for _, secret := range []string{
+		"prod-secret-value",
+		"plain password value",
+		"db-token-value",
+		"plain-private-key-value",
+	} {
+		if strings.Contains(got.Desensitized, secret) {
+			t.Fatalf("Desensitized leaked %q:\n%s", secret, got.Desensitized)
+		}
+	}
+	for _, nonSecret := range []string{"https://api.example.com", "claude-sonnet"} {
+		if !strings.Contains(got.Desensitized, nonSecret) {
+			t.Fatalf("Desensitized removed non-secret %q:\n%s", nonSecret, got.Desensitized)
+		}
+	}
+	if len(got.CapturedSecrets) != 4 {
+		t.Fatalf("CapturedSecrets len = %d, want 4: %#v", len(got.CapturedSecrets), got.CapturedSecrets)
+	}
+}
+
 func TestParseNoRecognizableFieldsPreservesPlainText(t *testing.T) {
 	input := "hello there\nthis blob has no profile fields"
 

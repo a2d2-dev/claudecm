@@ -75,6 +75,60 @@ func TestClientParseRefusesOutboundSecretShapeBeforeTransport(t *testing.T) {
 	}
 }
 
+func TestClientParseRefusesOutboundSecretNamedAssignmentBeforeTransport(t *testing.T) {
+	called := false
+	client := NewClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		called = true
+		return nil, nil
+	}))
+
+	_, err := client.Parse(context.Background(),
+		"Base URL: https://api.example.com SECRET=not-a-secret-shape",
+		Credentials{
+			BaseURL: "https://api.anthropic.com",
+			APIKey:  "sk-lender-secret-1234",
+			Model:   "claude-lender",
+		},
+	)
+	if err == nil {
+		t.Fatalf("Parse accepted secret-named assignment payload")
+	}
+	if called {
+		t.Fatalf("transport was called despite secret-named assignment payload")
+	}
+	if strings.Contains(err.Error(), "not-a-secret-shape") || strings.Contains(err.Error(), "sk-lender-secret-1234") {
+		t.Fatalf("error leaked secret: %v", err)
+	}
+}
+
+func TestClientParseStripsUserinfoFromEndpoint(t *testing.T) {
+	var gotURL string
+	client := NewClient(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotURL = req.URL.String()
+		if req.URL.User != nil {
+			t.Fatalf("request URL retained userinfo: %s", req.URL.Redacted())
+		}
+		if strings.Contains(gotURL, "sk-url-secret-123456") || strings.Contains(gotURL, "@") {
+			t.Fatalf("request URL leaked userinfo: %s", gotURL)
+		}
+		return jsonResponse(200, `{"content":[{"type":"text","text":"{\"base_url\":\"https://api.example.com\",\"model\":\"claude-test\"}"}]}`), nil
+	}))
+
+	if _, err := client.Parse(context.Background(),
+		"Base URL: https://api.example.com model claude-test",
+		Credentials{
+			BaseURL: "https://user:sk-url-secret-123456@api.anthropic.com/custom?secret=drop#frag",
+			APIKey:  "sk-lender-secret-1234",
+			Model:   "claude-lender",
+		},
+	); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if gotURL != "https://api.anthropic.com/custom/v1/messages" {
+		t.Fatalf("request URL = %q", gotURL)
+	}
+}
+
 func TestClientParseRefusesMalformedAndNonConformingResponses(t *testing.T) {
 	tests := []struct {
 		name string

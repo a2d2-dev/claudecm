@@ -39,6 +39,7 @@ func Parse(text string) Result {
 			registry.placeholderFor(candidate.value)
 		}
 	}
+	registerSecretNamedFields(text, registry)
 	registerGenericSecrets(text, candidates, registry)
 
 	desensitized := registry.desensitize(text)
@@ -291,6 +292,67 @@ func registerGenericSecrets(text string, candidates []fieldCandidate, registry *
 		}
 	}
 	registerHighEntropySecrets(text, candidates, registry)
+}
+
+func registerSecretNamedFields(text string, registry *secretRegistry) {
+	re := regexp.MustCompile(secretNamedAssignmentPattern())
+	matches := re.FindAllStringSubmatchIndex(text, -1)
+	for _, match := range matches {
+		if len(match) < 8 || match[4] < 0 || match[5] < 0 || match[6] < 0 || match[7] < 0 {
+			continue
+		}
+		if !isSecretFieldName(text[match[4]:match[5]]) {
+			continue
+		}
+		value := cleanValue(text[match[6]:match[7]], fieldAPIKey)
+		if value == "" {
+			continue
+		}
+		registry.placeholderFor(value)
+	}
+}
+
+func secretNamedAssignmentPattern() string {
+	valuePattern := `((?:\{\{CLAUDECM_SECRET_[0-9]+\}\}|"(?:\\.|[^"\\])*"|'[^'\n]*'|` + "`" + `[^` + "`" + `\n]*` + "`" + `|[^\s,;#}\]]+))`
+	return `(?i)(^|[\s{[,;])(?:export[ \t]+)?["']?([A-Za-z][A-Za-z0-9 _-]{0,80})["']?[ \t]*[:=][ \t]*` + valuePattern
+}
+
+func isSecretFieldName(name string) bool {
+	fields := normalizedNameFields(name)
+	if len(fields) == 0 {
+		return false
+	}
+	compact := strings.Join(fields, "")
+	switch compact {
+	case "apikey", "privatekey", "accesskey", "clientsecret":
+		return true
+	}
+	for _, field := range fields {
+		switch field {
+		case "secret", "password", "passwd", "pwd", "token", "auth", "credential", "credentials":
+			return true
+		}
+	}
+	for i := 0; i+1 < len(fields); i++ {
+		switch fields[i] + " " + fields[i+1] {
+		case "api key", "private key", "access key", "client secret":
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedNameFields(name string) []string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-' || r == ' ' || r == '\t':
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Fields(b.String())
 }
 
 func scrubResidualSecretShapes(text string, candidates []fieldCandidate) string {

@@ -167,6 +167,56 @@ func TestAddAI_HappyMockReinjectsSecretAndDryRunRedacts(t *testing.T) {
 	}
 }
 
+func TestAddAI_RedactsSecretNamedFieldsBeforeParser(t *testing.T) {
+	h := newAddHarness(t)
+	seedAIProfile(t, h, "lender", config.CoreConfig{
+		Provider: "anthropic",
+		BaseURL:  "https://api.anthropic.com",
+		APIKey:   "sk-lender-secret-1234",
+		Model:    "claude-lender",
+	}, true)
+	parser := &mockAddLLMParser{
+		core: config.CoreConfig{
+			Provider: "anthropic",
+			BaseURL:  "https://api.example.com",
+			APIKey:   "{{CLAUDECM_SECRET_1}}",
+			Model:    "claude-sonnet",
+		},
+	}
+	restore := SetAddLLMParserForTest(func() addLLMParser { return parser })
+	t.Cleanup(restore)
+	addFromTextFlag = "Base URL: https://api.example.com API Key: sk-input-secret-1234 CLIENT_SECRET=prod-secret-value PASSWORD=plain-password DATABASE_TOKEN=db-token-value model claude-sonnet"
+	addAIFlag = true
+	addDryRunFlag = true
+
+	stdout, _, err := runAddInner(t, "airedact")
+	if err != nil {
+		t.Fatalf("runAdd --from-text --ai: %v", err)
+	}
+	if parser.calls != 1 {
+		t.Fatalf("parser calls = %d, want 1", parser.calls)
+	}
+	for _, secret := range []string{
+		"sk-input-secret-1234",
+		"prod-secret-value",
+		"plain-password",
+		"db-token-value",
+		"sk-lender-secret-1234",
+	} {
+		if strings.Contains(parser.desensitized, secret) {
+			t.Fatalf("parser desensitized payload leaked %q:\n%s", secret, parser.desensitized)
+		}
+		if strings.Contains(stdout, secret) {
+			t.Fatalf("dry-run output leaked %q:\n%s", secret, stdout)
+		}
+	}
+	for _, want := range []string{"CLIENT_SECRET={{CLAUDECM_SECRET_", "PASSWORD={{CLAUDECM_SECRET_", "DATABASE_TOKEN={{CLAUDECM_SECRET_"} {
+		if !strings.Contains(parser.desensitized, want) {
+			t.Fatalf("parser desensitized payload missing redacted assignment %q:\n%s", want, parser.desensitized)
+		}
+	}
+}
+
 func TestAddAI_ExplicitAPIKeyOverridesReinjectedSecret(t *testing.T) {
 	h := newAddHarness(t)
 	seedAIProfile(t, h, "lender", config.CoreConfig{
