@@ -93,6 +93,7 @@ var (
 	addFromEnvFlag        bool
 	addFromFileFlag       string
 	addFromTextFlag       string
+	addAutoFlag           bool
 	addAIFlag             bool
 	addAIProfileFlag      string
 	addListPresetsFlag    bool
@@ -188,6 +189,9 @@ EXAMPLES
   claudecm add work --from-text 'ANTHROPIC_BASE_URL=https://api.anthropic.com ANTHROPIC_AUTH_TOKEN=sk-...' --dry-run
   cat provider.txt | claudecm add work --from-text -
 
+  # Sweep local sources and skip credentials already recorded.
+  claudecm add work --auto --dry-run
+
   # Opt in to one secret-free LLM parse from an interactive terminal.
   claudecm add work --from-text 'messy provider note with sk-...' --ai --dry-run
 
@@ -222,6 +226,7 @@ func init() {
 	addCmd.Flags().BoolVar(&addFromEnvFlag, "from-env", false, "Build the profile draft from Claude Code / Codex environment variables")
 	addCmd.Flags().StringVar(&addFromFileFlag, "from-file", "", "Build the profile draft from a dotenv, shell, JSON, YAML, or TOML file")
 	addCmd.Flags().StringVar(&addFromTextFlag, "from-text", "", "Build the profile draft from pasted text locally; use '-' to read stdin")
+	addCmd.Flags().BoolVarP(&addAutoFlag, "auto", "a", false, "Sweep clipboard, environment, and known tool configs; skip already-recorded credentials")
 	addCmd.Flags().BoolVar(&addAIFlag, "ai", false, "With --from-text, opt in to one interactive, reviewed, secret-free Anthropic-compatible LLM parse")
 	addCmd.Flags().StringVar(&addAIProfileFlag, "ai-profile", "", "Profile whose Anthropic-compatible credentials are borrowed for --ai parsing")
 	addCmd.Flags().BoolVar(&addListPresetsFlag, "list-presets", false, "List built-in provider presets and exit")
@@ -271,7 +276,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if err := validateAddInputSources(hasPreset); err != nil {
 		return err
 	}
-	fromInputSource := addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "" || strings.TrimSpace(addFromTextFlag) != ""
+	fromInputSource := addAutoFlag || addFromEnvFlag || strings.TrimSpace(addFromFileFlag) != "" || strings.TrimSpace(addFromTextFlag) != ""
 	if fromInputSource {
 		providerFlagSet = flagWasExplicit(cmd, "provider", false)
 		baseURLFlagSet = flagWasExplicit(cmd, "base-url", false)
@@ -304,6 +309,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		baseURL = preset.BaseURL
 		model = preset.Model
 		tools = cloneToolMap(preset.Tools)
+	}
+	if addAutoFlag {
+		core, autoTools, done, err := profileDraftFromAuto(cmd, resv, store, format)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		if core.Provider != "" {
+			provider = core.Provider
+		}
+		baseURL = core.BaseURL
+		apiKey = core.APIKey
+		model = core.Model
+		smallFastModel = core.SmallFastModel
+		tools = mergeToolMaps(tools, autoTools)
 	}
 	if addFromEnvFlag {
 		core, envTools, err := profileDraftFromEnv()
@@ -370,7 +392,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	if hasPreset && addAPIKeyFlag == "" {
 		return fmt.Errorf("preset %q requires --api-key in non-interactive add", preset.Name)
 	}
-	if fromInputSource && strings.TrimSpace(apiKey) == "" {
+	if fromInputSource && !addAutoFlag && strings.TrimSpace(apiKey) == "" {
 		return fmt.Errorf("no API key found in input source")
 	}
 
@@ -461,8 +483,11 @@ func validateAddInputSources(hasPreset bool) error {
 	if fromTextSet {
 		count++
 	}
+	if addAutoFlag {
+		count++
+	}
 	if count > 1 {
-		return fmt.Errorf("choose only one add input source: --preset, --from-env, --from-file, or --from-text")
+		return fmt.Errorf("choose only one add input source: --preset, --from-env, --from-file, --from-text, or --auto")
 	}
 	if addAIFlag && !fromTextSet {
 		return fmt.Errorf("--ai requires --from-text")

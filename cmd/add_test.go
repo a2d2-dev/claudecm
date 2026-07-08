@@ -48,6 +48,7 @@ func resetAddFlags() {
 	addFromEnvFlag = false
 	addFromFileFlag = ""
 	addFromTextFlag = ""
+	addAutoFlag = false
 	addAIFlag = false
 	addAIProfileFlag = ""
 	addListPresetsFlag = false
@@ -126,6 +127,10 @@ func bindSyntheticAddFlags(cmd *cobra.Command) {
 	cmd.Flags().String("small-fast-model", addSmallFastModelFlag, "")
 	if addSmallFastModelFlag != "" {
 		_ = cmd.Flags().Set("small-fast-model", addSmallFastModelFlag)
+	}
+	cmd.Flags().Bool("auto", addAutoFlag, "")
+	if addAutoFlag {
+		_ = cmd.Flags().Set("auto", "true")
 	}
 }
 
