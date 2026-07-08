@@ -60,11 +60,33 @@ func TestAdd_FromEnvNoKeyRefusesWithoutWrite(t *testing.T) {
 	if err == nil {
 		t.Fatalf("--from-env without key accepted")
 	}
-	if !strings.Contains(err.Error(), "no API key found in environment") {
+	if !strings.Contains(err.Error(), "no API key found in input source") {
 		t.Fatalf("error = %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "nokey.yaml")); !os.IsNotExist(statErr) {
 		t.Fatalf("profile file written despite missing env key: %v", statErr)
+	}
+}
+
+func TestAdd_FromEnvNoKeyWithExplicitAPIKeyAllowed(t *testing.T) {
+	h := newAddHarness(t)
+	restore := envextract.SetLookupForTest(addEnvUniverse(map[string]string{
+		"ANTHROPIC_BASE_URL": "https://env.example.com",
+		"ANTHROPIC_MODEL":    "claude-env-model",
+	}))
+	t.Cleanup(restore)
+	addFromEnvFlag = true
+	addAPIKeyFlag = "sk-flag-env-1234"
+
+	if _, _, err := runAddInner(t, "envflagkey"); err != nil {
+		t.Fatalf("runAdd --from-env --api-key: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("envflagkey")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.APIKey != "sk-flag-env-1234" {
+		t.Fatalf("APIKey = %q, want flag value", loaded.Core.APIKey)
 	}
 }
 

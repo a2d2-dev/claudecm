@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -20,7 +21,10 @@ import (
 
 const maxProfileCoreFileBytes = 1 << 20
 
-var errUnrecognizedFormat = errors.New("unrecognized config format")
+var (
+	errUnrecognizedFormat = errors.New("unrecognized config format")
+	errInvalidQuotedValue = errors.New("invalid quoted value")
+)
 
 // ParseProfileCoreFile reads path once and parses known local config
 // formats into profile core fields. It is read-only: all writes remain
@@ -44,9 +48,6 @@ func ParseProfileCoreFile(path string) (config.CoreConfig, error) {
 		}
 		return config.CoreConfig{}, fmt.Errorf("%w: %s", errUnrecognizedFormat, err)
 	}
-	if strings.TrimSpace(core.APIKey) == "" {
-		return config.CoreConfig{}, fmt.Errorf("no API key found in file")
-	}
 	return core, nil
 }
 
@@ -66,10 +67,16 @@ func ParseProfileCoreBytes(ext string, body []byte) (config.CoreConfig, error) {
 	for _, parser := range parsers {
 		values, err := parser(trimmed)
 		if err != nil {
+			if errors.Is(err, errInvalidQuotedValue) {
+				return config.CoreConfig{}, err
+			}
 			lastErr = err
 			continue
 		}
-		core := coreFromValues(values)
+		core, err := coreFromValues(values)
+		if err != nil {
+			return config.CoreConfig{}, err
+		}
 		if !coreHasAnyField(core) {
 			lastErr = fmt.Errorf("no usable profile fields found")
 			continue
@@ -165,7 +172,7 @@ func parseKeyValueLines(text string) (map[string]string, error) {
 		value := strings.TrimSpace(line[idx+1:])
 		unquoted, err := unquoteValue(value)
 		if err != nil {
-			return nil, fmt.Errorf("line %d has invalid quoted value: %w", lineNo+1, err)
+			return nil, fmt.Errorf("line %d has %w: %v", lineNo+1, errInvalidQuotedValue, err)
 		}
 		out[key] = unquoted
 		seenAssignment = true
@@ -178,13 +185,19 @@ func parseKeyValueLines(text string) (map[string]string, error) {
 
 func unquoteValue(value string) (string, error) {
 	value = strings.TrimSpace(stripInlineComment(value))
-	if len(value) < 2 {
+	if value == "" {
 		return value, nil
 	}
-	if value[0] == '\'' && value[len(value)-1] == '\'' {
+	if value[0] == '\'' {
+		if len(value) < 2 || value[len(value)-1] != '\'' {
+			return "", fmt.Errorf("unclosed single quote")
+		}
 		return value[1 : len(value)-1], nil
 	}
-	if value[0] == '"' && value[len(value)-1] == '"' {
+	if value[0] == '"' {
+		if len(value) < 2 || value[len(value)-1] != '"' {
+			return "", fmt.Errorf("unclosed double quote")
+		}
 		return strconv.Unquote(value)
 	}
 	return value, nil
@@ -251,20 +264,74 @@ func joinKey(prefix, key string) string {
 	return prefix + "." + key
 }
 
-func coreFromValues(values map[string]string) config.CoreConfig {
+func coreFromValues(values map[string]string) (config.CoreConfig, error) {
 	var core config.CoreConfig
-	for key, value := range values {
-		assignCoreField(&core, key, value)
+	assignments := canonicalAssignments(values)
+	for _, canonical := range sortedStringKeys(assignments) {
+		selected, err := selectCanonicalValue(canonical, assignments[canonical])
+		if err != nil {
+			return config.CoreConfig{}, err
+		}
+		assignCoreField(&core, canonical, selected.value)
 	}
 	if core.Provider == "openai" {
 		core.Provider = "openai-compat"
 	}
-	return core
+	return core, nil
+}
+
+type fieldAssignment struct {
+	key   string
+	value string
+}
+
+func canonicalAssignments(values map[string]string) map[string][]fieldAssignment {
+	out := map[string][]fieldAssignment{}
+	for key, value := range values {
+		canonical := canonicalFieldKey(key)
+		if canonical == "" {
+			continue
+		}
+		out[canonical] = append(out[canonical], fieldAssignment{key: key, value: value})
+	}
+	for canonical := range out {
+		sort.Slice(out[canonical], func(i, j int) bool {
+			return out[canonical][i].key < out[canonical][j].key
+		})
+	}
+	return out
+}
+
+func selectCanonicalValue(canonical string, assignments []fieldAssignment) (fieldAssignment, error) {
+	var selected fieldAssignment
+	for _, assignment := range assignments {
+		if strings.TrimSpace(assignment.value) == "" {
+			continue
+		}
+		if selected.key == "" {
+			selected = assignment
+			continue
+		}
+		if assignment.value != selected.value {
+			return fieldAssignment{}, fmt.Errorf("conflicting values for %s: %s=%s conflicts with %s=%s",
+				canonical,
+				selected.key,
+				displayParsedValue(canonical, selected.value),
+				assignment.key,
+				displayParsedValue(canonical, assignment.value))
+		}
+	}
+	if selected.key != "" {
+		return selected, nil
+	}
+	if len(assignments) == 0 {
+		return fieldAssignment{}, nil
+	}
+	return assignments[0], nil
 }
 
 func assignCoreField(core *config.CoreConfig, key, value string) {
-	canonical := canonicalFieldKey(key)
-	switch canonical {
+	switch key {
 	case "provider":
 		core.Provider = value
 	case "base_url":
@@ -276,6 +343,29 @@ func assignCoreField(core *config.CoreConfig, key, value string) {
 	case "small_fast_model":
 		core.SmallFastModel = value
 	}
+}
+
+func displayParsedValue(canonical, value string) string {
+	if canonical == "api_key" {
+		return redactParsedSecret(value)
+	}
+	return strconv.Quote(value)
+}
+
+func redactParsedSecret(value string) string {
+	if len(value) >= 8 {
+		return strconv.Quote(value[:4] + "***" + value[len(value)-4:])
+	}
+	return strconv.Quote("***")
+}
+
+func sortedStringKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func canonicalFieldKey(key string) string {

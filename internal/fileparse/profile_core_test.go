@@ -98,3 +98,51 @@ func TestParseProfileCoreBytes_UnrecognizedAndNoFields(t *testing.T) {
 		}
 	}
 }
+
+func TestParseProfileCoreBytes_ConflictingAliasesRefuseWithRedactedSecret(t *testing.T) {
+	_, err := ParseProfileCoreBytes(".json", []byte(`{"api_key":"sk-good-secret-1234","core":{"api_key":"sk-bad-secret-5678"}}`))
+	if err == nil {
+		t.Fatalf("ParseProfileCoreBytes accepted conflicting api_key aliases")
+	}
+	for _, want := range []string{
+		"conflicting values for api_key",
+		"api_key",
+		"core.api_key",
+		"sk-g***1234",
+		"sk-b***5678",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	for _, leaked := range []string{"sk-good-secret-1234", "sk-bad-secret-5678"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("error leaked plaintext secret %q: %v", leaked, err)
+		}
+	}
+}
+
+func TestParseProfileCoreBytes_SameAliasValueAllowed(t *testing.T) {
+	got, err := ParseProfileCoreBytes(".json", []byte(`{"api_key":"sk-same-secret-1234","core":{"api_key":"sk-same-secret-1234"}}`))
+	if err != nil {
+		t.Fatalf("ParseProfileCoreBytes: %v", err)
+	}
+	if got.APIKey != "sk-same-secret-1234" {
+		t.Fatalf("APIKey = %q", got.APIKey)
+	}
+}
+
+func TestParseProfileCoreBytes_UnclosedQuotedValueRefuses(t *testing.T) {
+	_, err := ParseProfileCoreBytes(".env", []byte(`ANTHROPIC_AUTH_TOKEN="sk-unclosed-1234`))
+	if err == nil {
+		t.Fatalf("ParseProfileCoreBytes accepted unclosed quoted value")
+	}
+	for _, want := range []string{"invalid quoted value", "unclosed double quote"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "sk-unclosed-1234") {
+		t.Fatalf("error leaked plaintext secret: %v", err)
+	}
+}

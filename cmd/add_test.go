@@ -569,6 +569,49 @@ func TestAdd_FromFileExplicitModelOverridesParsedValue(t *testing.T) {
 	}
 }
 
+func TestAdd_FromFileKeylessWithExplicitAPIKeyAllowed(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"base_url":"https://json.example.com","model":"json-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+	addAPIKeyFlag = "sk-flag-file-1234"
+
+	if _, _, err := runAddInner(t, "fileflagkey"); err != nil {
+		t.Fatalf("runAdd --from-file --api-key: %v", err)
+	}
+	loaded, err := h.store.LoadProfile("fileflagkey")
+	if err != nil {
+		t.Fatalf("LoadProfile: %v", err)
+	}
+	if loaded.Core.APIKey != "sk-flag-file-1234" {
+		t.Fatalf("APIKey = %q, want flag value", loaded.Core.APIKey)
+	}
+}
+
+func TestAdd_FromFileKeylessWithoutExplicitAPIKeyRefuses(t *testing.T) {
+	h := newAddHarness(t)
+
+	path := filepath.Join(h.home, "provider.json")
+	if err := os.WriteFile(path, []byte(`{"base_url":"https://json.example.com","model":"json-model"}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	addFromFileFlag = path
+
+	_, _, err := runAddInner(t, "filewithoutkey")
+	if err == nil {
+		t.Fatalf("keyless --from-file accepted without --api-key")
+	}
+	if !strings.Contains(err.Error(), "no API key found in input source") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(h.home, ".claudecm", "profiles", "filewithoutkey.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("profile file written despite missing file key: %v", statErr)
+	}
+}
+
 func TestAdd_FromFileUnreadableAndGarbageRefuseWithoutWrite(t *testing.T) {
 	h := newAddHarness(t)
 

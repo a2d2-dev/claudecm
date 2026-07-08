@@ -466,9 +466,6 @@ func profileDraftFromEnv() (config.CoreConfig, map[config.ToolID]config.ToolOver
 		core.Provider = codexProvider
 	}
 
-	if strings.TrimSpace(core.APIKey) == "" {
-		return config.CoreConfig{}, nil, fmt.Errorf("no API key found in environment")
-	}
 	return core, tools, nil
 }
 
