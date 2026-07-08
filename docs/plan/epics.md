@@ -203,6 +203,26 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 
 ---
 
+## E13. Smart `add` Onboarding
+
+> Authority: ADR-0003 (`docs/decisions/0003-smart-add-scope.md`) governs this epic. It narrowly amends ADR-0001 Decision 8 for the opt-in `--ai` parse path only; everything else stays zero-network and local-first.
+
+**Goal.** Collapse the three highest-friction onboarding flows into `add`: build a profile draft from environment variables, from a config file, or from pasted free text. Pasted text is parsed by a local redaction+heuristic extractor by default; an explicit `--ai` escalation strips secrets locally, sends only desensitized text to an LLM (borrowing the active profile's credentials), and re-injects the secret locally. Every path ends in the existing `add` preview/validation/save pipeline and never auto-activates or writes a tool file directly.
+
+**Acceptance criteria.**
+- `add --from-env` materializes a draft from the Claude Code / Codex env-var allowlist; zero network; missing required fields (no key) refused with a clear message.
+- `add --from-file <path>` auto-detects `.env` / shell `export` / JSON / YAML / TOML and parses into a draft; unreadable/unrecognized input is refused (NFR-S1), never half-populated; zero network.
+- A local redaction+heuristic extractor library exists (`internal/blobparse` or equivalent): given arbitrary text it returns extracted core fields **plus** a desensitized copy in which no secret-shaped token survives; "strip on doubt" — a candidate secret that cannot be safely placeholdered is removed, never passed through.
+- `add --from-text <text>` / `add --from-text -` (stdin) runs the local extractor and produces a draft; zero network.
+- `add --ai` is off by default and requires the flag per invocation. It runs the extractor, holds secrets locally, sends only the desensitized text to the LLM (active profile by default, `--ai-profile <name>` override), maps the structured response into the profile schema, re-injects the held secret locally, and refuses if the LLM output does not conform. Interactive runs name the credential-lending profile and show the desensitized payload before the call.
+- No E13 path probes a remote provider to validate a key/model; no secret is logged or persisted by the parse call; all drafts save through `storage.SaveProfile` and any activation still routes through `internal/commit` + `internal/writepath`.
+- Secrets are redacted by default in every preview (`--dry-run` / prompt) per NFR-S8; profile-name validation (NFR-S5) and overwrite guard are unchanged.
+- Docs and `--help` state the local-first default and that only the opt-in `--ai` path makes a (secret-free) network request.
+
+**Stories.** E13-S1, E13-S2, E13-S3, E13-S4, E13-S5.
+
+---
+
 ## Story count
 
 - E1: 7 stories
@@ -217,4 +237,5 @@ No story silently expands v1 scope: no MCP, no cloud, no GUI, no Gemini CLI / Cu
 - E10: 4 stories
 - E11: 4 stories
 - E12: 5 stories
-- **Total: 12 epics, 69 stories.**
+- E13: 5 stories
+- **Total: 13 epics, 74 stories.**
